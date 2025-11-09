@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brewery"
+version = "0.1.0"
+description = "A TUI for viewing and managing Homebrew packages"
+requires-python = ">=3.11"
+dependencies = [
+  "rich>=14.2.0",
+  "textual>=6.5.0"
+]
+
+[project.scripts]
+brewery = "brewery.app.main:run"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["brewery"]
