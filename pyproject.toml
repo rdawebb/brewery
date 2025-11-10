@@ -1,20 +1,45 @@
 [build-system]
-requires = ["setuptools", "wheel"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "brewery"
 version = "0.1.0"
-description = "A TUI for viewing and managing Homebrew packages"
+description = "Minimal Homebrew Package Manager"
 requires-python = ">=3.11"
 dependencies = [
-  "rich>=14.2.0",
-  "textual>=6.5.0"
+  "typer>=0.12",
+  "rich>=14.2",
+  "structlog>=25.0.0"
 ]
 
 [project.scripts]
-brewery = "brewery.app.main:run"
+brewery = "brewery.cli.main:app"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = ["E", "F", "I"]
+ignore = []
+
+[tool.ruff.format]
+quote-style = "double"
+
+[project.optional-dependencies]
+dev = ["ruff"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-packages = ["brewery"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.mypy]
+python-version = "3.11"
+strict = false
+warn_unused_ignores = true
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14.4",
+]

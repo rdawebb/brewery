@@ -1,72 +1,139 @@
-"""Shell command execution utilities."""
+"""Asynchronous shell command execution with timeout and JSON parsing."""
 
 from __future__ import annotations
 
 import asyncio
-from typing import AsyncIterator, Sequence
+import json
+import time
+from typing import Any, Optional
+
+from brewery.core.errors import BrewCommandError, BrewTimeoutError, retry_on_transient
+from brewery.core.logging import get_logger
+
+log = get_logger(__name__)
+
+ENV_OVERRIDES = {
+    "LANG": "C",
+    "HOMEBREW_NO_COLOR": "1",
+}
 
 
-class ShellError(RuntimeError):
-    """Custom error for shell command failures."""
-
-    def __init__(self, command: list[str], returncode: int, stderr: str) -> None:
-        super().__init__(
-            f"Command failed ({returncode}): {' '.join(command)}\n{stderr}"
-        )
-        self.command = command
-        self.returncode = returncode
-        self.stderr = stderr
-
-async def run_json(command: Sequence[str]) -> str:
-    """Run a shell command and return stdout text.
-
+async def run_capture(
+    *cmd: str, timeout: Optional[int] = 30
+) -> tuple[str, str, int]:
+    """Run a shell command asynchronously with optional timeout
+    
     Args:
-        command (Sequence[str]): The command to run.
-
+        *cmd: Command and its arguments to run.
+        timeout: Timeout in seconds.
+        
     Returns:
-        str: The stdout text from the command.
+        A tuple of (stdout, stderr, returncode).
 
     Raises:
-        ShellError: If non-zero exit code is returned.
+        BrewTimeoutError: If the command times out.
     """
+    start = time.perf_counter()
+    log.debug("command_start", command=" ".join(cmd), timeout=timeout)
+
     process = await asyncio.create_subprocess_exec(
-        *command,
+        *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
     )
 
-    stdout, stderr = await process.communicate()
-    if process.returncode != 0:
-        raise ShellError(list(command), process.returncode or -1, stderr.decode())
+    try:
+        out, err = await asyncio.wait_for(process.communicate(), timeout)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        log.info(
+            "command_complete",
+            command=" ".join(cmd),
+            returncode=process.returncode,
+            duration_ms=duration_ms
+        )
 
-    return stdout.decode()
+    except asyncio.TimeoutError as e:
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        log.error(
+            "command_timeout",
+            command=" ".join(cmd),
+            timeout=timeout,
+            duration_ms=duration_ms
+        )
+        try:
+            process.kill()
+        finally:
+            raise BrewTimeoutError(
+                f"Command timed out after {timeout}s",
+                context={
+                    "command": " ".join(cmd),
+                    "timeout": timeout,
+                    "duration_ms": duration_ms
+                }
+            ) from e
     
-async def stream(command: Sequence[str]) -> AsyncIterator[str]:
-    """Run a shell command and yield stdout lines as they are produced.
+    return out.decode().strip(), err.decode().strip(), process.returncode
+
+@retry_on_transient(max_retries=3, base_delay=1.0)
+async def run_json(*cmd: str, timeout: Optional[int] = 30) -> Any:
+    """Run a shell command and parse its JSON output.
+
+    Automatically retries on transient errors.
 
     Args:
-        command (Sequence[str]): The command to run.
-            
-    Yields:
-        str: Lines of stdout from the command.
+        *cmd: Command and its arguments to run.
+        timeout: Timeout in seconds.
+        
+    Returns:
+        Parsed JSON output.
 
     Raises:
-        ShellError: If non-zero exit code is returned.
+        BrewCommandError: If the command fails or JSON parsing fails.
+        BrewTimeoutError: If the command times out (retried automatically).
     """
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT
-    )
+    start = time.perf_counter()
+    out, err, code = await run_capture(*cmd, timeout=timeout)
+    duration_ms = int((time.perf_counter() - start) * 1000)
 
-    assert process.stdout is not None
+    if code != 0:
+        log.error(
+            "command_failed",
+            command=" ".join(cmd),
+            error=err or out,
+            returncode=code
+        )
+        raise BrewCommandError(
+            f"Brew command failed with exit code {code}",
+            context={
+                "command": " ".join(cmd),
+                "returncode": code,
+                "error": err or out,
+                "duration_ms": duration_ms
+            }
+        )
+    
     try:
-        while True:
-            line = await process.stdout.readline()
-            if not line:
-                break
-            yield line.decode(errors='replace').rstrip()
-    finally:
-        await process.wait()
-        if process.returncode != 0:
-            raise ShellError(list(command), process.returncode or -1, "")
+        result = json.loads(out)
+        log.debug(
+            "json_parsed",
+            command=" ".join(cmd),
+            duration_ms=duration_ms
+        )
+
+        return result
+    
+    except json.JSONDecodeError as e:
+        log.error(
+            "json_parse_failed",
+            command=" ".join(cmd),
+            error=str(e),
+            exc_info=True
+        )
+        raise BrewCommandError(
+            "Failed to parse JSON output",
+            context={
+                "command": " ".join(cmd),
+                "error": str(e),
+                "output_preview": out[:200] if out else ""
+            }
+        ) from e
