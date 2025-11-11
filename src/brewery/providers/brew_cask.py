@@ -73,11 +73,8 @@ async def info(name: str) -> Package:
     if not c:
         log.error("cask_not_found", package=name)
         raise PackageNotFoundError(
-            f"Cask '{name}' not found",
-            context={
-                "package": name,
-                "kind": "cask"
-            }
+            package=name,
+            kind="cask"
         )
 
     versions = [c.get("version")] if c.get("version") else []

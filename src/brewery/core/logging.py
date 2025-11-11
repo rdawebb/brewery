@@ -6,12 +6,34 @@ import logging
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Any
 
 import structlog
 from structlog.types import FilteringBoundLogger
 
 _CONFIGURED = False
 
+
+def sanitise_context(logger: Any, method_name: str, event_dict: dict) -> dict:
+    """Sanitize context by removing None values and ensuring error is a string.
+    
+    This processor ensures that structlog processors don't crash when encountering
+    None values in the context dictionary.
+    
+    Args:
+        logger: The logger instance.
+        method_name: The name of the method called on the logger.
+        event_dict: The event dictionary to sanitize.
+    
+    Returns:
+        The sanitized event dictionary.
+    """
+    sanitised = {k: v for k, v in event_dict.items() if v is not None}
+    
+    if "error" in sanitised and sanitised["error"] is None:
+        sanitised["error"] = ""
+
+    return sanitised
 
 def configure_logging(
     level: str = "INFO",
@@ -40,6 +62,7 @@ def configure_logging(
     file_handler.setLevel(getattr(logging, level.upper()))
 
     shared_processors = [
+        sanitise_context,
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,

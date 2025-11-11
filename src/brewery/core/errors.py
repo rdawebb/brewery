@@ -97,24 +97,164 @@ class SystemError(BrewError):
 
 ## Specific Exceptions ##
 
-class BrewCommandError(UserError):
-    """Brew command returned a non-zero exit code."""
-    pass
+class BrewCommandError(TransientError):
+    """Brew command returned a non-zero exit code.
+
+    Typically indicates:
+        - Network issues
+        - Brew service outages
+        - Rate limiting
+        - Corrupted local Brew installation
+
+    This will be retried automatically by the caller.
+    """
+    def __init__(
+        self,
+        message: str | None = None,
+        command: str | None = None,
+        returncode: int | None = None,
+        error: str | None = None,
+        context: dict[str, Any] | None = None
+    ) -> None:
+        """Initialise BrewCommandError with detailed context.
+        
+        Args:
+            message: Optional custom error message.
+            command: The brew command that was executed.
+            returncode: The exit code returned by the command.
+            error: The error output from the command.
+            context: Additional context information.
+        """
+        ctx = context or {}
+        if command:
+            ctx["command"] = command
+        if returncode is not None:
+            ctx["returncode"] = returncode
+        if error:
+            ctx["error"] = error if error is not None else ""
+        
+        if message is None:
+            message = f"Brew command failed with exit code {returncode or 'unknown'}"
+
+        super().__init__(message, context=ctx)
 
 
 class BrewTimeoutError(TransientError):
-    """Brew command timed out."""
-    pass
+    """Brew command timed out.
+
+    Typically indicates:
+        - Slow network conditions
+        - Brew server overload
+        - Very large package downloads
+        - System resource constraints
+
+    This will be retried automatically by the caller.
+    """
+    def __init__(
+        self,
+        message: str | None = None,
+        command: str | None = None,
+        timeout: int | None = None,
+        context: dict[str, Any] | None = None
+    ) -> None:
+        """Initialise BrewTimeoutError with detailed context.
+        
+        Args:
+            message: Optional custom error message.
+            command: The brew command that was executed.
+            timeout: The timeout threshold in seconds.
+            context: Additional context information.
+        """
+        ctx = context or {}
+        if command:
+            ctx["command"] = command
+        if timeout is not None:
+            ctx["timeout"] = timeout
+        
+        if message is None:
+            message = f"Brew command timed out after {timeout or 'unknown'}s"
+
+        super().__init__(message, context=ctx)
 
 
 class PackageNotFoundError(UserError):
-    """Requested package was not found in the repository."""
-    pass
+    """Requested package was not found in the repository.
+    
+    This is UserError - do not retry without changing the package name.
+    """
+    def __init__(
+        self,
+        message: str | None = None,
+        package: str | None = None,
+        kind: str | None = None,
+        context: dict[str, Any] | None = None
+    ) -> None:
+        """Initialise PackageNotFoundError with detailed context.
+        
+        Args:
+            message: Optional custom error message.
+            package: The name of the package that was not found.
+            kind: The kind of package (e.g., formula, cask).
+            context: Additional context information.
+        """
+        ctx = context or {}
+        if package:
+            ctx["package"] = package
+        if kind:
+            ctx["kind"] = kind
+        
+        if message is None:
+            kind_str = f" {kind}" if kind else ""
+            message = f"Package{kind_str} '{package or 'unknown'}' not found"
+
+        super().__init__(message, context=ctx)
 
 
 class CacheError(SystemError):
-    """Errors related to cache access or corruption."""
-    pass
+    """Errors related to cache access or corruption.
+    
+    Typically indicates:
+        - File system permission issues
+        - Disk space exhaustion
+        - Corrupted cache files
+        - Read-only file system
+        
+    This is a SystemError - may require user/system intervention.
+    """
+    def __init__(
+        self,
+        message: str | None = None,
+        key: str | None = None,
+        namespace: str | None = None,
+        path: str | None = None,
+        operation: str | None = None,
+        context: dict[str, Any] | None = None
+    ) -> None:
+        """Initialise CacheError with detailed context.
+        
+        Args:
+            message: Optional custom error message.
+            key: The cache key involved in the error.
+            namespace: The cache namespace or directory.
+            path: The file path involved in the error.
+            operation: The cache operation being performed.
+            context: Additional context information.
+        """
+        ctx = context or {}
+        if key:
+            ctx["key"] = key
+        if namespace:
+            ctx["namespace"] = namespace
+        if path:
+            ctx["path"] = path
+        if operation:
+            ctx["operation"] = operation
+
+        if message is None:
+            op_str = f"{operation}" if operation else ""
+            message = f"Cache {op_str} operation failed"
+
+        super().__init__(message, context=ctx)
 
 
 def retry_on_transient(
@@ -161,7 +301,7 @@ def retry_on_transient(
                             function=func.__name__,
                             attempts=max_retries,
                             error=str(e),
-                            context=e.context
+                                context=getattr(e, "context", {})
                         )
                         raise
 
@@ -173,7 +313,7 @@ def retry_on_transient(
                         max_attempts=max_retries,
                         delay_seconds=delay,
                         error=str(e),
-                        context=e.context
+                            context=getattr(e, "context", {})
                     )
                     await asyncio.sleep(delay)
 
@@ -195,7 +335,7 @@ def retry_on_transient(
                             function=func.__name__,
                             attempts=max_retries,
                             error=str(e),
-                            context=e.context
+                                context=getattr(e, "context", {})
                         )
                         raise
 
@@ -207,7 +347,7 @@ def retry_on_transient(
                         max_attempts=max_retries,
                         delay_seconds=delay,
                         error=str(e),
-                        context=e.context
+                            context=getattr(e, "context", {})
                     )
                     time.sleep(delay)
 
@@ -224,35 +364,38 @@ def retry_on_transient(
 # CLI Error Message Templates
 
 ERROR_TEMPLATES = {
-    PackageNotFoundError: {
+    PackageNotFoundError: (
         "❌ Package Not Found: {package}\n"
-            "   Suggestion: Try 'brewery search {package}' to find similar packages"
-    },
-    BrewTimeoutError: {
+        "   Suggestion: Try 'brewery search {package}' to find similar packages"
+    ),
+    BrewTimeoutError: (
         "⚠️ Command timed out after {timeout}s: {command}\n"
-            "   The operation took too long - this may be due to network issues"
-    },
-    BrewCommandError: {
+        "   The operation took too long - this may be due to network issues"
+    ),
+    BrewCommandError: (
         "⚠️ Brew command failed: {command}\n"
-            "   Exit Code: {returncode}\n"
-            "   Error: {error}"
-    },
-    CacheError: {
+        "   Exit Code: {returncode}\n"
+        "   Error: {error}"
+    ),
+    CacheError: (
         "⚠️ Cache error: {error}\n"
-            "   Location: {path}\n"
-            "   Fix: Check file permissions or clear cache with 'brewery cache clear'"
-    },
-    TransientError: {
+        "   Location: {path}\n"
+        "   Fix: Check file permissions or clear cache with 'brewery cache clear'"
+    ),
+    TransientError: (
         "⚠️ Temporary failure: {message}\n"
-            "   This may resolve itself - try again in a moment"
-    },
-    UserError: {
+        "   This may resolve itself - try again in a moment"
+    ),
+    UserError: (
         "❌ {message}"
-    },
-    SystemError: {
+    ),
+    SystemError: (
         "⚠️ System error: {message}\n"
-            "   Please check your system configuration and try again"
-    },
+        "   Please check your system configuration and try again"
+    ),
+    BrewError: (
+        "❌ {message}"
+    ),
 }
 
 def format_error_message(error: BrewError) -> str:
@@ -266,7 +409,7 @@ def format_error_message(error: BrewError) -> str:
     """
     template = ERROR_TEMPLATES.get(type(error), ERROR_TEMPLATES[BrewError])
     try:
-        return template.format(message=error.message, **error.context)
+        return template.format(message=error.message, **getattr(error, "context", {}))
     except KeyError:
         return f"❌ {error.message}"
 

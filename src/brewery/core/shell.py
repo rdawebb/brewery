@@ -64,12 +64,8 @@ async def run_capture(
             process.kill()
         finally:
             raise BrewTimeoutError(
-                f"Command timed out after {timeout}s",
-                context={
-                    "command": " ".join(cmd),
-                    "timeout": timeout,
-                    "duration_ms": duration_ms
-                }
+                command=" ".join(cmd),
+                timeout=timeout
             ) from e
     
     return out.decode().strip(), err.decode().strip(), process.returncode
@@ -103,13 +99,9 @@ async def run_json(*cmd: str, timeout: Optional[int] = 30) -> Any:
             returncode=code
         )
         raise BrewCommandError(
-            f"Brew command failed with exit code {code}",
-            context={
-                "command": " ".join(cmd),
-                "returncode": code,
-                "error": err or out,
-                "duration_ms": duration_ms
-            }
+            command=" ".join(cmd),
+            returncode=code,
+            error=err or out
         )
     
     try:
@@ -130,10 +122,8 @@ async def run_json(*cmd: str, timeout: Optional[int] = 30) -> Any:
             exc_info=True
         )
         raise BrewCommandError(
-            "Failed to parse JSON output",
-            context={
-                "command": " ".join(cmd),
-                "error": str(e),
-                "output_preview": out[:200] if out else ""
-            }
+            message="Failed to parse JSON output",
+            command=" ".join(cmd),
+            error=out[:200] if out else "",
+            context={"json_error": str(e)}
         ) from e

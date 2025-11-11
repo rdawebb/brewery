@@ -112,13 +112,10 @@ class Cache:
                     exc_info=True
                 )
                 raise CacheError(
-                    "Failed to read cache entry",
-                    context={
-                        "key": key,
-                        "namespace": self.cache_path.name,
-                        "error": str(e)
-                    }
-                )
+                    key=key,
+                    namespace=self.cache_path.name,
+                    operation="read",
+                ) from e
 
         log.info(
             "cache_miss",
@@ -171,12 +168,10 @@ class Cache:
                 exc_info=True
             )
             raise CacheError(
-                "Failed to write cache entry",
-                context={
-                    "key": key,
-                    "namespace": self.cache_path.name,
-                    "error": str(e)
-                }
+                key=key,
+                namespace=self.cache_path.name,
+                operation="write",
+                path=str(f)
             ) from e
 
         return value

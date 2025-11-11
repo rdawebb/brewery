@@ -95,11 +95,8 @@ async def info(name: str) -> Package:
     if not f:
         log.error("formula_not_found", package=name)
         raise PackageNotFoundError(
-            f"Formula '{name}' not found",
-            context={
-                "package": name,
-                "kind": "formula"
-            }
+            package=name,
+            kind="formula"
         )
 
     pkg = (await list_installed_from_items([f]))[0]

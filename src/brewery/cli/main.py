@@ -42,17 +42,20 @@ def handle_error(error: Exception) -> int:
         An integer exit code.
     """
     if isinstance(error, BrewError):
-        log.error(
-            "cli_error",
-            error_type=type(error).__name__,
-            message=error.message,
-            context=error.context,
-            exc_info=True
-        )
+        try:
+            log.error(
+                "cli_error",
+                error_type=type(error).__name__,
+                message=error.message,
+                context=getattr(error, "context", {}),
+                exc_info=True
+            )
+        except Exception:
+            pass
         console.print(f"\n{format_error_message(error)}\n", style="bold red")
 
         if isinstance(error, PackageNotFoundError):
-            package = error.context.get("package", "")
+            package = getattr(error, "context", {}).get("package", "")
             console.print(suggest_search(package), style="dim")
 
         if isinstance(error, TransientError):
