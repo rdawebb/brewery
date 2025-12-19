@@ -22,7 +22,7 @@ EXIT_TRANSIENT_ERROR = 3
 
 class BrewError(Exception):
     """Base exception class with context propagation.
-    
+
     All exceptions in the Brewery should inherit from this class.
     Context is a dictionary that accumulates relevant information
     as the exception propagates up the call stack.
@@ -36,6 +36,7 @@ class BrewError(Exception):
         except BrewError as e:
             raise e.with_context(operation="install", user="admin")
     """
+
     def __init__(self, message: str, context: dict[str, Any] | None = None) -> None:
         self.message = message
         self.context = context or {}
@@ -52,34 +53,36 @@ class BrewError(Exception):
         """
         self.context.update(new_context)
         return self
-    
+
     def __str__(self) -> str:
         """String representation of the exception including context."""
         if self.context:
             context_str = ", ".join(f"{k}={v}" for k, v in self.context.items())
             return f"{self.message} [{context_str}]"
         return self.message
-    
+
 
 class TransientError(BrewError):
     """Errors that should be retried immediately.
-    
+
     These errors are typically due to temporary conditions such as
     network issues or resource unavailability.
-    
+
     Operations raising this exception should be idempotent.
     """
+
     pass
 
 
 class UserError(BrewError):
     """Errors caused by user actions or inputs.
 
-    These errors indicate that the user has made a mistake or provided 
+    These errors indicate that the user has made a mistake or provided
     invalid input, and should not be retried without correction.
 
     CLI should display helpful messages to guide the user.
     """
+
     pass
 
 
@@ -92,10 +95,12 @@ class SystemError(BrewError):
     These errors may require user intervention or system fixes, and
     CLI should display diagnostic information for troubleshooting.
     """
+
     pass
 
 
 ## Specific Exceptions ##
+
 
 class BrewCommandError(TransientError):
     """Brew command returned a non-zero exit code.
@@ -108,16 +113,17 @@ class BrewCommandError(TransientError):
 
     This will be retried automatically by the caller.
     """
+
     def __init__(
         self,
         message: str | None = None,
         command: str | None = None,
         returncode: int | None = None,
         error: str | None = None,
-        context: dict[str, Any] | None = None
+        context: dict[str, Any] | None = None,
     ) -> None:
         """Initialise BrewCommandError with detailed context.
-        
+
         Args:
             message: Optional custom error message.
             command: The brew command that was executed.
@@ -132,7 +138,7 @@ class BrewCommandError(TransientError):
             ctx["returncode"] = returncode
         if error:
             ctx["error"] = error if error is not None else ""
-        
+
         if message is None:
             message = f"Brew command failed with exit code {returncode or 'unknown'}"
 
@@ -150,15 +156,16 @@ class BrewTimeoutError(TransientError):
 
     This will be retried automatically by the caller.
     """
+
     def __init__(
         self,
         message: str | None = None,
         command: str | None = None,
         timeout: int | None = None,
-        context: dict[str, Any] | None = None
+        context: dict[str, Any] | None = None,
     ) -> None:
         """Initialise BrewTimeoutError with detailed context.
-        
+
         Args:
             message: Optional custom error message.
             command: The brew command that was executed.
@@ -170,7 +177,7 @@ class BrewTimeoutError(TransientError):
             ctx["command"] = command
         if timeout is not None:
             ctx["timeout"] = timeout
-        
+
         if message is None:
             message = f"Brew command timed out after {timeout or 'unknown'}s"
 
@@ -179,18 +186,19 @@ class BrewTimeoutError(TransientError):
 
 class PackageNotFoundError(UserError):
     """Requested package was not found in the repository.
-    
+
     This is UserError - do not retry without changing the package name.
     """
+
     def __init__(
         self,
         message: str | None = None,
         package: str | None = None,
         kind: str | None = None,
-        context: dict[str, Any] | None = None
+        context: dict[str, Any] | None = None,
     ) -> None:
         """Initialise PackageNotFoundError with detailed context.
-        
+
         Args:
             message: Optional custom error message.
             package: The name of the package that was not found.
@@ -202,7 +210,7 @@ class PackageNotFoundError(UserError):
             ctx["package"] = package
         if kind:
             ctx["kind"] = kind
-        
+
         if message is None:
             kind_str = f" {kind}" if kind else ""
             message = f"Package{kind_str} '{package or 'unknown'}' not found"
@@ -212,15 +220,16 @@ class PackageNotFoundError(UserError):
 
 class CacheError(SystemError):
     """Errors related to cache access or corruption.
-    
+
     Typically indicates:
         - File system permission issues
         - Disk space exhaustion
         - Corrupted cache files
         - Read-only file system
-        
+
     This is a SystemError - may require user/system intervention.
     """
+
     def __init__(
         self,
         message: str | None = None,
@@ -228,10 +237,10 @@ class CacheError(SystemError):
         namespace: str | None = None,
         path: str | None = None,
         operation: str | None = None,
-        context: dict[str, Any] | None = None
+        context: dict[str, Any] | None = None,
     ) -> None:
         """Initialise CacheError with detailed context.
-        
+
         Args:
             message: Optional custom error message.
             key: The cache key involved in the error.
@@ -258,9 +267,7 @@ class CacheError(SystemError):
 
 
 def retry_on_transient(
-    max_retries: int = 3,
-    base_delay: float = 1.0,
-    backoff: float = 2.0
+    max_retries: int = 3, base_delay: float = 1.0, backoff: float = 2.0
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """Retry async functions on transient errors with exponential backoff.
 
@@ -283,8 +290,10 @@ def retry_on_transient(
         - Works with sync and async functions.
         - Delays: 1s, 2s, 4s with default settings.
     """
+
     def decorator(func: Callable[..., T]) -> Callable[..., T]:
         """Decorator to apply retry logic to the function."""
+
         @functools.wraps(func)
         async def async_wrapper(*args: Any, **kwargs: Any) -> T:
             last_error: TransientError | None = None
@@ -301,7 +310,7 @@ def retry_on_transient(
                             function=func.__name__,
                             attempts=max_retries,
                             error=str(e),
-                                context=getattr(e, "context", {})
+                            context=getattr(e, "context", {}),
                         )
                         raise
 
@@ -313,12 +322,12 @@ def retry_on_transient(
                         max_attempts=max_retries,
                         delay_seconds=delay,
                         error=str(e),
-                            context=getattr(e, "context", {})
+                        context=getattr(e, "context", {}),
                     )
                     await asyncio.sleep(delay)
 
             raise last_error  # type: ignore
-        
+
         @functools.wraps(func)
         def sync_wrapper(*args: Any, **kwargs: Any) -> T:
             last_error: TransientError | None = None
@@ -335,7 +344,7 @@ def retry_on_transient(
                             function=func.__name__,
                             attempts=max_retries,
                             error=str(e),
-                                context=getattr(e, "context", {})
+                            context=getattr(e, "context", {}),
                         )
                         raise
 
@@ -347,17 +356,17 @@ def retry_on_transient(
                         max_attempts=max_retries,
                         delay_seconds=delay,
                         error=str(e),
-                            context=getattr(e, "context", {})
+                        context=getattr(e, "context", {}),
                     )
                     time.sleep(delay)
 
             raise last_error  # type: ignore
-        
+
         if asyncio.iscoroutinefunction(func):
             return async_wrapper  # type: ignore
         else:
             return sync_wrapper  # type: ignore
-        
+
     return decorator
 
 
@@ -373,9 +382,7 @@ ERROR_TEMPLATES = {
         "   The operation took too long - this may be due to network issues"
     ),
     BrewCommandError: (
-        "⚠️ Brew command failed: {command}\n"
-        "   Exit Code: {returncode}\n"
-        "   Error: {error}"
+        "⚠️ Brew command failed: {command}\n   Exit Code: {returncode}\n   Error: {error}"
     ),
     CacheError: (
         "⚠️ Cache error: {error}\n"
@@ -383,20 +390,15 @@ ERROR_TEMPLATES = {
         "   Fix: Check file permissions or clear cache with 'brewery cache clear'"
     ),
     TransientError: (
-        "⚠️ Temporary failure: {message}\n"
-        "   This may resolve itself - try again in a moment"
+        "⚠️ Temporary failure: {message}\n   This may resolve itself - try again in a moment"
     ),
-    UserError: (
-        "❌ {message}"
-    ),
+    UserError: ("❌ {message}"),
     SystemError: (
-        "⚠️ System error: {message}\n"
-        "   Please check your system configuration and try again"
+        "⚠️ System error: {message}\n   Please check your system configuration and try again"
     ),
-    BrewError: (
-        "❌ {message}"
-    ),
+    BrewError: ("❌ {message}"),
 }
+
 
 def format_error_message(error: BrewError) -> str:
     """Formats an error message for CLI display based on the error type.
@@ -412,6 +414,7 @@ def format_error_message(error: BrewError) -> str:
         return template.format(message=error.message, **getattr(error, "context", {}))
     except KeyError:
         return f"❌ {error.message}"
+
 
 def suggest_search(package_name: str) -> str:
     """Suggest a search command for a missing package.

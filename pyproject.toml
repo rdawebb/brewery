@@ -26,20 +26,12 @@ ignore = []
 quote-style = "double"
 
 [project.optional-dependencies]
-dev = ["ruff"]
+dev = [
+  "ruff>=14.0,<15.0"
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.mypy]
-python-version = "3.11"
-strict = false
-warn_unused_ignores = true
-
-[dependency-groups]
-dev = [
-    "ruff>=0.14.4",
-]

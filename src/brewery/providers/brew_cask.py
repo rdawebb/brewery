@@ -46,22 +46,19 @@ async def list_installed() -> List[Package]:
             )
 
             pkgs.append(pkg)
-    
+
     duration_ms = int((time.perf_counter() - start) * 1000)
-    log.info(
-        "cask_list_complete",
-        count=len(pkgs),
-        duration_ms=duration_ms
-    )
+    log.info("cask_list_complete", count=len(pkgs), duration_ms=duration_ms)
 
     return pkgs
 
+
 async def info(name: str) -> Package:
     """Get cask info by name.
-    
+
     Args:
         name: Name of the cask.
-        
+
     Returns:
         A Package instance with detailed information.
     """
@@ -69,13 +66,10 @@ async def info(name: str) -> Package:
     log.debug("cask_info_start", package=name)
 
     data = await run_json("brew", "info", "--json=v2", "--cask", name)
-    c =(data.get("casks", []) or [{}])[0]
+    c = (data.get("casks", []) or [{}])[0]
     if not c:
         log.error("cask_not_found", package=name)
-        raise PackageNotFoundError(
-            package=name,
-            kind="cask"
-        )
+        raise PackageNotFoundError(package=name, kind="cask")
 
     versions = [c.get("version")] if c.get("version") else []
 
@@ -88,10 +82,6 @@ async def info(name: str) -> Package:
     )
 
     duration_ms = int((time.perf_counter() - start) * 1000)
-    log.info(
-        "cask_info_complete",
-        package=name,
-        duration_ms=duration_ms
-    )
+    log.info("cask_info_complete", package=name, duration_ms=duration_ms)
 
     return pkg

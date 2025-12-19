@@ -10,12 +10,14 @@ from typing import Any
 
 class PackageKind(Enum):
     """Enumeration of package kinds."""
+
     FORMULA = "formula"
     CASK = "cask"
 
 
 class PackageStatus(Flag):
     """Enumeration of package statuses."""
+
     NONE = 0
     OUTDATED = auto()
     PINNED = auto()
@@ -28,14 +30,17 @@ class PackageStatus(Flag):
 @dataclass
 class Dependency:
     """Represents a package dependency."""
+
     name: str
     optional: bool = False
     build: bool = False
     test: bool = False
 
+
 @dataclass
 class Package:
     """Represents a Homebrew package."""
+
     name: str
     kind: PackageKind
     versions: list[str] = field(default_factory=list)

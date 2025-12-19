@@ -20,4 +20,4 @@ def derive_status(info: dict) -> PackageStatus:
     if any(s.get("service") for s in info.get("service", []) if isinstance(s, dict)):
         status |= PackageStatus.HAS_SERVICE
 
-    return status 
+    return status

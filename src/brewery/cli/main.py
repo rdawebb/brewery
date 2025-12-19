@@ -34,10 +34,10 @@ configure_logging(level="INFO", enable_console=True)
 
 def handle_error(error: Exception) -> int:
     """Handle errors and return appropriate exit codes.
-    
+
     Args:
         error: The exception to handle.
-        
+
     Returns:
         An integer exit code.
     """
@@ -48,7 +48,7 @@ def handle_error(error: Exception) -> int:
                 error_type=type(error).__name__,
                 message=error.message,
                 context=getattr(error, "context", {}),
-                exc_info=True
+                exc_info=True,
             )
         except Exception:
             pass
@@ -67,29 +67,19 @@ def handle_error(error: Exception) -> int:
         else:
             return EXIT_USER_ERROR
     else:
-        log.error(
-            "unexpected_error",
-            error=str(error),
-            exc_info=True
-        )
-        console.print(
-            f"\n⚠️ Unexpected error occurred: {error}\n",
-            style="bold red"
-        )
+        log.error("unexpected_error", error=str(error), exc_info=True)
+        console.print(f"\n⚠️ Unexpected error occurred: {error}\n", style="bold red")
         return EXIT_SYSTEM_ERROR
+
 
 @app.command()
 def list(
-    kind: Optional[PackageKind] = typer.Option(
-        None, "--kind", "-k", help="formula | cask | all"
-    ),
+    kind: Optional[PackageKind] = typer.Option(None, "--kind", "-k", help="formula | cask | all"),
     outdated: bool = typer.Option(False, help="Only outdated"),
-    search: Optional[str] = typer.Option(
-        None, "--search", "-s", help="Filter by text"
-    )
+    search: Optional[str] = typer.Option(None, "--search", "-s", help="Filter by text"),
 ) -> None:
     """List packages in the repository.
-    
+
     Args:
         kind: Filter by package kind.
         outdated: If true, only show outdated packages.
@@ -108,10 +98,11 @@ def list(
     except Exception as e:
         sys.exit(handle_error(e))
 
+
 @app.command()
 def info(name: str, kind: PackageKind = typer.Option(PackageKind.FORMULA, "--kind")) -> None:
     """Show detailed information about a package.
-    
+
     Args:
         name: Name of the package.
         kind: Kind of the package (formula or cask).
@@ -124,10 +115,11 @@ def info(name: str, kind: PackageKind = typer.Option(PackageKind.FORMULA, "--kin
     except Exception as e:
         sys.exit(handle_error(e))
 
+
 @app.command()
 def search(term: str) -> None:
     """Search for packages by name or description.
-    
+
     Args:
         term: Search term.
     """

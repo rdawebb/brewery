@@ -20,12 +20,14 @@ STATUS_LABELS = {
     PackageStatus.HAS_SERVICE: "[green]Service[/green]",
 }
 
+
 def status_to_str(status: PackageStatus) -> str:
     """Convert PackageStatus to a human-readable string with color coding."""
     if status == PackageStatus.NONE:
         return "[green]Up-to-date[/green]"
     bits = [label for flag, label in STATUS_LABELS.items() if flag in status]
     return ", ".join(bits)
+
 
 def package_table(pkgs: Iterable[Package]) -> Table:
     """Create a Rich Table displaying package information."""
@@ -54,6 +56,7 @@ def package_table(pkgs: Iterable[Package]) -> Table:
 
     return table
 
+
 def package_details(pkg: Package) -> None:
     """Display detailed information about a package."""
     t = Table(box=box.MINIMAL_HEAVY_HEAD)
@@ -74,5 +77,5 @@ def package_details(pkg: Package) -> None:
         t.add_row("Tap", pkg.tap)
     if pkg.path:
         t.add_row("Path", str(pkg.path))
-    
+
     return t

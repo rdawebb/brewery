@@ -17,18 +17,15 @@ class Repository:
 
     async def get_all_installed(self, kind_filter: Optional[PackageKind] = None) -> List[Package]:
         """Get all installed packages, optionally filtered by kind.
-        
+
         Args:
             kind_filter: Optional filter for package kind (formula or cask).
-            
+
         Returns:
             A list of installed Package instances.
         """
         start = time.perf_counter()
-        log.info(
-            "fetch_packages_start",
-            kind_filter=kind_filter.value if kind_filter else "all"
-        )
+        log.info("fetch_packages_start", kind_filter=kind_filter.value if kind_filter else "all")
 
         pkgs: List[Package] = []
 
@@ -43,14 +40,14 @@ class Repository:
             "fetch_packages_complete",
             kind_filter=kind_filter.value if kind_filter else "all",
             count=len(pkgs),
-            duration_ms=duration_ms
+            duration_ms=duration_ms,
         )
-        
+
         return pkgs
-    
+
     async def get_details(self, name: str, kind: PackageKind) -> Package:
         """Get package details by name and kind.
-        
+
         Args:
             name: Name of the package.
             kind: Kind of the package (formula or cask).
@@ -59,11 +56,7 @@ class Repository:
             A Package instance with detailed information.
         """
         start = time.perf_counter()
-        log.info(
-            "fetch_package_details_start",
-            package=name,
-            kind=kind.value
-        )
+        log.info("fetch_package_details_start", package=name, kind=kind.value)
 
         if kind is PackageKind.FORMULA:
             pkg = await brew_formula.info(name)
@@ -72,10 +65,7 @@ class Repository:
 
         duration_ms = int((time.perf_counter() - start) * 1000)
         log.info(
-            "fetch_package_details_complete",
-            package=name,
-            kind=kind.value,
-            duration_ms=duration_ms
+            "fetch_package_details_complete", package=name, kind=kind.value, duration_ms=duration_ms
         )
 
         return pkg
