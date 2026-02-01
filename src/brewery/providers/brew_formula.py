@@ -35,7 +35,9 @@ async def list_installed() -> List[Package]:
             if ver := v.get("version"):
                 versions.append(ver)
 
-        latest = f.get("versions", {}).get("stable") or f.get("versions", {}).get("head")
+        latest = f.get("versions", {}).get("stable") or f.get("versions", {}).get(
+            "head"
+        )
         if latest and (not versions or versions[-1] != latest):
             versions.append(latest)
 
@@ -120,7 +122,9 @@ async def list_installed_from_items(items) -> List[Package]:
             if ver := v.get("version"):
                 versions.append(ver)
 
-        latest = f.get("versions", {}).get("stable") or f.get("versions", {}).get("head")
+        latest = f.get("versions", {}).get("stable") or f.get("versions", {}).get(
+            "head"
+        )
         if latest and (not versions or versions[-1] != latest):
             versions.append(latest)
 

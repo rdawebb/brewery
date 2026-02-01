@@ -6,7 +6,14 @@ from brewery.core.models import PackageStatus
 
 
 def derive_status(info: dict) -> PackageStatus:
-    """Derive the PackageStatus from package info dictionary."""
+    """Derive the PackageStatus from package info dictionary.
+
+    Args:
+        info (dict): The package info dictionary.
+
+    Returns:
+        PackageStatus: The derived package status.
+    """
     status = PackageStatus.NONE
 
     if info.get("outdated") or info.get("version", {}).get("outdated"):

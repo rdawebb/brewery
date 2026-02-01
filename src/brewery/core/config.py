@@ -18,21 +18,38 @@ class BreweryENV:
 
 _DEF_CACHE = Path.home() / ".brewery" / "cache"
 _DEF_CACHE.mkdir(parents=True, exist_ok=True)
+_BREW_PREFIX_CACHE = _DEF_CACHE / "brew_prefix.txt"
 
 
-def discover_env() -> BreweryENV:
-    """Discover Brewery environment based on system settings."""
-    try:
-        output = subprocess.check_output(["brew", "--prefix"], text=True).strip()
-        prefix = Path(output)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        prefix = Path("/usr/local") / "brew"
+def get_brewery_env() -> BreweryENV:
+    """Get or discover Brewery environment based on system settings."""
 
-    cellar = prefix / "Cellar"
-    caskroom = prefix / "Caskroom"
+    if _BREW_PREFIX_CACHE.exists():
+        print(f"Brew prefix cache exists: {_BREW_PREFIX_CACHE}")
+        try:
+            prefix = Path(_BREW_PREFIX_CACHE.read_text().strip())
+            print(f"Found brew prefix in cache: {prefix}")
+        except Exception:
+            prefix = None
+    else:
+        prefix = None
 
-    return BreweryENV(prefix=prefix, cellar=cellar, caskroom=caskroom)
+    if prefix is None:
+        print("Attempting to discover brew prefix...")
+        try:
+            output = subprocess.check_output(["brew", "--prefix"], text=True).strip()
+            prefix = Path(output)
+            _BREW_PREFIX_CACHE.write_text(str(prefix))
+            print(f"Cached brew prefix: {prefix}")
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            prefix = Path("/usr/local") / "brew"
+
+    _brewery_env = BreweryENV(
+        prefix=prefix, cellar=prefix / "Cellar", caskroom=prefix / "Caskroom"
+    )
+    print(f"Created BreweryENV: {_brewery_env}")
+
+    return _brewery_env
 
 
-Brewery = discover_env()
 CACHE_DIR = _DEF_CACHE

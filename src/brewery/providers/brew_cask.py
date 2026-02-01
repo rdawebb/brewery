@@ -35,7 +35,8 @@ async def list_installed() -> List[Package]:
         items = data.get("casks", [])
 
         for c in items:
-            versions = [c.get("version")] if c.get("version") else []
+            version_value = c.get("version")
+            versions = [str(version_value)] if version_value else []
 
             pkg = Package(
                 name=c.get("token") or c.get("name", [None])[0],
@@ -71,7 +72,8 @@ async def info(name: str) -> Package:
         log.error("cask_not_found", package=name)
         raise PackageNotFoundError(package=name, kind="cask")
 
-    versions = [c.get("version")] if c.get("version") else []
+    version_value = c.get("version")
+    versions = [str(version_value)] if version_value else []
 
     pkg = Package(
         name=c.get("token") or c.get("name", [None])[0],

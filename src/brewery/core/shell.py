@@ -51,14 +51,21 @@ async def run_capture(*cmd: str, timeout: Optional[int] = 30) -> tuple[str, str,
     except asyncio.TimeoutError as e:
         duration_ms = int((time.perf_counter() - start) * 1000)
         log.error(
-            "command_timeout", command=" ".join(cmd), timeout=timeout, duration_ms=duration_ms
+            "command_timeout",
+            command=" ".join(cmd),
+            timeout=timeout,
+            duration_ms=duration_ms,
         )
         try:
             process.kill()
         finally:
             raise BrewTimeoutError(command=" ".join(cmd), timeout=timeout) from e
 
-    return out.decode().strip(), err.decode().strip(), process.returncode
+    return (
+        out.decode().strip(),
+        err.decode().strip(),
+        int(process.returncode) if process.returncode is not None else -1,
+    )
 
 
 @retry_on_transient(max_retries=3, base_delay=1.0)
@@ -83,7 +90,9 @@ async def run_json(*cmd: str, timeout: Optional[int] = 30) -> Any:
     duration_ms = int((time.perf_counter() - start) * 1000)
 
     if code != 0:
-        log.error("command_failed", command=" ".join(cmd), error=err or out, returncode=code)
+        log.error(
+            "command_failed", command=" ".join(cmd), error=err or out, returncode=code
+        )
         raise BrewCommandError(command=" ".join(cmd), returncode=code, error=err or out)
 
     try:
@@ -93,7 +102,9 @@ async def run_json(*cmd: str, timeout: Optional[int] = 30) -> Any:
         return result
 
     except json.JSONDecodeError as e:
-        log.error("json_parse_failed", command=" ".join(cmd), error=str(e), exc_info=True)
+        log.error(
+            "json_parse_failed", command=" ".join(cmd), error=str(e), exc_info=True
+        )
         raise BrewCommandError(
             message="Failed to parse JSON output",
             command=" ".join(cmd),

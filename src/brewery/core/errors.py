@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import functools
 import time
-from typing import Any, Callable, Self, TypeVar
+from typing import Any, Awaitable, Callable, Self, TypeVar, overload
 
 from brewery.core.logging import get_logger
 
 log = get_logger(__name__)
 
-T = TypeVar("T")
+R = TypeVar("R")
+AR = TypeVar("AR")
 
 # Exit Codes
 EXIT_SUCCESS = 0
@@ -266,9 +267,23 @@ class CacheError(SystemError):
         super().__init__(message, context=ctx)
 
 
+# Async version
+@overload
 def retry_on_transient(
     max_retries: int = 3, base_delay: float = 1.0, backoff: float = 2.0
-) -> Callable[[Callable[..., T]], Callable[..., T]]:
+) -> Callable[[Callable[..., Awaitable[AR]]], Callable[..., Awaitable[AR]]]: ...
+
+
+# Sync version
+@overload
+def retry_on_transient(
+    max_retries: int = 3, base_delay: float = 1.0, backoff: float = 2.0
+) -> Callable[[Callable[..., R]], Callable[..., R]]: ...
+
+
+def retry_on_transient(
+    max_retries: int = 3, base_delay: float = 1.0, backoff: float = 2.0
+):
     """Retry async functions on transient errors with exponential backoff.
 
     Args:
@@ -291,11 +306,11 @@ def retry_on_transient(
         - Delays: 1s, 2s, 4s with default settings.
     """
 
-    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         """Decorator to apply retry logic to the function."""
 
         @functools.wraps(func)
-        async def async_wrapper(*args: Any, **kwargs: Any) -> T:
+        async def async_wrapper(*args: Any, **kwargs: Any) -> AR:
             last_error: TransientError | None = None
 
             for attempt in range(1, max_retries + 1):
@@ -307,7 +322,7 @@ def retry_on_transient(
                     if attempt == max_retries:
                         log.error(
                             "retry_exhausted",
-                            function=func.__name__,
+                            function=getattr(func, "__name__", repr(func)),
                             attempts=max_retries,
                             error=str(e),
                             context=getattr(e, "context", {}),
@@ -317,7 +332,7 @@ def retry_on_transient(
                     delay = base_delay * (backoff ** (attempt - 1))
                     log.warning(
                         "retry_attempt",
-                        function=func.__name__,
+                        function=getattr(func, "__name__", repr(func)),
                         attempt=attempt,
                         max_attempts=max_retries,
                         delay_seconds=delay,
@@ -329,7 +344,7 @@ def retry_on_transient(
             raise last_error  # type: ignore
 
         @functools.wraps(func)
-        def sync_wrapper(*args: Any, **kwargs: Any) -> T:
+        def sync_wrapper(*args: Any, **kwargs: Any) -> R:
             last_error: TransientError | None = None
 
             for attempt in range(1, max_retries + 1):
@@ -341,7 +356,7 @@ def retry_on_transient(
                     if attempt == max_retries:
                         log.error(
                             "retry_exhausted",
-                            function=func.__name__,
+                            function=getattr(func, "__name__", repr(func)),
                             attempts=max_retries,
                             error=str(e),
                             context=getattr(e, "context", {}),
@@ -351,7 +366,7 @@ def retry_on_transient(
                     delay = base_delay * (backoff ** (attempt - 1))
                     log.warning(
                         "retry_attempt",
-                        function=func.__name__,
+                        function=getattr(func, "__name__", repr(func)),
                         attempt=attempt,
                         max_attempts=max_retries,
                         delay_seconds=delay,
@@ -363,9 +378,9 @@ def retry_on_transient(
             raise last_error  # type: ignore
 
         if asyncio.iscoroutinefunction(func):
-            return async_wrapper  # type: ignore
+            return async_wrapper
         else:
-            return sync_wrapper  # type: ignore
+            return sync_wrapper
 
     return decorator
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime
 from enum import Enum, Flag, auto
 from typing import Any
@@ -37,6 +37,29 @@ class Dependency:
     test: bool = False
 
 
+def to_serializable(obj: Any) -> Any:
+    """Convert an object to a serializable format.
+
+    Args:
+        obj: The object to convert.
+
+    Returns:
+        A serializable representation of the object.
+    """
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, Enum):
+        return obj.value
+    if isinstance(obj, (list, tuple)):
+        return [to_serializable(item) for item in obj]
+    if isinstance(obj, dict):
+        return {key: to_serializable(value) for key, value in obj.items()}
+    if is_dataclass(obj):
+        return to_serializable(asdict(obj))
+
+    return obj
+
+
 @dataclass
 class Package:
     """Represents a Homebrew package."""
@@ -53,3 +76,29 @@ class Package:
     tap: str | None = None
     path: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_serializable_dict(self) -> dict[str, Any]:
+        """Convert the Package instance to a serializable dictionary."""
+        return to_serializable(self)
+
+    @staticmethod
+    def package_from_dict(data: dict[str, Any]) -> Package:
+        """Create a Package instance from a dictionary."""
+        return Package(
+            name=data["name"],
+            kind=PackageKind(data["kind"]),
+            versions=data.get("versions", []),
+            desc=data.get("desc"),
+            status=PackageStatus(data.get("status", 0)),
+            installed_on=(
+                datetime.fromisoformat(data["installed_on"])
+                if data.get("installed_on")
+                else None
+            ),
+            size_kb=data.get("size_kb"),
+            deps=[Dependency(**dep) for dep in data.get("deps", [])],
+            used_by=data.get("used_by", []),
+            tap=data.get("tap"),
+            path=data.get("path"),
+            metadata=data.get("metadata", {}),
+        )

@@ -55,7 +55,9 @@ def configure_logging(
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_dir / "backend.log"
 
-    file_handler = RotatingFileHandler(log_file, maxBytes=2_000_000, backupCount=2)
+    file_handler = RotatingFileHandler(
+        log_file, maxBytes=1 * 1024 * 1024, backupCount=4
+    )
     file_handler.setLevel(getattr(logging, level.upper()))
 
     shared_processors = [
@@ -79,7 +81,9 @@ def configure_logging(
                 structlog.processors.ExceptionRenderer(),
                 structlog.dev.ConsoleRenderer(colors=True),
             ],
-            wrapper_class=structlog.make_filtering_bound_logger(getattr(logging, level.upper())),
+            wrapper_class=structlog.make_filtering_bound_logger(
+                getattr(logging, level.upper())
+            ),
             context_class=dict,
             logger_factory=structlog.stdlib.LoggerFactory(),
             cache_logger_on_first_use=True,
@@ -87,8 +91,13 @@ def configure_logging(
     else:
         structlog.configure(
             processors=shared_processors
-            + [structlog.processors.format_exc_info, structlog.processors.JSONRenderer()],
-            wrapper_class=structlog.make_filtering_bound_logger(getattr(logging, level.upper())),
+            + [
+                structlog.processors.format_exc_info,
+                structlog.processors.JSONRenderer(),
+            ],
+            wrapper_class=structlog.make_filtering_bound_logger(
+                getattr(logging, level.upper())
+            ),
             context_class=dict,
             logger_factory=structlog.stdlib.LoggerFactory(),
             cache_logger_on_first_use=True,

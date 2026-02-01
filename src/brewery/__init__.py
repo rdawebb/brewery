@@ -1,1 +1,1 @@
-# Brewery package initializer
+# Brewery package initialiser

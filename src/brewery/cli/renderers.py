@@ -1,14 +1,12 @@
 """Renderers for displaying package information in the CLI using Rich."""
 
+import time
 from typing import Iterable
 
 from rich import box
-from rich.console import Console
 from rich.table import Table
 
 from brewery.core.models import Package, PackageStatus
-
-console = Console()
 
 
 STATUS_LABELS = {
@@ -22,7 +20,14 @@ STATUS_LABELS = {
 
 
 def status_to_str(status: PackageStatus) -> str:
-    """Convert PackageStatus to a human-readable string with color coding."""
+    """Convert PackageStatus to a human-readable string with color coding.
+
+    Args:
+        status: The PackageStatus to convert.
+
+    Returns:
+        A human-readable string representation of the PackageStatus.
+    """
     if status == PackageStatus.NONE:
         return "[green]Up-to-date[/green]"
     bits = [label for flag, label in STATUS_LABELS.items() if flag in status]
@@ -30,7 +35,15 @@ def status_to_str(status: PackageStatus) -> str:
 
 
 def package_table(pkgs: Iterable[Package]) -> Table:
-    """Create a Rich Table displaying package information."""
+    """Create a Rich Table displaying package information.
+
+    Args:
+        pkgs: An iterable of Package instances to display.
+
+    Returns:
+        A Rich Table displaying package information.
+    """
+    start = time.perf_counter()
     table = Table(box=box.MINIMAL_HEAVY_HEAD)
     table.add_column("Kind", style="bold")
     table.add_column("Name", style="bold")
@@ -39,10 +52,13 @@ def package_table(pkgs: Iterable[Package]) -> Table:
     table.add_column("Status")
     table.add_column("Size (MB)", justify="right")
     table.add_column("Installed On", style="dim")
+    print(f"Table setup time: {(time.perf_counter() - start) * 1000:.2f} ms")
 
     for p in pkgs:
         installed = p.versions[0] if p.versions else ""
-        latest = p.metadata.get("latest_version") or (p.versions[-1] if p.versions else "")
+        latest = p.metadata.get("latest_version") or (
+            p.versions[-1] if p.versions else ""
+        )
         size_mb = f"{(p.size_kb or 0) // (1024):.2f}" if p.size_kb else ""
         table.add_row(
             p.kind.value,
@@ -53,12 +69,20 @@ def package_table(pkgs: Iterable[Package]) -> Table:
             size_mb,
             p.installed_on.isoformat() if p.installed_on else "",
         )
+    print(f"After adding rows: {(time.perf_counter() - start) * 1000:.2f} ms")
 
     return table
 
 
-def package_details(pkg: Package) -> None:
-    """Display detailed information about a package."""
+def package_details(pkg: Package) -> Table:
+    """Display detailed information about a package.
+
+    Args:
+        pkg: The package to display information for.
+
+    Returns:
+        A Rich Table displaying detailed information about the package.
+    """
     t = Table(box=box.MINIMAL_HEAVY_HEAD)
     t.add_column("Field", style="bold")
     t.add_column("Value")
