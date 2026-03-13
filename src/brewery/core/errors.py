@@ -387,7 +387,7 @@ def retry_on_transient(
 
 # CLI Error Message Templates
 
-ERROR_TEMPLATES = {
+ERROR_TEMPLATES: dict[type[BrewError], str] = {
     PackageNotFoundError: (
         "❌ Package Not Found: {package}\n"
         "   Suggestion: Try 'brewery search {package}' to find similar packages"
@@ -407,11 +407,11 @@ ERROR_TEMPLATES = {
     TransientError: (
         "⚠️ Temporary failure: {message}\n   This may resolve itself - try again in a moment"
     ),
-    UserError: ("❌ {message}"),
+    UserError: "❌ {message}",
     SystemError: (
         "⚠️ System error: {message}\n   Please check your system configuration and try again"
     ),
-    BrewError: ("❌ {message}"),
+    BrewError: "❌ {message}",
 }
 
 
@@ -425,6 +425,7 @@ def format_error_message(error: BrewError) -> str:
         A formatted string message for CLI display.
     """
     template = ERROR_TEMPLATES.get(type(error), ERROR_TEMPLATES[BrewError])
+
     try:
         return template.format(message=error.message, **getattr(error, "context", {}))
     except KeyError:

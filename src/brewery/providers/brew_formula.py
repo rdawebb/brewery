@@ -10,9 +10,32 @@ from brewery.analysis.status import derive_status
 from brewery.core.errors import PackageNotFoundError
 from brewery.core.logging import get_logger
 from brewery.core.models import Dependency, Package, PackageKind
-from brewery.core.shell import run_json
+from brewery.core.shell import run_capture, run_json
 
 log = get_logger(__name__)
+
+
+async def get_package_size(path: str | None) -> int | None:
+    """Get the disk usage of an installed package in kilobytes.
+
+    Args:
+        path: The installation path of the package.
+
+    Returns:
+        Size in kilobytes, or None if the path doesn't exist or size can't be determined.
+    """
+    if not path:
+        return None
+
+    try:
+        stdout, _, returncode = await run_capture("du", "-sk", path)
+        if returncode == 0:
+            size_kb = int(stdout.split()[0])
+            return size_kb
+    except (ValueError, IndexError, Exception) as e:
+        log.debug("get_size_error", path=path, error=str(e))
+
+    return None
 
 
 async def list_installed() -> List[Package]:
@@ -58,6 +81,14 @@ async def list_installed() -> List[Package]:
             if t:
                 installed_on = datetime.fromtimestamp(t)
 
+        path = f.get("installed_path")
+        if not path and installed:
+            version = installed[-1].get("version") if installed else None
+            if version:
+                path = f"/usr/local/Cellar/{f['name']}/{version}"
+
+        size_kb = await get_package_size(path) if installed else None
+
         pkg = Package(
             name=f["name"],
             kind=PackageKind.FORMULA,
@@ -65,9 +96,10 @@ async def list_installed() -> List[Package]:
             desc=f.get("desc"),
             status=status,
             installed_on=installed_on,
+            size_kb=size_kb,
             deps=deps,
             tap=f.get("tap"),
-            path=f.get("installed_path"),
+            path=path,
             metadata={"latest_version": latest},
         )
 
@@ -145,6 +177,14 @@ async def list_installed_from_items(items) -> List[Package]:
             if t:
                 installed_on = datetime.fromtimestamp(t)
 
+        path = f.get("installed_path")
+        if not path and installed:
+            version = installed[-1].get("version") if installed else None
+            if version:
+                path = f"/usr/local/Cellar/{f['name']}/{version}"
+
+        size_kb = await get_package_size(path) if installed else None
+
         pkg = Package(
             name=f["name"],
             kind=PackageKind.FORMULA,
@@ -152,9 +192,10 @@ async def list_installed_from_items(items) -> List[Package]:
             desc=f.get("desc"),
             status=status,
             installed_on=installed_on,
+            size_kb=size_kb,
             deps=deps,
             tap=f.get("tap"),
-            path=f.get("installed_path"),
+            path=path,
             metadata={"latest_version": latest},
         )
 

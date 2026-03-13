@@ -25,10 +25,9 @@ def get_brewery_env() -> BreweryENV:
     """Get or discover Brewery environment based on system settings."""
 
     if _BREW_PREFIX_CACHE.exists():
-        print(f"Brew prefix cache exists: {_BREW_PREFIX_CACHE}")
         try:
             prefix = Path(_BREW_PREFIX_CACHE.read_text().strip())
-            print(f"Found brew prefix in cache: {prefix}")
+
         except Exception:
             prefix = None
     else:
@@ -47,7 +46,6 @@ def get_brewery_env() -> BreweryENV:
     _brewery_env = BreweryENV(
         prefix=prefix, cellar=prefix / "Cellar", caskroom=prefix / "Caskroom"
     )
-    print(f"Created BreweryENV: {_brewery_env}")
 
     return _brewery_env
 

@@ -15,6 +15,29 @@ log = get_logger(__name__)
 BATCH_SIZE = 30
 
 
+async def get_package_size(path: str | None) -> int | None:
+    """Get the disk usage of an installed package in kilobytes.
+
+    Args:
+        path: The installation path of the package.
+
+    Returns:
+        Size in kilobytes, or None if the path doesn't exist or size can't be determined.
+    """
+    if not path:
+        return None
+
+    try:
+        stdout, _, returncode = await run_capture("du", "-sk", path)
+        if returncode == 0:
+            size_kb = int(stdout.split()[0])
+            return size_kb
+    except (ValueError, IndexError, Exception) as e:
+        log.debug("get_size_error", path=path, error=str(e))
+
+    return None
+
+
 async def list_installed() -> List[Package]:
     """List installed Homebrew casks.
 
@@ -29,6 +52,11 @@ async def list_installed() -> List[Package]:
     pkgs: List[Package] = []
     log.debug("cask_list_names", count=len(names))
 
+    caskroom_out, _, caskroom_code = await run_capture("brew", "--caskroom")
+    caskroom_path = (
+        caskroom_out.strip() if caskroom_code == 0 else "/usr/local/Caskroom"
+    )
+
     for i in range(0, len(names), BATCH_SIZE):
         batch = names[i : i + BATCH_SIZE]
         data = await run_json("brew", "info", "--json=v2", "--cask", *batch)
@@ -38,11 +66,18 @@ async def list_installed() -> List[Package]:
             version_value = c.get("version")
             versions = [str(version_value)] if version_value else []
 
+            token = c.get("token") or c.get("name", [None])[0]
+            cask_path = f"{caskroom_path}/{token}" if token else None
+
+            size_kb = await get_package_size(cask_path)
+
             pkg = Package(
-                name=c.get("token") or c.get("name", [None])[0],
+                name=token,
                 kind=PackageKind.CASK,
                 versions=versions,
                 desc=(c.get("desc") or ""),
+                size_kb=size_kb,
+                path=cask_path,
                 metadata={"latest_version": c.get("version"), "tap": c.get("tap")},
             )
 
@@ -75,11 +110,23 @@ async def info(name: str) -> Package:
     version_value = c.get("version")
     versions = [str(version_value)] if version_value else []
 
+    caskroom_out, _, caskroom_code = await run_capture("brew", "--caskroom")
+    caskroom_path = (
+        caskroom_out.strip() if caskroom_code == 0 else "/usr/local/Caskroom"
+    )
+
+    token = c.get("token") or c.get("name", [None])[0]
+    cask_path = f"{caskroom_path}/{token}" if token else None
+
+    size_kb = await get_package_size(cask_path) if c.get("installed") else None
+
     pkg = Package(
-        name=c.get("token") or c.get("name", [None])[0],
+        name=token,
         kind=PackageKind.CASK,
         versions=versions,
         desc=(c.get("desc") or ""),
+        size_kb=size_kb,
+        path=cask_path,
         metadata={"latest_version": c.get("version"), "tap": c.get("tap")},
     )
 

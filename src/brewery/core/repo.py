@@ -5,8 +5,8 @@ from __future__ import annotations
 import time
 from typing import List, Optional
 
-from brewery.core.errors import CacheError, PackageNotFoundError
 from brewery.core.cache import Cache
+from brewery.core.errors import CacheError, PackageNotFoundError
 from brewery.core.logging import get_logger
 from brewery.core.models import Package, PackageKind
 from brewery.providers import brew_cask, brew_formula
@@ -91,17 +91,10 @@ class Repository:
         cache_key = f"installed_{kind_filter.value if kind_filter else 'all'}"
 
         try:
-            print(f"Before cache lookup: {(time.perf_counter() - start) * 1000:.2f} ms")
             cached_data = self.cache.get(cache_key)
-            print(f"After cache lookup: {(time.perf_counter() - start) * 1000:.2f} ms")
+
             if cached_data is not None and not cached_data == []:
-                print(
-                    f"Before deserialization: {(time.perf_counter() - start) * 1000:.2f} ms"
-                )
                 pkgs = [Package.package_from_dict(d) for d in cached_data]
-                print(
-                    f"After deserialization: {(time.perf_counter() - start) * 1000:.2f} ms"
-                )
                 duration_ms = int((time.perf_counter() - start) * 1000)
                 log.info(
                     "fetch_packages_complete",
@@ -109,6 +102,7 @@ class Repository:
                     count=len(pkgs),
                     duration_ms=duration_ms,
                 )
+
                 return pkgs
 
             else:

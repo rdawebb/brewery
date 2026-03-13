@@ -48,18 +48,11 @@ class Cache:
             A string token representing the current state.
         """
         global _cached_token, _token_timestamp
-        start_time = time.perf_counter()
         now = time.time()
         if _cached_token and (now - _token_timestamp) < 1:
             return _cached_token
 
-        print(
-            f"Before get_brewery_env: {(time.perf_counter() - start_time) * 1000:.2f} ms"
-        )
         brewery = get_brewery_env()
-        print(
-            f"After get_brewery_env: {(time.perf_counter() - start_time) * 1000:.2f} ms"
-        )
 
         def mtime(p: Path) -> int:
             try:
@@ -67,24 +60,12 @@ class Cache:
             except FileNotFoundError:
                 return 0
 
-        print(f"Before stat cellar: {(time.perf_counter() - start_time) * 1000:.2f} ms")
         cellar_mtime = mtime(brewery.cellar)
-        print(f"After stat cellar: {(time.perf_counter() - start_time) * 1000:.2f} ms")
-
-        print(
-            f"Before stat caskroom: {(time.perf_counter() - start_time) * 1000:.2f} ms"
-        )
         caskroom_mtime = mtime(brewery.caskroom)
-        print(
-            f"After stat caskroom: {(time.perf_counter() - start_time) * 1000:.2f} ms"
-        )
 
         _cached_token = f"{cellar_mtime}-{caskroom_mtime}"
         _token_timestamp = now
 
-        print(
-            f"_update_token total time: {(time.perf_counter() - start_time) * 1000:.2f} ms"
-        )
         return _cached_token
 
     def get_or_set(
@@ -215,18 +196,14 @@ class Cache:
         Returns:
             The cached value, or None if not found.
         """
-        start = time.perf_counter()
         f = self._file(key)
-        print(f"_file(): {(time.perf_counter() - start) * 1000:.2f} ms")
         if not f.exists():
             return None
-        print(f"f.exists(): {(time.perf_counter() - start) * 1000:.2f} ms")
 
         try:
             data = json.loads(f.read_text())
-            print(f"JSON loads: {(time.perf_counter() - start) * 1000:.2f} ms")
             token = self._update_token()
-            print(f"_update_token(): {(time.perf_counter() - start) * 1000:.2f} ms")
+
             if token == data.get("_token"):
                 log.info("cache_hit", key=key, namespace=self.cache_path.name)
                 return data.get("value")

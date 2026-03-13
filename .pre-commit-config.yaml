@@ -32,19 +32,15 @@ repos:
         name: Check formatting
         language: system
         types: [python]
-
-  - repo: local
-    hooks:
-    - id: ty-type-check
-      name: Check type safety
-      entry: uv run ty check src tests
-      language: system
-      types: [python]
-
-  - repo: local
-    hooks:
-    - id: python-syntax-check
-      name: Check for Python syntax errors
-      entry: uv run python -m py_compile
-      language: system
-      types: [python]
+      # Type Checking
+      - id: ty-type-check
+        name: Check type safety
+        entry: uv run ty check src tests
+        language: system
+        types: [python]
+      # Syntax Checking
+      - id: python-syntax-check
+        name: Check for Python syntax errors
+        entry: uv run python -m py_compile
+        language: system
+        types: [python]

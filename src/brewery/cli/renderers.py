@@ -1,6 +1,5 @@
 """Renderers for displaying package information in the CLI using Rich."""
 
-import time
 from typing import Iterable
 
 from rich import box
@@ -43,7 +42,6 @@ def package_table(pkgs: Iterable[Package]) -> Table:
     Returns:
         A Rich Table displaying package information.
     """
-    start = time.perf_counter()
     table = Table(box=box.MINIMAL_HEAVY_HEAD)
     table.add_column("Kind", style="bold")
     table.add_column("Name", style="bold")
@@ -52,14 +50,13 @@ def package_table(pkgs: Iterable[Package]) -> Table:
     table.add_column("Status")
     table.add_column("Size (MB)", justify="right")
     table.add_column("Installed On", style="dim")
-    print(f"Table setup time: {(time.perf_counter() - start) * 1000:.2f} ms")
 
     for p in pkgs:
         installed = p.versions[0] if p.versions else ""
         latest = p.metadata.get("latest_version") or (
             p.versions[-1] if p.versions else ""
         )
-        size_mb = f"{(p.size_kb or 0) // (1024):.2f}" if p.size_kb else ""
+        size_mb = f"{(p.size_kb or 0) / (1024):.2f}" if p.size_kb else ""
         table.add_row(
             p.kind.value,
             p.name,
@@ -69,7 +66,7 @@ def package_table(pkgs: Iterable[Package]) -> Table:
             size_mb,
             p.installed_on.isoformat() if p.installed_on else "",
         )
-    print(f"After adding rows: {(time.perf_counter() - start) * 1000:.2f} ms")
+    # print(f"After adding rows: {(time.perf_counter() - start) * 1000:.2f} ms")
 
     return table
 
@@ -83,16 +80,14 @@ def package_details(pkg: Package) -> Table:
     Returns:
         A Rich Table displaying detailed information about the package.
     """
-    t = Table(box=box.MINIMAL_HEAVY_HEAD)
-    t.add_column("Field", style="bold")
-    t.add_column("Value")
+    t = Table(box=box.MINIMAL, show_header=False)
     t.add_row("Name", pkg.name)
     t.add_row("Kind", pkg.kind.value)
     t.add_row("Description", pkg.desc or "")
     t.add_row("Installed Versions", ", ".join(pkg.versions))
     t.add_row("Latest", pkg.metadata.get("latest_version") or "")
     t.add_row("Status", status_to_str(pkg.status))
-    t.add_row("Size (MB)", f"{(pkg.size_kb or 0) // 1024:.2f}")
+    t.add_row("Size (MB)", f"{(pkg.size_kb or 0) / 1024:.2f}")
     if pkg.deps:
         t.add_row("Depends on", ", ".join(d.name for d in pkg.deps))
     if pkg.used_by:
