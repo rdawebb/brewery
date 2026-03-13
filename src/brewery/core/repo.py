@@ -155,7 +155,7 @@ class Repository:
             cached_data = self.cache.get(map_key)
             if cached_data is not None and not cached_data == []:
                 return Package.package_from_dict(cached_data[name])
-        except CacheError as e:
+        except (CacheError, KeyError) as e:
             log.error("Package details mapping cache error", error=str(e), key=map_key)
 
         # Fallback to list cache

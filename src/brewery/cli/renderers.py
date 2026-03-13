@@ -43,7 +43,7 @@ def package_table(pkgs: Iterable[Package]) -> Table:
         A Rich Table displaying package information.
     """
     table = Table(box=box.MINIMAL_HEAVY_HEAD)
-    table.add_column("Kind", style="bold")
+    table.add_column("Kind")
     table.add_column("Name", style="bold")
     table.add_column("Installed")
     table.add_column("Latest")

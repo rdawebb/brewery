@@ -116,17 +116,33 @@ def list(
 
 @app.command_with_aliases(aliases=["in", "i"])
 def info(
-    name: str, kind: PackageKind = app.Option(PackageKind.FORMULA, "--kind")
+    name: str,
+    kind: Optional[PackageKind] = app.Option(
+        None, "--kind", help="formula | cask | auto (default)"
+    ),
 ) -> None:
     """Show detailed information about a package.
 
     Args:
         name: Name of the package.
-        kind: Kind of the package (formula or cask).
+        kind: Kind of the package (formula or cask). If not provided, will auto-detect.
     """
     try:
         repo = Repository()
-        pkg = asyncio.run(repo.get_details(name, kind))
+
+        if kind is None:
+            try:
+                all_pkgs = asyncio.run(repo.get_all_installed())
+                matching_pkg = next((p for p in all_pkgs if p.name == name), None)
+                if matching_pkg:
+                    pkg = asyncio.run(repo.get_details(name, matching_pkg.kind))
+                else:
+                    raise PackageNotFoundError(package=name)
+
+            except PackageNotFoundError:
+                raise
+        else:
+            pkg = asyncio.run(repo.get_details(name, kind))
 
         console.print(package_details(pkg))
 
