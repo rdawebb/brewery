@@ -8,7 +8,7 @@ from typing import List
 from brewery.core.errors import PackageNotFoundError
 from brewery.core.logging import get_logger
 from brewery.core.models import Package, PackageKind
-from brewery.core.shell import run_capture, run_json
+from brewery.core.shell import run_capture, run_json, run_brew_command
 
 log = get_logger(__name__)
 
@@ -134,3 +134,37 @@ async def info(name: str) -> Package:
     log.info("cask_info_complete", package=name, duration_ms=duration_ms)
 
     return pkg
+
+
+async def install(name: str) -> str:
+    """Install a Homebrew cask by name.
+
+    Args:
+        name: Name of the cask to install.
+
+    Returns:
+        The cask name on success.
+
+    Raises:
+        BrewCommandError: If the installation fails.
+    """
+    await run_brew_command("install", name, flags=["--cask"])
+
+    return name
+
+
+async def uninstall(name: str) -> str:
+    """Uninstall a Homebrew cask by name.
+
+    Args:
+        name: Name of the cask to uninstall.
+
+    Returns:
+        The cask name on success.
+
+    Raises:
+        BrewCommandError: If the uninstallation fails.
+    """
+    await run_brew_command("uninstall", name, flags=["--cask"])
+
+    return name

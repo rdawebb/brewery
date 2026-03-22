@@ -10,7 +10,7 @@ from brewery.analysis.status import derive_status
 from brewery.core.errors import PackageNotFoundError
 from brewery.core.logging import get_logger
 from brewery.core.models import Dependency, Package, PackageKind
-from brewery.core.shell import run_capture, run_json
+from brewery.core.shell import run_capture, run_json, run_brew_command
 
 log = get_logger(__name__)
 
@@ -202,3 +202,37 @@ async def list_installed_from_items(items) -> List[Package]:
         pkgs.append(pkg)
 
     return pkgs
+
+
+async def install(name: str) -> str:
+    """Install a Homebrew formula by name.
+
+    Args:
+        name: Name of the formula to install.
+
+    Returns:
+        The package name on success.
+
+    Raises:
+        BrewCommandError: If the installation fails.
+    """
+    await run_brew_command("install", name, flags=["--formula"])
+
+    return name
+
+
+async def uninstall(name: str) -> str:
+    """Uninstall a Homebrew formula by name.
+
+    Args:
+        name: Name of the formula to uninstall.
+
+    Returns:
+        The package name on success.
+
+    Raises:
+        BrewCommandError: If the uninstallation fails.
+    """
+    await run_brew_command("uninstall", name, flags=["--formula"])
+
+    return name

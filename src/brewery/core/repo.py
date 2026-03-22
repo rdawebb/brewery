@@ -71,6 +71,23 @@ class Repository:
 
         return None
 
+    async def _invalidate_and_refresh(self, kind: PackageKind) -> None:
+        """Invalidate the cache & map for given kind, and re-fetch
+
+        Args:
+            kind: The kind of package (formula or cask) to invalidate.
+        """
+        for suffix in [kind.value, "all"]:
+            for prefix in ("installed_", "installed_map_"):
+                key = f"{prefix}{suffix}"
+                f = self.cache._file(key)
+                if f.exists():
+                    f.unlink()
+                    log.info("cache_invalidated", key=key)
+
+        await self._refresh_cache(kind)
+        await self._refresh_cache(None)  # Refresh the 'all' cache as well
+
     async def get_all_installed(
         self, kind_filter: Optional[PackageKind] = None
     ) -> List[Package]:
@@ -217,3 +234,45 @@ class Repository:
             raise PackageNotFoundError(package=name, kind=kind.value)
 
         return pkg
+
+    async def install_package(self, name: str, kind: PackageKind) -> Package:
+        """Install a package and refresh cache on success.
+
+        Args:
+            name: Name of the package to install.
+            kind: Kind of the package (formula or cask).
+
+        Returns:
+            The package details on success.
+
+        Raises:
+            BrewCommandError: Propagated from provider.
+        """
+        if kind is PackageKind.FORMULA:
+            await brew_formula.install(name)
+        else:
+            await brew_cask.install(name)
+
+        await self._invalidate_and_refresh(kind)
+
+        return await self.get_details(name, kind)
+
+    async def uninstall_package(self, name: str, kind: PackageKind) -> None:
+        """Uninstall a package and refresh cache on success.
+
+        Args:
+            name: Name of the package to uninstall.
+            kind: Kind of the package (formula or cask).
+
+        Returns:
+            None
+
+        Raises:
+            BrewCommandError: Propagated from provider.
+        """
+        if kind is PackageKind.FORMULA:
+            await brew_formula.uninstall(name)
+        else:
+            await brew_cask.uninstall(name)
+
+        await self._invalidate_and_refresh(kind)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from brewery.core.errors import BrewCommandError, BrewTimeoutError, retry_on_transient
 from brewery.core.logging import get_logger
@@ -16,6 +16,57 @@ ENV_OVERRIDES = {
     "LANG": "C",
     "HOMEBREW_NO_COLOR": "1",
 }
+
+
+async def run_brew_command(
+    subcommand: Literal["install", "uninstall"],
+    name: str,
+    flags: list[str],
+    timeout: int = 120,
+) -> tuple[str, str, int]:
+    """Run a Homebrew command asynchronously with optional timeout.
+
+    Args:
+        subcommand: The Homebrew subcommand to run (install or uninstall).
+        name: The name of the formula or cask to operate on.
+        flags: Additional flags to pass (e.g. `--formula`, `--cask`).
+        timeout: Timeout in seconds (default: 120).
+
+    Returns:
+        A tuple of (stdout, stderr, returncode).
+
+    Raises:
+        BrewCommandError: If the command fails.
+        BrewTimeoutError: If the command times out.
+    """
+    cmd = ["brew", subcommand, *flags, name]
+    log.info("brew_command_start", subcommand=subcommand, package=name, flags=flags)
+    start = time.perf_counter()
+
+    out, err, code = await run_capture(*cmd, timeout=timeout)
+    duration_ms = int((time.perf_counter() - start) * 1000)
+
+    if code != 0:
+        log.error(
+            "brew_command_failed",
+            subcommand=subcommand,
+            package=name,
+            flags=flags,
+            error=err or out,
+            returncode=code,
+            duration_ms=duration_ms,
+        )
+        raise BrewCommandError(command=" ".join(cmd), returncode=code, error=err or out)
+
+    log.info(
+        "brew_command_success",
+        subcommand=subcommand,
+        package=name,
+        flags=flags,
+        duration_ms=duration_ms,
+    )
+
+    return out, err, code
 
 
 async def run_capture(*cmd: str, timeout: Optional[int] = 30) -> tuple[str, str, int]:

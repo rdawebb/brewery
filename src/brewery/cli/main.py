@@ -114,7 +114,7 @@ def list(
         sys.exit(handle_error(e))
 
 
-@app.command_with_aliases(aliases=["in", "i"])
+@app.command_with_aliases(aliases=["i"])
 def info(
     name: str,
     kind: Optional[PackageKind] = app.Option(
@@ -167,6 +167,90 @@ def search(term: str) -> None:
         ]
 
         console.print(package_table(pkgs))
+
+    except Exception as e:
+        sys.exit(handle_error(e))
+
+
+@app.command_with_aliases(aliases=["add"])
+def install(
+    name: str,
+    kind: Optional[PackageKind] = app.Option(
+        None, "--kind", help="formula | cask | auto (default)"
+    ),
+    yes: bool = app.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+) -> None:
+    """Install a package.
+
+    Args:
+        name: Name of the package to install.
+        kind: Kind of the package (formula or cask).
+        yes: If true, skip confirmation prompt.
+    """
+    try:
+        kind = kind or PackageKind.FORMULA
+        kind_label = kind.value
+
+        if not yes:
+            confirmed = app.confirm(f"Install {kind_label} {name}?", default=True)
+            if not confirmed:
+                console.print("Installation cancelled.", style="dim")
+                sys.exit(0)
+
+        repo = Repository()
+        with console.status(f"[bold green]Installing {name}...", spinner="dots"):
+            pkg = asyncio.run(repo.install_package(name, kind))
+
+        console.print(
+            f"\n✅ Installed [bold]{pkg.name}[/bold] "
+            f"{pkg.versions[0] if pkg.versions else ''}"
+        )
+
+    except Exception as e:
+        sys.exit(handle_error(e))
+
+
+@app.command_with_aliases(aliases=["rm", "remove"])
+def uninstall(
+    name: str,
+    kind: Optional[PackageKind] = app.Option(
+        None, "--kind", help="formula | cask | auto (default)"
+    ),
+    yes: bool = app.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+) -> None:
+    """Uninstall a package.
+
+    Args:
+        name: Name of the package to uninstall.
+        kind: Kind of the package (formula or cask).
+        yes: If true, skip confirmation prompt.
+    """
+    try:
+        repo = Repository()
+
+        if kind is None:
+            all_pkgs = asyncio.run(repo.get_all_installed())
+            matching_pkg = next((p for p in all_pkgs if p.name == name), None)
+            if matching_pkg:
+                kind = matching_pkg.kind
+            else:
+                raise PackageNotFoundError(package=name)
+
+        else:
+            kind = kind
+
+        kind_label = kind.value
+
+        if not yes:
+            confirmed = app.confirm(f"Uninstall {kind_label} {name}?", default=False)
+            if not confirmed:
+                console.print("Uninstallation cancelled.", style="dim")
+                sys.exit(0)
+
+        with console.status(f"[bold red]Uninstalling {name}...", spinner="dots"):
+            asyncio.run(repo.uninstall_package(name, kind))
+
+        console.print(f"\n✅ Uninstalled [bold]{name}[/bold]")
 
     except Exception as e:
         sys.exit(handle_error(e))
