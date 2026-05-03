@@ -51,11 +51,11 @@ def to_serializable(obj: Any) -> Any:
     if isinstance(obj, Enum):
         return obj.value
     if isinstance(obj, (list, tuple)):
-        return [to_serializable(item) for item in obj]
+        return [to_serializable(obj=item) for item in obj]
     if isinstance(obj, dict):
-        return {key: to_serializable(value) for key, value in obj.items()}
+        return {key: to_serializable(obj=value) for key, value in obj.items()}
     if is_dataclass(obj):
-        return to_serializable(asdict(obj))
+        return to_serializable(obj=asdict(obj))
 
     return obj
 
@@ -79,17 +79,17 @@ class Package:
 
     def to_serializable_dict(self) -> dict[str, Any]:
         """Convert the Package instance to a serializable dictionary."""
-        return to_serializable(self)
+        return to_serializable(obj=self)
 
     @staticmethod
     def package_from_dict(data: dict[str, Any]) -> Package:
         """Create a Package instance from a dictionary."""
         return Package(
             name=data["name"],
-            kind=PackageKind(data["kind"]),
+            kind=PackageKind(value=data["kind"]),
             versions=data.get("versions", []),
             desc=data.get("desc"),
-            status=PackageStatus(data.get("status", 0)),
+            status=PackageStatus(value=data.get("status", 0)),
             installed_on=(
                 datetime.fromisoformat(data["installed_on"])
                 if data.get("installed_on")

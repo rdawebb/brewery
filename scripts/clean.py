@@ -19,7 +19,7 @@ def remove_path(path: Path) -> None:
 def clean() -> None:
     """Clean up temporary files and directories"""
     print("\n🧹 Cleaning up temporary files and directories...\n")
-    patterns = [
+    patterns: list[str] = [
         ".pytest_cache",
         ".coverage",
         "htmlcov",
@@ -33,7 +33,7 @@ def clean() -> None:
         for path in Path(".").rglob(pattern):
             remove_path(path)
 
-    artifacts = [
+    artifacts: list[Path] = [
         Path("dist"),
         Path("build"),
         Path(".test-env"),

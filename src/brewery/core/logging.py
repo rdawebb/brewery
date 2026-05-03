@@ -6,10 +6,13 @@ import logging
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, TextIO
 
 import structlog
 from structlog.types import FilteringBoundLogger
+
+if TYPE_CHECKING:
+    from ty_extensions import Unknown
 
 _CONFIGURED = False
 
@@ -27,7 +30,9 @@ def sanitise_context(logger: Any, method_name: str, event_dict: dict) -> dict:
     Returns:
         The sanitised event dictionary.
     """
-    sanitised = {k: v for k, v in event_dict.items() if v is not None}
+    sanitised: dict[Unknown, Unknown] = {
+        k: v for k, v in event_dict.items() if v is not None
+    }
 
     if "error" in sanitised and sanitised["error"] is None:
         sanitised["error"] = ""
@@ -50,14 +55,14 @@ def configure_logging(
         return
 
     if log_file is None:
-        log_dir = Path.home() / ".brewery" / "logs"
+        log_dir: Path = Path.home() / ".brewery" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / "backend.log"
+        log_file: Path = log_dir / "backend.log"
 
     file_handler = RotatingFileHandler(
-        log_file, maxBytes=1 * 1024 * 1024, backupCount=4
+        filename=log_file, maxBytes=1 * 1024 * 1024, backupCount=4
     )
-    file_handler.setLevel(getattr(logging, level.upper()))
+    file_handler.setLevel(level=getattr(logging, level.upper()))
 
     shared_processors: list[Any] = [
         sanitise_context,
@@ -69,10 +74,12 @@ def configure_logging(
     ]
 
     if enable_console:
-        console_handler = logging.StreamHandler(sys.stderr)
-        console_handler.setLevel(getattr(logging, level.upper()))
-        console_handler.setFormatter(logging.Formatter("%(message)s"))
-        logging.root.addHandler(console_handler)
+        console_handler: logging.StreamHandler[TextIO | Any] = logging.StreamHandler(
+            stream=sys.stderr
+        )
+        console_handler.setLevel(level=getattr(logging, level.upper()))
+        console_handler.setFormatter(fmt=logging.Formatter(fmt="%(message)s"))
+        logging.root.addHandler(hdlr=console_handler)
 
         structlog.configure(
             processors=shared_processors
@@ -81,7 +88,7 @@ def configure_logging(
                 structlog.dev.ConsoleRenderer(colors=True),
             ],
             wrapper_class=structlog.make_filtering_bound_logger(
-                getattr(logging, level.upper())
+                min_level=getattr(logging, level.upper())
             ),
             context_class=dict,
             logger_factory=structlog.stdlib.LoggerFactory(),
@@ -95,15 +102,15 @@ def configure_logging(
                 structlog.processors.JSONRenderer(),
             ],
             wrapper_class=structlog.make_filtering_bound_logger(
-                getattr(logging, level.upper())
+                min_level=getattr(logging, level.upper())
             ),
             context_class=dict,
             logger_factory=structlog.stdlib.LoggerFactory(),
             cache_logger_on_first_use=True,
         )
 
-    logging.root.setLevel(getattr(logging, level.upper()))
-    logging.root.addHandler(file_handler)
+    logging.root.setLevel(level=getattr(logging, level.upper()))
+    logging.root.addHandler(hdlr=file_handler)
 
     _CONFIGURED = True
 

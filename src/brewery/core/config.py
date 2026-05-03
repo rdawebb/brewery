@@ -36,12 +36,14 @@ def get_brewery_env() -> BreweryENV:
     if prefix is None:
         print("Attempting to discover brew prefix...")
         try:
-            output = subprocess.check_output(["brew", "--prefix"], text=True).strip()
+            output: str = subprocess.check_output(
+                args=["brew", "--prefix"], text=True
+            ).strip()
             prefix = Path(output)
-            _BREW_PREFIX_CACHE.write_text(str(prefix))
+            _BREW_PREFIX_CACHE.write_text(data=str(object=prefix))
             print(f"Cached brew prefix: {prefix}")
         except (subprocess.CalledProcessError, FileNotFoundError):
-            prefix = Path("/usr/local") / "brew"
+            prefix: Path = Path("/usr/local") / "brew"
 
     _brewery_env = BreweryENV(
         prefix=prefix, cellar=prefix / "Cellar", caskroom=prefix / "Caskroom"
@@ -50,4 +52,4 @@ def get_brewery_env() -> BreweryENV:
     return _brewery_env
 
 
-CACHE_DIR = _DEF_CACHE
+CACHE_DIR: Path = _DEF_CACHE

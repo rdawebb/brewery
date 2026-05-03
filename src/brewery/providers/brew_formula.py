@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import time
 from datetime import datetime
-from typing import List
+from typing import TYPE_CHECKING, Any, List
+
+from structlog.typing import FilteringBoundLogger
+
+if TYPE_CHECKING:
+    from ty_extensions import Unknown
 
 from brewery.analysis.status import derive_status
 from brewery.core.errors import PackageNotFoundError
 from brewery.core.logging import get_logger
-from brewery.core.models import Dependency, Package, PackageKind
-from brewery.core.shell import run_capture, run_json, run_brew_command
+from brewery.core.models import Dependency, Package, PackageKind, PackageStatus
+from brewery.core.shell import run_brew_command, run_capture, run_json
 
-log = get_logger(__name__)
+log: FilteringBoundLogger = get_logger(name=__name__)
 
 
 async def get_package_size(path: str | None) -> int | None:
@@ -33,7 +38,7 @@ async def get_package_size(path: str | None) -> int | None:
             size_kb = int(stdout.split()[0])
             return size_kb
     except (ValueError, IndexError, Exception) as e:
-        log.debug("get_size_error", path=path, error=str(e))
+        log.debug(event="get_size_error", path=path, error=str(object=e))
 
     return None
 
@@ -44,28 +49,28 @@ async def list_installed() -> List[Package]:
     Returns:
         A list of installed Package instances.
     """
-    start = time.perf_counter()
-    log.debug("formula_list_start")
+    start: int | float = time.perf_counter()
+    log.debug(event="formula_list_start")
 
-    data = await run_json("brew", "info", "--json=v2", "--installed")
-    items = data.get("formulae", [])
+    data: Any = await run_json("brew", "info", "--json=v2", "--installed")
+    items: Any = data.get("formulae", [])
     pkgs: List[Package] = []
 
     for f in items:
-        versions = []
-        installed = f.get("installed", [])
+        versions: list[Unknown] = []
+        installed: Any = f.get("installed", [])
         for v in installed:
             if ver := v.get("version"):
                 versions.append(ver)
 
-        latest = f.get("versions", {}).get("stable") or f.get("versions", {}).get(
+        latest: Any = f.get("versions", {}).get("stable") or f.get("versions", {}).get(
             "head"
         )
         if latest and (not versions or versions[-1] != latest):
             versions.append(latest)
 
-        status = derive_status(
-            {
+        status: PackageStatus = derive_status(
+            info={
                 "outdated": f.get("outdated"),
                 "pinned": f.get("pinned"),
                 "keg_only": f.get("keg_only"),
@@ -74,20 +79,22 @@ async def list_installed() -> List[Package]:
             }
         )
 
-        deps = [Dependency(name=d) for d in (f.get("dependencies", []))]
+        deps: list[Dependency] = [
+            Dependency(name=d) for d in (f.get("dependencies", []))
+        ]
         installed_on = None
         if installed:
-            t = installed[-1].get("installed_time")
+            t: Any = installed[-1].get("installed_time")
             if t:
-                installed_on = datetime.fromtimestamp(t)
+                installed_on: datetime = datetime.fromtimestamp(t)
 
-        path = f.get("installed_path")
+        path: Any = f.get("installed_path")
         if not path and installed:
-            version = installed[-1].get("version") if installed else None
+            version: Any | None = installed[-1].get("version") if installed else None
             if version:
                 path = f"/usr/local/Cellar/{f['name']}/{version}"
 
-        size_kb = await get_package_size(path) if installed else None
+        size_kb: int | None = await get_package_size(path) if installed else None
 
         pkg = Package(
             name=f["name"],
@@ -106,7 +113,7 @@ async def list_installed() -> List[Package]:
         pkgs.append(pkg)
 
     duration_ms = int((time.perf_counter() - start) * 1000)
-    log.info("formula_list_complete", count=len(pkgs), duration_ms=duration_ms)
+    log.info(event="formula_list_complete", count=len(pkgs), duration_ms=duration_ms)
 
     return pkgs
 
@@ -120,18 +127,18 @@ async def info(name: str) -> Package:
     Returns:
         A Package instance with detailed information.
     """
-    start = time.perf_counter()
-    log.debug("formula_info_start", package=name)
+    start: int | float = time.perf_counter()
+    log.debug(event="formula_info_start", package=name)
 
-    data = await run_json("brew", "info", "--json=v2", name)
-    f = (data.get("formulae") or [{}])[0]
+    data: Any = await run_json("brew", "info", "--json=v2", name)
+    f: Any | dict[Unknown, Unknown] = (data.get("formulae") or [{}])[0]
     if not f:
-        log.error("formula_not_found", package=name)
+        log.error(event="formula_not_found", package=name)
         raise PackageNotFoundError(package=name, kind="formula")
 
-    pkg = (await list_installed_from_items([f]))[0]
+    pkg: Package = (await list_installed_from_items(items=[f]))[0]
     duration_ms = int((time.perf_counter() - start) * 1000)
-    log.info("formula_info_complete", package=name, duration_ms=duration_ms)
+    log.info(event="formula_info_complete", package=name, duration_ms=duration_ms)
 
     return pkg
 
@@ -148,20 +155,20 @@ async def list_installed_from_items(items) -> List[Package]:
     pkgs: List[Package] = []
 
     for f in items:
-        versions = []
-        installed = f.get("installed", [])
+        versions: list[Unknown] = []
+        installed: Unknown = f.get("installed", [])
         for v in installed:
             if ver := v.get("version"):
                 versions.append(ver)
 
-        latest = f.get("versions", {}).get("stable") or f.get("versions", {}).get(
-            "head"
-        )
+        latest: Unknown = f.get("versions", {}).get("stable") or f.get(
+            "versions", {}
+        ).get("head")
         if latest and (not versions or versions[-1] != latest):
             versions.append(latest)
 
-        status = derive_status(
-            {
+        status: PackageStatus = derive_status(
+            info={
                 "outdated": f.get("outdated"),
                 "pinned": f.get("pinned"),
                 "keg_only": f.get("keg_only"),
@@ -170,20 +177,24 @@ async def list_installed_from_items(items) -> List[Package]:
             }
         )
 
-        deps = [Dependency(name=d) for d in (f.get("dependencies", []))]
+        deps: list[Dependency] = [
+            Dependency(name=d) for d in (f.get("dependencies", []))
+        ]
         installed_on = None
         if installed:
-            t = installed[-1].get("installed_time")
+            t: Unknown = installed[-1].get("installed_time")
             if t:
-                installed_on = datetime.fromtimestamp(t)
+                installed_on: datetime = datetime.fromtimestamp(t)
 
-        path = f.get("installed_path")
+        path: Unknown = f.get("installed_path")
         if not path and installed:
-            version = installed[-1].get("version") if installed else None
+            version: Unknown | None = (
+                installed[-1].get("version") if installed else None
+            )
             if version:
                 path = f"/usr/local/Cellar/{f['name']}/{version}"
 
-        size_kb = await get_package_size(path) if installed else None
+        size_kb: int | None = await get_package_size(path) if installed else None
 
         pkg = Package(
             name=f["name"],

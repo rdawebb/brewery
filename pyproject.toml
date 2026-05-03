@@ -9,7 +9,7 @@ description = "Minimal Homebrew Package Manager"
 requires-python = ">=3.11"
 dependencies = [
   "typer-extensions>=0.2.2,<1.0.0",
-  "rich>=14.3.3,<15.0.0.0",
+  "rich>=15.0.0,<16.0.0",
   "structlog>=25.5.0,<26.5.0.0"
 ]
 
@@ -18,13 +18,13 @@ brewery = "brewery.cli.main:app"
 
 [project.optional-dependencies]
 dev = [
-  "icecream>=2.1.10,<3.0.0",
-  "prek>=0.3.6,<1.0.0",
-  "pytest>=9.0.2,<10.0.0",
-  "pytest-cov>=7.0.0,<8.0.0",
-  "ruff>=0.15.7,<0.16.0",
-  "rust-just>=1.47.1,<2.0.0",
-  "ty>=0.0.24,<1.0.0"
+  "icecream>=2.2.0,<3.0.0",
+  "prek>=0.3.11,<1.0.0",
+  "pytest>=9.0.3,<10.0.0",
+  "pytest-cov>=7.1.0,<8.0.0",
+  "ruff>=0.15.12,<0.16.0",
+  "rust-just>=1.50.0,<2.0.0",
+  "ty>=0.0.34,<1.0.0"
 ]
 
 [tool.setuptools]

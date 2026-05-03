@@ -5,15 +5,16 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional
 
 from rich.console import Console
+from structlog.typing import FilteringBoundLogger
 
-from brewery.core.config import CACHE_DIR, get_brewery_env
+from brewery.core.config import CACHE_DIR, BreweryENV, get_brewery_env
 from brewery.core.errors import CacheError, TransientError
 from brewery.core.logging import get_logger
 
-log = get_logger(__name__)
+log: FilteringBoundLogger = get_logger(name=__name__)
 console = Console()
 
 _cached_token = None
@@ -24,11 +25,15 @@ class Cache:
     """A simple file-based cache with expiration."""
 
     def __init__(self, namespace: str):
-        self.cache_path = CACHE_DIR / namespace
+        self.cache_path: Path = CACHE_DIR / namespace
         self.cache_path.mkdir(parents=True, exist_ok=True)
         self._cached_token = None
         self._token_timestamp = 0
-        log.debug("cache_initialised", namespace=namespace, path=str(self.cache_path))
+        log.debug(
+            event="cache_initialised",
+            namespace=namespace,
+            path=str(object=self.cache_path),
+        )
 
     def _file(self, key: str) -> Path:
         """Get the file path for a given cache key.
@@ -48,11 +53,11 @@ class Cache:
             A string token representing the current state.
         """
         global _cached_token, _token_timestamp
-        now = time.time()
+        now: int | float = time.time()
         if _cached_token and (now - _token_timestamp) < 1:
             return _cached_token
 
-        brewery = get_brewery_env()
+        brewery: BreweryENV = get_brewery_env()
 
         def mtime(p: Path) -> int:
             try:
@@ -60,8 +65,8 @@ class Cache:
             except FileNotFoundError:
                 return 0
 
-        cellar_mtime = mtime(brewery.cellar)
-        caskroom_mtime = mtime(brewery.caskroom)
+        cellar_mtime: int = mtime(p=brewery.cellar)
+        caskroom_mtime: int = mtime(p=brewery.caskroom)
 
         _cached_token = f"{cellar_mtime}-{caskroom_mtime}"
         _token_timestamp = now
@@ -85,21 +90,23 @@ class Cache:
         Returns:
             Cached or fresh value.
         """
-        f = self._file(key)
+        f: Path = self._file(key)
         now = int(time.time())
-        token = self._update_token()
-        start = time.perf_counter()
+        token: str = self._update_token()
+        start: int | float = time.perf_counter()
         stale_data = None
 
         if f.exists():
             try:
-                data = json.loads(f.read_text())
-                ttl_valid = ttl is None or (now - data.get("_ts", 0) < ttl)
+                data: Any = json.loads(s=f.read_text())
+                ttl_valid: Literal[True] | Any = ttl is None or (
+                    now - data.get("_ts", 0) < ttl
+                )
                 if ttl_valid and data.get("_token") == token:
                     duration_ms = int((time.perf_counter() - start) * 1000)
-                    age_seconds = now - data["_ts"]
+                    age_seconds: Any = now - data["_ts"]
                     log.info(
-                        "cache_hit",
+                        event="cache_hit",
                         key=key,
                         namespace=self.cache_path.name,
                         age_seconds=age_seconds,
@@ -107,30 +114,30 @@ class Cache:
                     )
                     return data.get("value")
                 else:
-                    reason = (
+                    reason: Literal["expired", "token_mismatch"] = (
                         "expired"
                         if (now - data.get("_ts", 0) >= ttl)
                         else "token_mismatch"
                     )
                     log.debug(
-                        "cache_invalid",
+                        event="cache_invalid",
                         key=key,
                         namespace=self.cache_path.name,
                         reason=reason,
                     )
                     if allow_stale:
-                        stale_data = data.get("value")
+                        stale_data: Any = data.get("value")
 
             except json.JSONDecodeError:
                 log.warning(
-                    "cache_corrupted",
+                    event="cache_corrupted",
                     key=key,
                     namespace=self.cache_path.name,
                     exc_info=True,
                 )
             except Exception as e:
                 log.error(
-                    "cache_read_error",
+                    event="cache_read_error",
                     key=key,
                     namespace=self.cache_path.name,
                     exc_info=True,
@@ -141,19 +148,19 @@ class Cache:
                     operation="read",
                 ) from e
 
-        log.info("cache_miss", key=key, namespace=self.cache_path.name)
+        log.info(event="cache_miss", key=key, namespace=self.cache_path.name)
 
         try:
-            value = loader()
+            value: Any = loader()
         except TransientError as e:
             if allow_stale and stale_data is not None:
-                age_seconds = now - data.get("_ts", now)
+                age_seconds: Any = now - data.get("_ts", now)
                 log.warning(
-                    "cache_fallback_stale",
+                    event="cache_fallback_stale",
                     key=key,
                     namespace=self.cache_path.name,
                     age_seconds=age_seconds,
-                    error=str(e),
+                    error=str(object=e),
                 )
                 console.print(
                     "⚠️ Using cached data due to temporary error (may be outdated).\n",
@@ -164,10 +171,12 @@ class Cache:
                 raise
 
         try:
-            f.write_text(json.dumps({"_ts": now, "_token": token, "value": value}))
+            f.write_text(
+                data=json.dumps(obj={"_ts": now, "_token": token, "value": value})
+            )
             duration_ms = int((time.perf_counter() - start) * 1000)
             log.info(
-                "cache_set",
+                event="cache_set",
                 key=key,
                 namespace=self.cache_path.name,
                 duration_ms=duration_ms,
@@ -175,14 +184,17 @@ class Cache:
 
         except Exception as e:
             log.error(
-                "cache_write_error",
+                event="cache_write_error",
                 key=key,
                 namespace=self.cache_path.name,
-                error=str(e),
+                error=str(object=e),
                 exc_info=True,
             )
             raise CacheError(
-                key=key, namespace=self.cache_path.name, operation="write", path=str(f)
+                key=key,
+                namespace=self.cache_path.name,
+                operation="write",
+                path=str(object=f),
             ) from e
 
         return value
@@ -196,31 +208,33 @@ class Cache:
         Returns:
             The cached value, or None if not found.
         """
-        f = self._file(key)
+        f: Path = self._file(key)
         if not f.exists():
             return None
 
         try:
-            data = json.loads(f.read_text())
-            token = self._update_token()
+            data: Any = json.loads(s=f.read_text())
+            token: str = self._update_token()
 
             if token == data.get("_token"):
-                log.info("cache_hit", key=key, namespace=self.cache_path.name)
+                log.info(event="cache_hit", key=key, namespace=self.cache_path.name)
                 return data.get("value")
             else:
-                log.debug("cache_invalid", key=key, namespace=self.cache_path.name)
+                log.debug(
+                    event="cache_invalid", key=key, namespace=self.cache_path.name
+                )
                 return None
 
         except json.JSONDecodeError:
             log.warning(
-                "cache_corrupted",
+                event="cache_corrupted",
                 key=key,
                 namespace=self.cache_path.name,
                 exc_info=True,
             )
         except Exception as e:
             log.error(
-                "cache_read_error",
+                event="cache_read_error",
                 key=key,
                 namespace=self.cache_path.name,
                 exc_info=True,
@@ -240,16 +254,18 @@ class Cache:
             key: The cache key.
             value: The value to cache.
         """
-        f = self._file(key)
+        f: Path = self._file(key)
         now = int(time.time())
-        token = self._update_token()
-        start = time.perf_counter()
+        token: str = self._update_token()
+        start: int | float = time.perf_counter()
 
         try:
-            f.write_text(json.dumps({"_ts": now, "_token": token, "value": value}))
+            f.write_text(
+                data=json.dumps(obj={"_ts": now, "_token": token, "value": value})
+            )
             duration_ms = int((time.perf_counter() - start) * 1000)
             log.info(
-                "cache_set",
+                event="cache_set",
                 key=key,
                 namespace=self.cache_path.name,
                 duration_ms=duration_ms,
@@ -257,12 +273,15 @@ class Cache:
 
         except Exception as e:
             log.error(
-                "cache_write_error",
+                event="cache_write_error",
                 key=key,
                 namespace=self.cache_path.name,
-                error=str(e),
+                error=str(object=e),
                 exc_info=True,
             )
             raise CacheError(
-                key=key, namespace=self.cache_path.name, operation="write", path=str(f)
+                key=key,
+                namespace=self.cache_path.name,
+                operation="write",
+                path=str(object=f),
             ) from e

@@ -14,7 +14,7 @@ def derive_status(info: dict) -> PackageStatus:
     Returns:
         PackageStatus: The derived package status.
     """
-    status = PackageStatus.NONE
+    status: PackageStatus = PackageStatus.NONE
 
     if info.get("outdated") or info.get("version", {}).get("outdated"):
         status |= PackageStatus.OUTDATED

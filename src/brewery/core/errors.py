@@ -7,12 +7,14 @@ import functools
 import time
 from typing import Any, Awaitable, Callable, Self, TypeVar, overload
 
+from structlog.typing import FilteringBoundLogger
+
 from brewery.core.logging import get_logger
 
-log = get_logger(__name__)
+log: FilteringBoundLogger = get_logger(name=__name__)
 
-R = TypeVar("R")
-AR = TypeVar("AR")
+R = TypeVar(name="R")
+AR = TypeVar(name="AR")
 
 # Exit Codes
 EXIT_SUCCESS = 0
@@ -39,7 +41,7 @@ class BrewError(Exception):
     """
 
     def __init__(self, message: str, context: dict[str, Any] | None = None) -> None:
-        self.message = message
+        self.message: str = message
         self.context = context or {}
         super().__init__(message)
 
@@ -58,7 +60,7 @@ class BrewError(Exception):
     def __str__(self) -> str:
         """String representation of the exception including context."""
         if self.context:
-            context_str = ", ".join(f"{k}={v}" for k, v in self.context.items())
+            context_str: str = ", ".join(f"{k}={v}" for k, v in self.context.items())
             return f"{self.message} [{context_str}]"
         return self.message
 
@@ -219,6 +221,27 @@ class PackageNotFoundError(UserError):
         super().__init__(message, context=ctx)
 
 
+class AlreadyInstalledWarning(UserError):
+    """Package already installed - no action taken.
+
+    Raised by install command when trying to install an already installed package.
+
+    CLI should handle this gracefully by informing the user.
+    """
+
+    def __init__(
+        self, package: str | None = None, context: dict[str, Any] | None = None
+    ) -> None:
+        ctx = context or {}
+        if package:
+            ctx["package"] = package
+
+        super().__init__(
+            message=f"Package '{package or 'unknown'}' is already installed",
+            context=ctx,
+        )
+
+
 class CacheError(SystemError):
     """Errors related to cache access or corruption.
 
@@ -309,7 +332,7 @@ def retry_on_transient(
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         """Decorator to apply retry logic to the function."""
 
-        @functools.wraps(func)
+        @functools.wraps(wrapped=func)
         async def async_wrapper(*args: Any, **kwargs: Any) -> AR:
             last_error: TransientError | None = None
 
@@ -317,33 +340,33 @@ def retry_on_transient(
                 try:
                     return await func(*args, **kwargs)
                 except TransientError as e:
-                    last_error = e
+                    last_error: TransientError = e
 
                     if attempt == max_retries:
                         log.error(
-                            "retry_exhausted",
+                            event="retry_exhausted",
                             function=getattr(func, "__name__", repr(func)),
                             attempts=max_retries,
-                            error=str(e),
+                            error=str(object=e),
                             context=getattr(e, "context", {}),
                         )
                         raise
 
-                    delay = base_delay * (backoff ** (attempt - 1))
+                    delay: Any | int | float = base_delay * (backoff ** (attempt - 1))
                     log.warning(
-                        "retry_attempt",
+                        event="retry_attempt",
                         function=getattr(func, "__name__", repr(func)),
                         attempt=attempt,
                         max_attempts=max_retries,
                         delay_seconds=delay,
-                        error=str(e),
+                        error=str(object=e),
                         context=getattr(e, "context", {}),
                     )
                     await asyncio.sleep(delay)
 
             raise last_error  # type: ignore
 
-        @functools.wraps(func)
+        @functools.wraps(wrapped=func)
         def sync_wrapper(*args: Any, **kwargs: Any) -> R:
             last_error: TransientError | None = None
 
@@ -351,26 +374,26 @@ def retry_on_transient(
                 try:
                     return func(*args, **kwargs)
                 except TransientError as e:
-                    last_error = e
+                    last_error: TransientError = e
 
                     if attempt == max_retries:
                         log.error(
-                            "retry_exhausted",
+                            event="retry_exhausted",
                             function=getattr(func, "__name__", repr(func)),
                             attempts=max_retries,
-                            error=str(e),
+                            error=str(object=e),
                             context=getattr(e, "context", {}),
                         )
                         raise
 
-                    delay = base_delay * (backoff ** (attempt - 1))
+                    delay: Any | int | float = base_delay * (backoff ** (attempt - 1))
                     log.warning(
-                        "retry_attempt",
+                        event="retry_attempt",
                         function=getattr(func, "__name__", repr(func)),
                         attempt=attempt,
                         max_attempts=max_retries,
                         delay_seconds=delay,
-                        error=str(e),
+                        error=str(object=e),
                         context=getattr(e, "context", {}),
                     )
                     time.sleep(delay)
@@ -388,6 +411,10 @@ def retry_on_transient(
 # CLI Error Message Templates
 
 ERROR_TEMPLATES: dict[type[BrewError], str] = {
+    AlreadyInstalledWarning: (
+        "⚠️ Already installed: {package}\n"
+        "   Suggestion: Try 'brewery update {package}' to update the package"
+    ),
     PackageNotFoundError: (
         "❌ Package Not Found: {package}\n"
         "   Suggestion: Try 'brewery search {package}' to find similar packages"
@@ -424,7 +451,7 @@ def format_error_message(error: BrewError) -> str:
     Returns:
         A formatted string message for CLI display.
     """
-    template = ERROR_TEMPLATES.get(type(error), ERROR_TEMPLATES[BrewError])
+    template: str = ERROR_TEMPLATES.get(type(error), ERROR_TEMPLATES[BrewError])
 
     try:
         return template.format(message=error.message, **getattr(error, "context", {}))

@@ -2,23 +2,30 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
-from typing import List, Optional
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, List, Optional
+
+from structlog.typing import FilteringBoundLogger
 
 from brewery.core.cache import Cache
+
+if TYPE_CHECKING:
+    from ty_extensions import Unknown
 from brewery.core.errors import CacheError, PackageNotFoundError
 from brewery.core.logging import get_logger
-from brewery.core.models import Package, PackageKind
-from brewery.providers import brew_cask, brew_formula
+from brewery.core.models import Package, PackageKind, PackageStatus
+from brewery.providers import brew_cask, brew_formula, brew_outdated
 
-log = get_logger(__name__)
+log: FilteringBoundLogger = get_logger(name=__name__)
 
 
 class Repository:
     """Repository for managing package data from various backends."""
 
     def __init__(self):
-        self.cache = Cache("repository")
+        self.cache = Cache(namespace="repository")
 
     async def _fetch_pkgs(
         self, kind_filter: Optional[PackageKind] = None
@@ -54,15 +61,15 @@ class Repository:
         cache_key = f"installed_{kind_filter.value if kind_filter else 'all'}"
         map_key = f"installed_map_{kind_filter.value if kind_filter else 'all'}"
 
-        pkgs = await self._fetch_pkgs(kind_filter)
-        pkgs_dicts = [p.to_serializable_dict() for p in pkgs]
-        mapping = {p["name"]: p for p in pkgs_dicts}
+        pkgs: list[Package] = await self._fetch_pkgs(kind_filter)
+        pkgs_dicts: list[dict[str, Any]] = [p.to_serializable_dict() for p in pkgs]
+        mapping: dict[Any, dict[str, Any]] = {p["name"]: p for p in pkgs_dicts}
 
         try:
-            self.cache.set(cache_key, pkgs_dicts)
-            self.cache.set(map_key, mapping)
+            self.cache.set(key=cache_key, value=pkgs_dicts)
+            self.cache.set(key=map_key, value=mapping)
         except CacheError as e:
-            log.error("Failed to refresh cache", error=str(e))
+            log.error(event="Failed to refresh cache", error=str(object=e))
 
         if return_pkgs:
             return pkgs
@@ -80,13 +87,13 @@ class Repository:
         for suffix in [kind.value, "all"]:
             for prefix in ("installed_", "installed_map_"):
                 key = f"{prefix}{suffix}"
-                f = self.cache._file(key)
+                f: Unknown | Path = self.cache._file(key)
                 if f.exists():
                     f.unlink()
-                    log.info("cache_invalidated", key=key)
+                    log.info(event="cache_invalidated", key=key)
 
-        await self._refresh_cache(kind)
-        await self._refresh_cache(None)  # Refresh the 'all' cache as well
+        await self._refresh_cache(kind_filter=kind)
+        await self._refresh_cache(kind_filter=None)  # Refresh the 'all' cache as well
 
     async def get_all_installed(
         self, kind_filter: Optional[PackageKind] = None
@@ -99,22 +106,24 @@ class Repository:
         Returns:
             A list of installed Package instances.
         """
-        start = time.perf_counter()
+        start: int | float = time.perf_counter()
         log.info(
-            "fetch_packages_start",
+            event="fetch_packages_start",
             kind_filter=kind_filter.value if kind_filter else "all",
         )
 
         cache_key = f"installed_{kind_filter.value if kind_filter else 'all'}"
 
         try:
-            cached_data = self.cache.get(cache_key)
+            cached_data: Unknown | None = self.cache.get(key=cache_key)
 
             if cached_data is not None and not cached_data == []:
-                pkgs = [Package.package_from_dict(d) for d in cached_data]
+                pkgs: list[Package] = [
+                    Package.package_from_dict(data=d) for d in cached_data
+                ]
                 duration_ms = int((time.perf_counter() - start) * 1000)
                 log.info(
-                    "fetch_packages_complete",
+                    event="fetch_packages_complete",
                     kind_filter=kind_filter.value if kind_filter else "all",
                     count=len(pkgs),
                     duration_ms=duration_ms,
@@ -123,17 +132,23 @@ class Repository:
                 return pkgs
 
             else:
-                pkgs = await self._refresh_cache(kind_filter, return_pkgs=True)
+                pkgs: (
+                    list[Unknown] | dict[Unknown, Unknown] | None
+                ) = await self._refresh_cache(kind_filter, return_pkgs=True)
 
         except CacheError as e:
-            log.error("Package list cache error", error=str(e), key=cache_key)
+            log.error(
+                event="Package list cache error", error=str(object=e), key=cache_key
+            )
 
-            pkgs = await self._refresh_cache(kind_filter, return_pkgs=True)
+            pkgs: (
+                list[Unknown] | dict[Unknown, Unknown] | None
+            ) = await self._refresh_cache(kind_filter, return_pkgs=True)
 
             if not pkgs:
                 duration_ms = int((time.perf_counter() - start) * 1000)
                 log.warning(
-                    "No packages found after cache error and refresh",
+                    event="No packages found after cache error and refresh",
                     kind_filter=kind_filter.value if kind_filter else "all",
                     duration_ms=duration_ms,
                 )
@@ -142,7 +157,7 @@ class Repository:
         if isinstance(pkgs, list):
             duration_ms = int((time.perf_counter() - start) * 1000)
             log.info(
-                "fetch_packages_complete",
+                event="fetch_packages_complete",
                 kind_filter=kind_filter.value if kind_filter else "all",
                 count=len(pkgs),
                 duration_ms=duration_ms,
@@ -162,61 +177,75 @@ class Repository:
         Returns:
             A Package instance with detailed information.
         """
-        start = time.perf_counter()
-        log.info("fetch_package_details_start", package=name, kind=kind.value)
+        start: int | float = time.perf_counter()
+        log.info(event="fetch_package_details_start", package=name, kind=kind.value)
 
         map_key = f"installed_map_{kind.value}"
         cache_key = f"installed_{kind.value}"
 
         try:
-            cached_data = self.cache.get(map_key)
+            cached_data: Unknown | None = self.cache.get(key=map_key)
             if cached_data is not None and not cached_data == []:
-                return Package.package_from_dict(cached_data[name])
+                return Package.package_from_dict(data=cached_data[name])
         except (CacheError, KeyError) as e:
-            log.error("Package details mapping cache error", error=str(e), key=map_key)
+            log.error(
+                event="Package details mapping cache error",
+                error=str(object=e),
+                key=map_key,
+            )
 
         # Fallback to list cache
         try:
-            pkg_list = self.cache.get(cache_key)
+            pkg_list: Unknown | None = self.cache.get(key=cache_key)
             if pkg_list is not None and not pkg_list == []:
                 for pkg in pkg_list:
                     if pkg.get("name") == name:
                         duration_ms = int((time.perf_counter() - start) * 1000)
                         log.info(
-                            "fetch_package_details_complete",
+                            event="fetch_package_details_complete",
                             package=name,
                             kind=kind.value,
                             duration_ms=duration_ms,
                         )
-                        return Package.package_from_dict(pkg)
+                        return Package.package_from_dict(data=pkg)
         except CacheError as e:
-            log.error("Package details list cache error", error=str(e), key=cache_key)
+            log.error(
+                event="Package details list cache error",
+                error=str(object=e),
+                key=cache_key,
+            )
 
         # Fallback to refresh cache
         try:
-            mapping = await self._refresh_cache(kind, return_map=True)
+            mapping: (
+                list[Unknown] | dict[Unknown, Unknown] | None
+            ) = await self._refresh_cache(kind_filter=kind, return_map=True)
             if isinstance(mapping, dict) and name in mapping:
                 duration_ms = int((time.perf_counter() - start) * 1000)
                 log.info(
-                    "fetch_package_details_complete",
+                    event="fetch_package_details_complete",
                     package=name,
                     kind=kind.value,
                     duration_ms=duration_ms,
                 )
-                return Package.package_from_dict(mapping[name])
+                return Package.package_from_dict(data=mapping[name])
         except CacheError as e:
-            log.error("Package details refresh cache error", error=str(e), key=map_key)
+            log.error(
+                event="Package details refresh cache error",
+                error=str(object=e),
+                key=map_key,
+            )
 
         # Check backend if not in cache
         try:
             if kind is PackageKind.FORMULA:
-                pkg = await brew_formula.info(name)
+                pkg: Package = await brew_formula.info(name)
             else:
-                pkg = await brew_cask.info(name)
+                pkg: Package = await brew_cask.info(name)
         except Exception as e:
             log.error(
-                "Package details fetch error",
-                error=str(e),
+                event="Package details fetch error",
+                error=str(object=e),
                 package=name,
                 kind=kind.value,
             )
@@ -224,7 +253,7 @@ class Repository:
 
         duration_ms = int((time.perf_counter() - start) * 1000)
         log.info(
-            "fetch_package_details_complete",
+            event="fetch_package_details_complete",
             package=name,
             kind=kind.value,
             duration_ms=duration_ms,
@@ -276,3 +305,64 @@ class Repository:
             await brew_cask.uninstall(name)
 
         await self._invalidate_and_refresh(kind)
+
+    async def get_outdated(self, live: bool = False) -> list[Package]:
+        """Return a list of outdated packages.
+
+        Args:
+            live: If True, call brew directly and refresh cache, otherwise use cached data.
+
+        Returns:
+            List of packages with OUTDATED status.
+        """
+        if live:
+            asyncio.create_task(coro=self._refresh_outdated_status())
+
+            outdated_entries: list[
+                dict[Unknown, Unknown]
+            ] = await brew_outdated.fetch_outdated()
+
+            outdated_pkgs: list[Package] = [
+                Package.package_from_dict(data=entry) for entry in outdated_entries
+            ]
+
+            log.info(event="outdated_live_fetch_complete", count=len(outdated_pkgs))
+            return outdated_pkgs
+
+        pkgs: list[Package] = await self.get_all_installed()
+        log.info(event="outdated_cache_fetch_complete", count=len(pkgs))
+        return [pkg for pkg in pkgs if pkg.status == PackageStatus.OUTDATED]
+
+    async def _refresh_outdated_status(self) -> None:
+        """Refresh the status of outdated packages in the background."""
+        try:
+            log.info(event="outdated_cache_refresh_start_background")
+            outdated_entries: list[
+                dict[Unknown, Unknown]
+            ] = await brew_outdated.fetch_outdated()
+            outdated_map: dict[Unknown, dict[Unknown, Unknown]] = {
+                entry["name"]: entry for entry in outdated_entries
+            }
+
+            all_pkgs: list[Package] = await self.get_all_installed()
+
+            updated_pkgs: list[Package] = []
+            for pkg in all_pkgs:
+                if pkg.name in outdated_map:
+                    entry: dict[Unknown, Unknown] = outdated_map[pkg.name]
+                    pkg.status |= PackageStatus.OUTDATED
+                    if pkg.metadata:
+                        pkg.metadata["latest_version"] = entry.get("current_version")
+                updated_pkgs.append(pkg)
+
+            cache_key = "installed_all"
+            pkgs_dicts: list[dict[str, Any]] = [
+                pkg.to_serializable_dict() for pkg in updated_pkgs
+            ]
+            self.cache.set(key=cache_key, value=pkgs_dicts)
+            log.info(
+                event="outdated_cache_updated_background", count=len(outdated_entries)
+            )
+
+        except Exception as e:
+            log.error(event="outdated_background_refresh_failed", error=str(object=e))

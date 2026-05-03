@@ -7,8 +7,7 @@ from rich.table import Table
 
 from brewery.core.models import Package, PackageStatus
 
-
-STATUS_LABELS = {
+STATUS_LABELS: dict[PackageStatus, str] = {
     PackageStatus.OUTDATED: "[red]Outdated[/red]",
     PackageStatus.PINNED: "[yellow]Pinned[/yellow]",
     PackageStatus.NOT_LINKED: "[blue]Not Linked[/blue]",
@@ -29,7 +28,7 @@ def status_to_str(status: PackageStatus) -> str:
     """
     if status == PackageStatus.NONE:
         return "[green]Up-to-date[/green]"
-    bits = [label for flag, label in STATUS_LABELS.items() if flag in status]
+    bits: list[str] = [label for flag, label in STATUS_LABELS.items() if flag in status]
     return ", ".join(bits)
 
 
@@ -43,20 +42,20 @@ def package_table(pkgs: Iterable[Package]) -> Table:
         A Rich Table displaying package information.
     """
     table = Table(box=box.MINIMAL_HEAVY_HEAD)
-    table.add_column("Kind")
-    table.add_column("Name", style="bold")
-    table.add_column("Installed")
-    table.add_column("Latest")
-    table.add_column("Status")
-    table.add_column("Size (MB)", justify="right")
-    table.add_column("Installed On", style="dim")
+    table.add_column(header="Kind")
+    table.add_column(header="Name", style="bold")
+    table.add_column(header="Installed")
+    table.add_column(header="Latest")
+    table.add_column(header="Status")
+    table.add_column(header="Size (MB)", justify="right")
+    table.add_column(header="Installed On", style="dim")
 
     for p in pkgs:
-        installed = p.versions[0] if p.versions else ""
+        installed: str = p.versions[0] if p.versions else ""
         latest = p.metadata.get("latest_version") or (
             p.versions[-1] if p.versions else ""
         )
-        size_mb = f"{(p.size_kb or 0) / (1024):.2f}" if p.size_kb else ""
+        size_mb: str = f"{(p.size_kb or 0) / (1024):.2f}" if p.size_kb else ""
         table.add_row(
             p.kind.value,
             p.name,
@@ -95,6 +94,6 @@ def package_details(pkg: Package) -> Table:
     if pkg.tap:
         t.add_row("Tap", pkg.tap)
     if pkg.path:
-        t.add_row("Path", str(pkg.path))
+        t.add_row("Path", str(object=pkg.path))
 
     return t
