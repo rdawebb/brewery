@@ -2,20 +2,25 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, List, Optional
 
 from structlog.typing import FilteringBoundLogger
 
-from brewery.core.cache import Cache
-
 if TYPE_CHECKING:
     from ty_extensions import Unknown
-from brewery.core.errors import CacheError, PackageNotFoundError
+
+from brewery.core.cache import Cache
+from brewery.core.errors import (
+    BrewCommandError,
+    CacheError,
+    PackageNotFoundError,
+    PinnedPackageWarning,
+)
 from brewery.core.logging import get_logger
 from brewery.core.models import Package, PackageKind, PackageStatus
+from brewery.core.task_manager import get_task_manager, TaskManager
 from brewery.providers import brew_cask, brew_formula, brew_outdated
 
 log: FilteringBoundLogger = get_logger(name=__name__)
@@ -25,6 +30,7 @@ class Repository:
     """Repository for managing package data from various backends."""
 
     def __init__(self):
+        """Initialise the repository."""
         self.cache = Cache(namespace="repository")
 
     async def _fetch_pkgs(
@@ -316,7 +322,8 @@ class Repository:
             List of packages with OUTDATED status.
         """
         if live:
-            asyncio.create_task(coro=self._refresh_outdated_status())
+            task_manager: TaskManager = get_task_manager()
+            task_manager.add_task(coro=self._refresh_outdated_status())
 
             outdated_entries: list[
                 dict[Unknown, Unknown]
@@ -366,3 +373,73 @@ class Repository:
 
         except Exception as e:
             log.error(event="outdated_background_refresh_failed", error=str(object=e))
+
+    async def upgrade_package(self, name: str, kind: PackageKind) -> Package:
+        """Upgrade a single package and refresh cache entry.
+
+        Args:
+            name: Name of the package to upgrade.
+            kind: Kind of the package (formula or cask).
+
+        Returns:
+            The upgraded package details.
+
+        Raises:
+            BrewCommandError: Propagated from provider.
+            PackagePinnedWarning: If the package is pinned.
+        """
+        if kind is PackageKind.FORMULA:
+            await brew_formula.upgrade(name)
+        else:
+            await brew_cask.upgrade(name)
+
+        await self._invalidate_and_refresh(kind)
+
+        return await self.get_details(name, kind)
+
+    async def upgrade_all_outdated(self) -> tuple[list[Package], list[tuple[str, str]]]:
+        """Upgrade all outdated packages.
+
+        Returns:
+            A tuple containing a list of upgraded packages and a list of failures.
+        """
+        outdated: list[Package] = await self.get_outdated(live=False)
+        upgraded: list[Package] = []
+        failures: list[tuple[str, str]] = []
+
+        for pkg in outdated:
+            if PackageStatus.PINNED in pkg.status:
+                log.info(event="upgrade_skipped_pinned", package=pkg.name)
+                failures.append((pkg.name, "pinned - skipped"))
+                continue
+
+            try:
+                if pkg.kind == PackageKind.FORMULA:
+                    await brew_formula.upgrade(pkg.name)
+                else:
+                    await brew_cask.upgrade(pkg.name)
+
+                upgraded.append(pkg)
+
+            except PinnedPackageWarning:
+                log.info(event="upgrade_skipped_pinned", package=pkg.name)
+                failures.append((pkg.name, "pinned - skipped"))
+
+            except BrewCommandError as e:
+                log.error(
+                    event="upgrade_failed",
+                    package=pkg.name,
+                    error=str(object=e),
+                )
+                failures.append((pkg.name, str(object=e.message)))
+
+        await self._invalidate_and_refresh(kind=PackageKind.FORMULA)
+        await self._invalidate_and_refresh(kind=PackageKind.CASK)
+
+        log.info(
+            event="upgrade_all_outdated_complete",
+            upgraded=len(upgraded),
+            failed=len(failures),
+        )
+
+        return upgraded, failures

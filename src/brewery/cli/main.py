@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, List, Literal, Optional
 
 from rich.console import Console
 from structlog.typing import FilteringBoundLogger
@@ -21,6 +21,7 @@ from brewery.core.errors import (
     AlreadyInstalledWarning,
     BrewError,
     PackageNotFoundError,
+    PinnedPackageWarning,
     SystemError,
     TransientError,
     UserError,
@@ -28,8 +29,9 @@ from brewery.core.errors import (
     suggest_search,
 )
 from brewery.core.logging import configure_logging, get_logger
-from brewery.core.models import PackageKind
+from brewery.core.models import Package, PackageKind, PackageStatus
 from brewery.core.repo import Repository
+from brewery.core.task_manager import TaskManager, get_task_manager
 
 log: FilteringBoundLogger = get_logger(name=__name__)
 
@@ -72,10 +74,31 @@ def handle_error(error: Exception) -> int:
             return EXIT_SYSTEM_ERROR
         else:
             return EXIT_USER_ERROR
+
     else:
         log.error(event="unexpected_error", error=str(object=error), exc_info=True)
         console.print(f"\n⚠️ Unexpected error occurred: {error}\n", style="bold red")
         return EXIT_SYSTEM_ERROR
+
+
+def run_with_task_manager(coro: Awaitable[Unknown]) -> Any:
+    """Run a coroutine with the task manager.
+
+    Args:
+        coro: The coroutine to run.
+
+    Returns:
+        The result of the coroutine.
+    """
+
+    async def main_with_tasks() -> None:
+        result: Unknown = await coro
+        task_manager: TaskManager = get_task_manager()
+        await task_manager.wait_for_all()
+
+        return result
+
+    return asyncio.run(main=main_with_tasks())
 
 
 @app.callback()
@@ -101,13 +124,17 @@ def list(
     """
     try:
         repo = Repository()
-        pkgs = asyncio.run(main=repo.get_all_installed(kind_filter=kind))
+        pkgs: List[Package] = run_with_task_manager(
+            coro=repo.get_all_installed(kind_filter=kind)
+        )
 
         if outdated:
-            pkgs = [p for p in pkgs if "OUTDATED" in str(object=p.status)]
+            pkgs: List[Package] = [
+                p for p in pkgs if "OUTDATED" in str(object=p.status)
+            ]
         if search:
             q: str = search.lower()
-            pkgs = [
+            pkgs: List[Package] = [
                 p
                 for p in pkgs
                 if q in p.name.lower() or (p.desc and q in p.desc.lower())
@@ -137,17 +164,24 @@ def info(
 
         if kind is None:
             try:
-                all_pkgs = asyncio.run(main=repo.get_all_installed())
-                matching_pkg = next((p for p in all_pkgs if p.name == name), None)
+                all_pkgs: List[Package] = run_with_task_manager(
+                    coro=repo.get_all_installed()
+                )
+                matching_pkg: Package | None = next(
+                    (p for p in all_pkgs if p.name == name), None
+                )
                 if matching_pkg:
-                    pkg = asyncio.run(main=repo.get_details(name, matching_pkg.kind))
+                    pkg: Package = run_with_task_manager(
+                        coro=repo.get_details(name, matching_pkg.kind)
+                    )
                 else:
                     raise PackageNotFoundError(package=name)
 
             except PackageNotFoundError:
                 raise
+
         else:
-            pkg = asyncio.run(main=repo.get_details(name, kind))
+            pkg: Package = run_with_task_manager(coro=repo.get_details(name, kind))
 
         console.print(package_details(pkg))
 
@@ -164,10 +198,10 @@ def search(term: str) -> None:
     """
     try:
         repo = Repository()
-        pkgs = asyncio.run(main=repo.get_all_installed())
+        pkgs: List[Package] = run_with_task_manager(coro=repo.get_all_installed())
 
         q: str = term.lower()
-        pkgs = [
+        pkgs: List[Package] = [
             p for p in pkgs if q in p.name.lower() or (p.desc and q in p.desc.lower())
         ]
 
@@ -206,7 +240,7 @@ def install(
 
         repo = Repository()
         with console.status(status=f"[bold green]Installing {name}...", spinner="dots"):
-            pkg = asyncio.run(main=repo.install_package(name, kind))
+            pkg: Package = run_with_task_manager(coro=repo.install_package(name, kind))
 
         console.print(
             f"\n✅ Installed [bold]{pkg.name}[/bold] "
@@ -239,8 +273,12 @@ def uninstall(
         repo = Repository()
 
         if kind is None:
-            all_pkgs = asyncio.run(main=repo.get_all_installed())
-            matching_pkg = next((p for p in all_pkgs if p.name == name), None)
+            all_pkgs: List[Package] = run_with_task_manager(
+                coro=repo.get_all_installed()
+            )
+            matching_pkg: Package | None = next(
+                (p for p in all_pkgs if p.name == name), None
+            )
             if matching_pkg:
                 kind: PackageKind = matching_pkg.kind
             else:
@@ -259,8 +297,10 @@ def uninstall(
                 console.print("Uninstallation cancelled.", style="dim")
                 sys.exit(0)
 
-        with console.status(status=f"[bold red]Uninstalling {name}...", spinner="dots"):
-            asyncio.run(main=repo.uninstall_package(name, kind))
+        with console.status(
+            status=f"[bold yellow]Uninstalling {name}...", spinner="dots"
+        ):
+            run_with_task_manager(coro=repo.uninstall_package(name, kind))
 
         console.print(f"\n✅ Uninstalled [bold]{name}[/bold]")
 
@@ -292,9 +332,14 @@ def outdated(
             with console.status(
                 status="[bold yellow]Checking for updates...[/bold yellow]"
             ):
-                pkgs = asyncio.run(main=repo.get_outdated(live=True))
+                pkgs: List[Package] = run_with_task_manager(
+                    coro=repo.get_outdated(live=True)
+                )
+
         else:
-            pkgs = asyncio.run(main=repo.get_outdated(live=False))
+            pkgs: List[Package] = run_with_task_manager(
+                coro=repo.get_outdated(live=False)
+            )
 
         if not pkgs:
             console.print("\n[bold green]✅ All packages are up to date![/bold green]")
@@ -307,6 +352,126 @@ def outdated(
             f"or [bold]brewery upgrade[/bold] to update all.[/dim]"
         )
 
+    except Exception as e:
+        sys.exit(handle_error(error=e))
+
+
+@app.command_with_aliases(aliases=["u", "up"])
+def upgrade(
+    name: Optional[str] = app.Argument(
+        None, help="Package to upgrade (leave empty to upgrade all)"
+    ),
+    kind: Optional[PackageKind] = app.Option(
+        None, "--kind", help="formula | cask | auto (default)"
+    ),
+    yes: bool = app.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+) -> None:
+    """Upgrade one or all outdated packages.
+
+    Args:
+        name: Name of the package to upgrade (if None, upgrades all outdated).
+        kind: Kind of the package (formula or cask).
+        yes: If true, skip confirmation prompt.
+    """
+    try:
+        repo = Repository()
+
+        if name:
+            if kind is None:
+                all_pkgs: List[Package] = run_with_task_manager(
+                    coro=repo.get_all_installed()
+                )
+                matching_pkg: Package | None = next(
+                    (p for p in all_pkgs if p.name == name), None
+                )
+                if not matching_pkg:
+                    raise PackageNotFoundError(package=name)
+                kind: PackageKind = matching_pkg.kind
+            else:
+                kind: PackageKind = kind
+
+            if not yes:
+                app.confirm(
+                    text=f"Upgrade {kind.value} '{name}'?", default=True, abort=True
+                )
+
+            with console.status(status=f"[bold yellow]Upgrading {name}..."):
+                pkg: Package = run_with_task_manager(
+                    coro=repo.upgrade_package(name, kind)
+                )
+
+            console.print(
+                f"[bold green]✅ Upgraded {pkg.name}[/bold green] "
+                f"-> {pkg.versions[0] if pkg.versions else 'unknown'}"
+            )
+
+        else:
+            outdated: List[Package] = run_with_task_manager(
+                coro=repo.get_outdated(live=False)
+            )
+
+            if not outdated:
+                console.print(
+                    "\n[bold green]✅ All packages are up to date![/bold green]"
+                )
+                return
+
+            console.print(package_table(pkgs=outdated))
+
+            if not yes:
+                app.confirm(
+                    text=f"Upgrade {len(outdated)} outdated packages?",
+                    default=True,
+                    abort=True,
+                )
+
+            upgraded: List[Package] = []
+            failures: List[tuple[str, str]] = []
+
+            for pkg in outdated:
+                if PackageStatus.PINNED in pkg.status:
+                    console.print(
+                        f"[bold yellow]❌ Skipping pinned package: {pkg.name}[/bold yellow]"
+                    )
+                    failures.append((pkg.name, "pinned - skipped"))
+                    continue
+
+                with console.status(status=f"[bold yellow]Upgrading {pkg.name}..."):
+                    try:
+                        result: Package = run_with_task_manager(
+                            coro=repo.upgrade_package(pkg.name, pkg.kind)
+                        )
+                        upgraded.append(result)
+                        console.print(
+                            f"[bold green]✅ Upgraded {pkg.name}[/bold green]"
+                        )
+
+                    except PinnedPackageWarning:
+                        console.print(
+                            f"[bold yellow]❌ Skipping pinned package: {pkg.name}[/bold yellow]"
+                        )
+                        failures.append((pkg.name, "pinned - skipped"))
+
+                    except Exception as e:
+                        msg = str(object=e)
+                        console.print(
+                            f"[bold red]❌ Failed to upgrade {pkg.name}: {msg}[/bold red]"
+                        )
+                        failures.append((pkg.name, msg))
+
+            console.print(
+                f"\n[bold green]✅ Upgraded {len(upgraded)} package(s)[/bold green]"
+            )
+
+            if failures:
+                console.print(
+                    f"[bold red]❌ {len(failures)} skipped/failed:[/bold red]\n"
+                )
+                for pkg_name, reason in failures:
+                    console.print(f" - {pkg_name}: [dim]{reason}[/dim]")
+
+    except PinnedPackageWarning as e:
+        console.print(f"\n[bold yellow]⚠️ {e.message}[/bold yellow]\n")
     except Exception as e:
         sys.exit(handle_error(error=e))
 

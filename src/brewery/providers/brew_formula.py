@@ -37,6 +37,7 @@ async def get_package_size(path: str | None) -> int | None:
         if returncode == 0:
             size_kb = int(stdout.split()[0])
             return size_kb
+
     except (ValueError, IndexError, Exception) as e:
         log.debug(event="get_size_error", path=path, error=str(object=e))
 
@@ -132,6 +133,7 @@ async def info(name: str) -> Package:
 
     data: Any = await run_json("brew", "info", "--json=v2", name)
     f: Any | dict[Unknown, Unknown] = (data.get("formulae") or [{}])[0]
+
     if not f:
         log.error(event="formula_not_found", package=name)
         raise PackageNotFoundError(package=name, kind="formula")
@@ -227,7 +229,7 @@ async def install(name: str) -> str:
     Raises:
         BrewCommandError: If the installation fails.
     """
-    await run_brew_command("install", name, flags=["--formula"])
+    await run_brew_command(subcommand="install", name=name, flags=["--formula"])
 
     return name
 
@@ -244,6 +246,24 @@ async def uninstall(name: str) -> str:
     Raises:
         BrewCommandError: If the uninstallation fails.
     """
-    await run_brew_command("uninstall", name, flags=["--formula"])
+    await run_brew_command(subcommand="uninstall", name=name, flags=["--formula"])
+
+    return name
+
+
+async def upgrade(name: str) -> str:
+    """Upgrade a Homebrew formula by name.
+
+    Args:
+        name: Name of the formula to upgrade.
+
+    Returns:
+        The package name on success.
+
+    Raises:
+        BrewCommandError: If the upgrade fails.
+        PinnedPackageWarning: If the package is pinned.
+    """
+    await run_brew_command(subcommand="upgrade", name=name, flags=[])
 
     return name

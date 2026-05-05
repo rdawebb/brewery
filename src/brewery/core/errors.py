@@ -42,7 +42,7 @@ class BrewError(Exception):
 
     def __init__(self, message: str, context: dict[str, Any] | None = None) -> None:
         self.message: str = message
-        self.context = context or {}
+        self.context: dict[str, Any] = context or {}
         super().__init__(message)
 
     def with_context(self, **new_context: Any) -> Self:
@@ -134,7 +134,7 @@ class BrewCommandError(TransientError):
             error: The error output from the command.
             context: Additional context information.
         """
-        ctx = context or {}
+        ctx: dict[str, Any] = context or {}
         if command:
             ctx["command"] = command
         if returncode is not None:
@@ -175,7 +175,7 @@ class BrewTimeoutError(TransientError):
             timeout: The timeout threshold in seconds.
             context: Additional context information.
         """
-        ctx = context or {}
+        ctx: dict[str, Any] = context or {}
         if command:
             ctx["command"] = command
         if timeout is not None:
@@ -208,7 +208,7 @@ class PackageNotFoundError(UserError):
             kind: The kind of package (e.g., formula, cask).
             context: Additional context information.
         """
-        ctx = context or {}
+        ctx: dict[str, Any] = context or {}
         if package:
             ctx["package"] = package
         if kind:
@@ -232,12 +232,31 @@ class AlreadyInstalledWarning(UserError):
     def __init__(
         self, package: str | None = None, context: dict[str, Any] | None = None
     ) -> None:
-        ctx = context or {}
+        ctx: dict[str, Any] = context or {}
         if package:
             ctx["package"] = package
 
         super().__init__(
-            message=f"Package '{package or 'unknown'}' is already installed",
+            message=f"'{package or 'unknown'}' is already installed",
+            context=ctx,
+        )
+
+
+class PinnedPackageWarning(UserError):
+    """Package is pinned - upgrade skipped.
+
+    Raised by upgrade command when trying to upgrade a pinned package.
+
+    CLI should inform the user that the package is pinned and cannot be upgraded.
+    """
+
+    def __init__(self, package: str | None = None) -> None:
+        ctx: dict[str, Any] = {}
+        if package:
+            ctx["package"] = package
+
+        super().__init__(
+            message=f"'{package or 'unknown'}' is pinned and cannot be upgraded",
             context=ctx,
         )
 
@@ -273,7 +292,7 @@ class CacheError(SystemError):
             operation: The cache operation being performed.
             context: Additional context information.
         """
-        ctx = context or {}
+        ctx: dict[str, Any] = context or {}
         if key:
             ctx["key"] = key
         if namespace:
@@ -414,6 +433,10 @@ ERROR_TEMPLATES: dict[type[BrewError], str] = {
     AlreadyInstalledWarning: (
         "⚠️ Already installed: {package}\n"
         "   Suggestion: Try 'brewery update {package}' to update the package"
+    ),
+    PinnedPackageWarning: (
+        "⚠️ Package is pinned: {package}\n"
+        "   Suggestion: Try 'brewery unpin {package}' to unpin the package before upgrading"
     ),
     PackageNotFoundError: (
         "❌ Package Not Found: {package}\n"

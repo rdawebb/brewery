@@ -25,6 +25,7 @@ class Cache:
     """A simple file-based cache with expiration."""
 
     def __init__(self, namespace: str):
+        """Initialise the cache for a specific namespace."""
         self.cache_path: Path = CACHE_DIR / namespace
         self.cache_path.mkdir(parents=True, exist_ok=True)
         self._cached_token = None
@@ -62,6 +63,7 @@ class Cache:
         def mtime(p: Path) -> int:
             try:
                 return int(p.stat().st_mtime)
+
             except FileNotFoundError:
                 return 0
 
@@ -112,7 +114,9 @@ class Cache:
                         age_seconds=age_seconds,
                         duration_ms=duration_ms,
                     )
+
                     return data.get("value")
+
                 else:
                     reason: Literal["expired", "token_mismatch"] = (
                         "expired"
@@ -152,6 +156,7 @@ class Cache:
 
         try:
             value: Any = loader()
+
         except TransientError as e:
             if allow_stale and stale_data is not None:
                 age_seconds: Any = now - data.get("_ts", now)
@@ -167,6 +172,7 @@ class Cache:
                     style="bold yellow",
                 )
                 return stale_data
+
             else:
                 raise
 
@@ -219,6 +225,7 @@ class Cache:
             if token == data.get("_token"):
                 log.info(event="cache_hit", key=key, namespace=self.cache_path.name)
                 return data.get("value")
+
             else:
                 log.debug(
                     event="cache_invalid", key=key, namespace=self.cache_path.name

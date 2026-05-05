@@ -38,6 +38,7 @@ async def get_package_size(path: str | None) -> int | None:
         if returncode == 0:
             size_kb = int(stdout.split()[0])
             return size_kb
+
     except (ValueError, IndexError, Exception) as e:
         log.debug(event="get_size_error", path=path, error=str(object=e))
 
@@ -200,5 +201,23 @@ async def uninstall(name: str) -> str:
         BrewCommandError: If the uninstallation fails.
     """
     await run_brew_command(subcommand="uninstall", name=name, flags=["--cask"])
+
+    return name
+
+
+async def upgrade(name: str) -> str:
+    """Upgrade a Homebrew cask by name.
+
+    Args:
+        name: Name of the cask to upgrade.
+
+    Returns:
+        The cask name on success.
+
+    Raises:
+        BrewCommandError: If the upgrade fails.
+        PinnedPackageWarning: If the package is pinned.
+    """
+    await run_brew_command(subcommand="upgrade", name=name, flags=[])
 
     return name

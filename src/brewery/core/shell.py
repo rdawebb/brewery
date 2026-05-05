@@ -14,6 +14,7 @@ from brewery.core.errors import (
     AlreadyInstalledWarning,
     BrewCommandError,
     BrewTimeoutError,
+    PinnedPackageWarning,
     retry_on_transient,
 )
 from brewery.core.logging import get_logger
@@ -27,7 +28,7 @@ ENV_OVERRIDES: dict[str, str] = {
 
 
 async def run_brew_command(
-    subcommand: Literal["install", "uninstall"],
+    subcommand: Literal["install", "uninstall", "upgrade"],
     name: str,
     flags: list[str],
     timeout: int = 120,
@@ -62,6 +63,9 @@ async def run_brew_command(
         and "already installed" in (err + out).lower()
     ):
         raise AlreadyInstalledWarning(package=name)
+
+    if code != 0 and subcommand == "upgrade" and "pinned" in (err + out).lower():
+        raise PinnedPackageWarning(package=name)
 
     if code != 0:
         log.error(

@@ -94,6 +94,7 @@ def configure_logging(
             logger_factory=structlog.stdlib.LoggerFactory(),
             cache_logger_on_first_use=True,
         )
+
     else:
         structlog.configure(
             processors=shared_processors
@@ -138,4 +139,5 @@ def get_logger(name: str = "brewery") -> FilteringBoundLogger:
     """
     if not _CONFIGURED:
         configure_logging()
+
     return structlog.get_logger(name)

@@ -29,6 +29,7 @@ def status_to_str(status: PackageStatus) -> str:
     if status == PackageStatus.NONE:
         return "[green]Up-to-date[/green]"
     bits: list[str] = [label for flag, label in STATUS_LABELS.items() if flag in status]
+
     return ", ".join(bits)
 
 

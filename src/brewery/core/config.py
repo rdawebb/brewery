@@ -30,6 +30,7 @@ def get_brewery_env() -> BreweryENV:
 
         except Exception:
             prefix = None
+
     else:
         prefix = None
 
@@ -42,6 +43,7 @@ def get_brewery_env() -> BreweryENV:
             prefix = Path(output)
             _BREW_PREFIX_CACHE.write_text(data=str(object=prefix))
             print(f"Cached brew prefix: {prefix}")
+
         except (subprocess.CalledProcessError, FileNotFoundError):
             prefix: Path = Path("/usr/local") / "brew"
 
