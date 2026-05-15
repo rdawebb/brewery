@@ -12,7 +12,7 @@ from brewery.core.cache import Cache, CacheManager
 from brewery.core.errors import BrewCommandError, PackageNotFoundError
 from brewery.core.logging import get_logger
 from brewery.core.models import Package, PackageKind, PackageStatus
-from brewery.core.task_manager import TaskManager, get_task_manager
+from brewery.core.task_manager import BackgroundTaskManager, get_task_manager
 from brewery.providers import brew_cask, brew_formula, brew_outdated
 
 log: FilteringBoundLogger = get_logger(name=__name__)
@@ -170,7 +170,7 @@ class Repository:
 
         if live:
             # Background task to refresh cache
-            task_mgr: TaskManager = get_task_manager()
+            task_mgr: BackgroundTaskManager = get_task_manager()
             task_mgr.add_task(coro=self.cache_mgr.refresh_outdated_status())
 
             # Fetch live outdated data

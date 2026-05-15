@@ -31,7 +31,7 @@ from brewery.core.errors import (
 from brewery.core.logging import configure_logging, get_logger
 from brewery.core.models import Package, PackageKind, PackageStatus
 from brewery.core.repo import Repository
-from brewery.core.task_manager import TaskManager, get_task_manager
+from brewery.core.task_manager import BackgroundTaskManager, get_task_manager
 
 log: FilteringBoundLogger = get_logger(name=__name__)
 
@@ -93,7 +93,7 @@ def run_with_task_manager(coro: Awaitable[Unknown]) -> Any:
 
     async def main_with_tasks() -> None:
         result: Unknown = await coro
-        task_manager: TaskManager = get_task_manager()
+        task_manager: BackgroundTaskManager = get_task_manager()
         await task_manager.wait_for_all()
 
         return result
