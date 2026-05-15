@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
-import functools
-import time
-from typing import Any, Awaitable, Callable, Self, TypeVar, overload
+from typing import Any, Self, TypeVar
 
 from structlog.typing import FilteringBoundLogger
 
@@ -307,124 +304,6 @@ class CacheError(SystemError):
             message = f"Cache {op_str} operation failed"
 
         super().__init__(message, context=ctx)
-
-
-# Async version
-@overload
-def retry_on_transient(
-    max_retries: int = 3, base_delay: float = 1.0, backoff: float = 2.0
-) -> Callable[[Callable[..., Awaitable[AR]]], Callable[..., Awaitable[AR]]]: ...
-
-
-# Sync version
-@overload
-def retry_on_transient(
-    max_retries: int = 3, base_delay: float = 1.0, backoff: float = 2.0
-) -> Callable[[Callable[..., R]], Callable[..., R]]: ...
-
-
-def retry_on_transient(
-    max_retries: int = 3, base_delay: float = 1.0, backoff: float = 2.0
-):
-    """Retry async functions on transient errors with exponential backoff.
-
-    Args:
-        max_retries: Maximum number of retries before giving up.
-        base_delay: Initial delay between retries in seconds.
-        backoff: Multiplier for delay to implement exponential backoff.
-
-    Returns:
-        A decorator that applies the retry logic to the decorated function.
-
-    Example:
-        @retry_on_transient(max_retries=5, base_delay=2.0)
-        async def fetch_data():
-            ...
-
-    Note:
-        - Only retries on TransientError exceptions.
-        - Logs each retry attempt with context information.
-        - Works with sync and async functions.
-        - Delays: 1s, 2s, 4s with default settings.
-    """
-
-    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-        """Decorator to apply retry logic to the function."""
-
-        @functools.wraps(wrapped=func)
-        async def async_wrapper(*args: Any, **kwargs: Any) -> AR:
-            last_error: TransientError | None = None
-
-            for attempt in range(1, max_retries + 1):
-                try:
-                    return await func(*args, **kwargs)
-                except TransientError as e:
-                    last_error: TransientError = e
-
-                    if attempt == max_retries:
-                        log.error(
-                            event="retry_exhausted",
-                            function=getattr(func, "__name__", repr(func)),
-                            attempts=max_retries,
-                            error=str(object=e),
-                            context=getattr(e, "context", {}),
-                        )
-                        raise
-
-                    delay: Any | int | float = base_delay * (backoff ** (attempt - 1))
-                    log.warning(
-                        event="retry_attempt",
-                        function=getattr(func, "__name__", repr(func)),
-                        attempt=attempt,
-                        max_attempts=max_retries,
-                        delay_seconds=delay,
-                        error=str(object=e),
-                        context=getattr(e, "context", {}),
-                    )
-                    await asyncio.sleep(delay)
-
-            raise last_error  # type: ignore
-
-        @functools.wraps(wrapped=func)
-        def sync_wrapper(*args: Any, **kwargs: Any) -> R:
-            last_error: TransientError | None = None
-
-            for attempt in range(1, max_retries + 1):
-                try:
-                    return func(*args, **kwargs)
-                except TransientError as e:
-                    last_error: TransientError = e
-
-                    if attempt == max_retries:
-                        log.error(
-                            event="retry_exhausted",
-                            function=getattr(func, "__name__", repr(func)),
-                            attempts=max_retries,
-                            error=str(object=e),
-                            context=getattr(e, "context", {}),
-                        )
-                        raise
-
-                    delay: Any | int | float = base_delay * (backoff ** (attempt - 1))
-                    log.warning(
-                        event="retry_attempt",
-                        function=getattr(func, "__name__", repr(func)),
-                        attempt=attempt,
-                        max_attempts=max_retries,
-                        delay_seconds=delay,
-                        error=str(object=e),
-                        context=getattr(e, "context", {}),
-                    )
-                    time.sleep(delay)
-
-            raise last_error  # type: ignore
-
-        if asyncio.iscoroutinefunction(func):
-            return async_wrapper
-        else:
-            return sync_wrapper
-
-    return decorator
 
 
 # CLI Error Message Templates

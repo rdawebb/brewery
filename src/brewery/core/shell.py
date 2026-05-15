@@ -10,12 +10,12 @@ from typing import Any, Literal, Optional
 
 from structlog.typing import FilteringBoundLogger
 
+from brewery.core.decorators import retry_on_transient
 from brewery.core.errors import (
     AlreadyInstalledWarning,
     BrewCommandError,
     BrewTimeoutError,
     PinnedPackageWarning,
-    retry_on_transient,
 )
 from brewery.core.logging import get_logger
 

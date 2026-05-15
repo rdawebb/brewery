@@ -3,19 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from typing import List, Optional
 
-from structlog.typing import FilteringBoundLogger
-
 from brewery.core.cache import Cache, CacheManager
+from brewery.core.decorators import log_operation
 from brewery.core.errors import BrewCommandError, PackageNotFoundError
-from brewery.core.logging import get_logger
 from brewery.core.models import Package, PackageKind, PackageStatus
 from brewery.core.task_manager import BackgroundTaskManager, get_task_manager
 from brewery.providers import brew_cask, brew_formula, brew_outdated
-
-log: FilteringBoundLogger = get_logger(name=__name__)
 
 
 class Repository:
@@ -26,6 +21,7 @@ class Repository:
         self.cache = Cache(namespace="repository")
         self.cache_mgr = CacheManager(self.cache)
 
+    @log_operation(event_prefix="get_all_installed", log_args=["kind_filter"])
     async def get_all_installed(
         self, kind_filter: Optional[PackageKind] = None
     ) -> List[Package]:
@@ -37,25 +33,15 @@ class Repository:
         Returns:
             A list of installed Package instances.
         """
-        start: int | float = time.perf_counter()
-        log.info(
-            event="fetch_packages_start",
-            kind_filter=kind_filter.value if kind_filter else "all",
-        )
-
         pkgs: list[Package] = await self.cache_mgr.load_packages(kind=kind_filter)
         if not pkgs:
             pkgs: list[Package] = await self.cache_mgr.refresh_packages(
                 kind=kind_filter
             )
 
-        duration_ms = int((time.perf_counter() - start) * 1000)
-        log.info(
-            event="get_all_installed_complete", count=len(pkgs), duration_ms=duration_ms
-        )
-
         return pkgs
 
+    @log_operation(event_prefix="get_details", log_args=["name", "kind"])
     async def get_details(self, name: str, kind: PackageKind) -> Package:
         """Get package details by name and kind.
 
@@ -66,17 +52,11 @@ class Repository:
         Returns:
             A Package instance with detailed information.
         """
-        start: int | float = time.perf_counter()
-        log.info(event="fetch_package_details_start", package=name, kind=kind.value)
-
         pkg: Package | None = await self.cache_mgr.get_details_from_cache(name, kind)
         if pkg:
-            duration_ms = int((time.perf_counter() - start) * 1000)
-            log.info(
-                event="get_details_complete", package=name, duration_ms=duration_ms
-            )
             return pkg
 
+        # Fallback on cache miss
         if kind == PackageKind.FORMULA:
             pkg: Package = await brew_formula.info(name)
         else:
@@ -85,11 +65,9 @@ class Repository:
         if not pkg:
             raise PackageNotFoundError(package=name, kind=kind.value)
 
-        duration_ms = int((time.perf_counter() - start) * 1000)
-        log.info(event="get_details_complete", package=name, duration_ms=duration_ms)
-
         return pkg
 
+    @log_operation(event_prefix="install_package", log_args=["name", "kind"])
     async def install_package(self, name: str, kind: PackageKind) -> Package:
         """Install a package and refresh cache on success.
 
@@ -103,9 +81,6 @@ class Repository:
         Raises:
             BrewCommandError: Propagated from provider.
         """
-        start: float = time.perf_counter()
-        log.info(event="install_package_start", package=name, kind=kind.value)
-
         if kind is PackageKind.FORMULA:
             await brew_formula.install(name)
             pkg: Package = await brew_formula.info(name)
@@ -115,16 +90,9 @@ class Repository:
 
         await self.cache_mgr.update_single(name=name, kind=kind, action="add", pkg=pkg)
 
-        duration_ms = int((time.perf_counter() - start) * 1000)
-        log.info(
-            event="install_package_complete",
-            package=name,
-            kind=kind.value,
-            duration_ms=duration_ms,
-        )
-
         return pkg
 
+    @log_operation(event_prefix="uninstall_package", log_args=["name", "kind"])
     async def uninstall_package(self, name: str, kind: PackageKind) -> None:
         """Uninstall a package and refresh cache on success.
 
@@ -138,9 +106,6 @@ class Repository:
         Raises:
             BrewCommandError: Propagated from provider.
         """
-        start: float = time.perf_counter()
-        log.info(event="uninstall_package_start", package=name, kind=kind.value)
-
         if kind is PackageKind.FORMULA:
             await brew_formula.uninstall(name)
         else:
@@ -148,14 +113,7 @@ class Repository:
 
         await self.cache_mgr.update_single(name=name, kind=kind, action="remove")
 
-        duration_ms = int((time.perf_counter() - start) * 1000)
-        log.info(
-            event="uninstall_package_complete",
-            package=name,
-            kind=kind.value,
-            duration_ms=duration_ms,
-        )
-
+    @log_operation(event_prefix="get_outdated", log_args=["name", "kind"])
     async def get_outdated(self, live: bool = False) -> list[Package]:
         """Return a list of outdated packages.
 
@@ -165,9 +123,6 @@ class Repository:
         Returns:
             List of packages with OUTDATED status.
         """
-        start: float = time.perf_counter()
-        log.info(event="get_outdated_start", live=live)
-
         if live:
             # Background task to refresh cache
             task_mgr: BackgroundTaskManager = get_task_manager()
@@ -185,14 +140,9 @@ class Repository:
                 p for p in all_pkgs if PackageStatus.OUTDATED in p.status
             ]
 
-        duration_ms = int((time.perf_counter() - start) * 1000)
-        log.info(
-            event="get_outdated_complete",
-            count=len(outdated_pkgs),
-            duration_ms=duration_ms,
-        )
         return outdated_pkgs
 
+    @log_operation(event_prefix="upgrade_package", log_args=["name", "kind"])
     async def upgrade_package(self, name: str, kind: PackageKind) -> Package:
         """Upgrade a single package and refresh cache entry.
 
@@ -220,6 +170,7 @@ class Repository:
 
         return pkg
 
+    @log_operation(event_prefix="upgrade_all_outdated", log_args=["name", "kind"])
     async def upgrade_all_outdated(self) -> tuple[list[Package], list[tuple[str, str]]]:
         """Upgrade all outdated packages.
 
@@ -249,7 +200,6 @@ class Repository:
 
         for pkg in outdated:
             if PackageStatus.PINNED in pkg.status:
-                log.info(event="upgrade_skipped_pinned", package=pkg.name)
                 failures.append((pkg.name, "pinned - skipped"))
 
         async def _upgrade_batch(packages: list[Package], provider) -> list[str]:
@@ -263,10 +213,6 @@ class Repository:
                 return names
 
             except BrewCommandError as e:
-                log.error(
-                    event="batch_upgrade_failed",
-                    error=str(object=e),
-                )
                 for pkg in packages:
                     failures.append((pkg.name, str(object=e.message)))
                 return []
@@ -298,11 +244,5 @@ class Repository:
             upgraded_kinds.append(PackageKind.CASK)
 
         await self.cache_mgr.update_batch(packages=upgraded_pkgs, kinds=upgraded_kinds)
-
-        log.info(
-            event="upgrade_all_outdated_complete",
-            upgraded=len(upgraded),
-            failed=len(failures),
-        )
 
         return upgraded, failures
