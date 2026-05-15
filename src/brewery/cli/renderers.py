@@ -81,7 +81,7 @@ def package_details(pkg: Package) -> Table:
         A Rich Table displaying detailed information about the package.
     """
     t = Table(box=box.MINIMAL, show_header=False)
-    t.add_row("Name", pkg.name)
+    t.add_row("Name", pkg.name, style="bold blue")
     t.add_row("Kind", pkg.kind.value)
     t.add_row("Description", pkg.desc or "")
     t.add_row("Installed Versions", ", ".join(pkg.versions))
@@ -91,7 +91,7 @@ def package_details(pkg: Package) -> Table:
     if pkg.deps:
         t.add_row("Depends on", ", ".join(d.name for d in pkg.deps))
     if pkg.used_by:
-        t.add_row("Used by", ", ".join(pkg.used_by))
+        t.add_row("Used by", ", ".join(pkg.used_by), style="dim")
     if pkg.tap:
         t.add_row("Tap", pkg.tap)
     if pkg.path:

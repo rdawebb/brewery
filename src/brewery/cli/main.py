@@ -395,14 +395,14 @@ def upgrade(
                     text=f"Upgrade {kind.value} '{name}'?", default=True, abort=True
                 )
 
-            with console.status(status=f"[bold yellow]Upgrading {name}..."):
+            with console.status(status=f"[bold yellow]Upgrading {name}...\n"):
                 pkg: Package = run_with_task_manager(
                     coro=repo.upgrade_package(name, kind)
                 )
 
             console.print(
-                f"[bold green]✅ Upgraded {pkg.name}[/bold green] "
-                f"-> {pkg.versions[0] if pkg.versions else 'unknown'}"
+                f"\n[bold green]✅ Upgraded {pkg.name}[/bold green] "
+                f"-> {pkg.versions[0] if pkg.versions else 'unknown'}\n"
             )
 
         else:
@@ -412,7 +412,7 @@ def upgrade(
 
             if not outdated:
                 console.print(
-                    "\n[bold green]✅ All packages are up to date![/bold green]"
+                    "\n[bold green]✅ All packages are up to date![/bold green]\n"
                 )
                 return
 
@@ -436,14 +436,14 @@ def upgrade(
                     failures.append((pkg.name, "pinned - skipped"))
                     continue
 
-                with console.status(status=f"[bold yellow]Upgrading {pkg.name}..."):
+                with console.status(status=f"[bold yellow]Upgrading {pkg.name}...\n"):
                     try:
                         result: Package = run_with_task_manager(
                             coro=repo.upgrade_package(pkg.name, pkg.kind)
                         )
                         upgraded.append(result)
                         console.print(
-                            f"[bold green]✅ Upgraded {pkg.name}[/bold green]"
+                            f"\n[bold green]✅ Upgraded {pkg.name}[/bold green]\n"
                         )
 
                     except PinnedPackageWarning:
