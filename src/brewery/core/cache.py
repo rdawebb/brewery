@@ -408,117 +408,47 @@ class CacheManager:
 
         log.info(event="cache_invalidate_complete", kind=kind.value)
 
-    async def update_single(
+    async def update_packages(
         self,
-        name: str,
-        kind: PackageKind,
+        packages: Package | list[Package],
         action: Literal["add", "remove", "update"],
-        pkg: Optional[Package] = None,
     ) -> None:
-        """Update a single package entry in cache.
-
-        Updates both the specific kind cache (e.g., 'installed_formula')
-        and the combined 'installed_all' cache.
+        """Update one or more package entries in cache.
 
         Args:
-            name: Package name.
-            kind: Package kind.
+            packages: A single Package or list of Packages to update.
             action: "add", "remove", or "update".
-            pkg: Package instance (required for add/update).
         """
-        log.info(
-            event="cache_update_single_start",
-            package=name,
-            action=action,
-            kind=kind.value,
+        pkg_list: list[Package] = (
+            [packages] if isinstance(packages, Package) else packages
         )
 
-        for suffix in [kind.value, "all"]:
+        for suffix in list({p.kind.value for p in pkg_list} | {"all"}):
             list_key = f"installed_{suffix}"
             map_key = f"installed_map_{suffix}"
 
             try:
-                cached_list = self.cache.get(key=list_key)
-                cached_map = self.cache.get(key=map_key)
+                cached_list: list | None = self.cache.get(key=list_key)
+                cached_map: dict | None = self.cache.get(key=map_key)
 
                 if cached_list is None or cached_map is None:
-                    log.debug(
-                        event="cache_update_skipped_missing",
-                        list_key=list_key,
-                        map_key=map_key,
-                    )
                     continue
 
-                if action == "remove":
-                    cached_map.pop(name, None)
-                    cached_list: list = [
-                        p for p in cached_list if p.get("name") != name
-                    ]
+                for pkg in pkg_list:
+                    if action == "remove":
+                        cached_map.pop(pkg.name, None)
+                        cached_list: list = [
+                            p for p in cached_list if p.get("name") != pkg.name
+                        ]
 
-                elif action in ("add", "update") and pkg:
-                    pkg_dict: dict = pkg.to_serializable_dict()
-                    cached_map[name] = pkg_dict
-
-                    # Remove old entry if updating
-                    cached_list: list = [
-                        p for p in cached_list if p.get("name") != name
-                    ]
-                    cached_list.append(pkg_dict)
-
-                    # Re-sort
-                    cached_list.sort(
-                        key=lambda p: (p.get("kind", ""), p.get("name", "").lower())
-                    )
-
-                self.cache.set(key=list_key, value=cached_list)
-                self.cache.set(key=map_key, value=cached_map)
-
-                log.debug(event="cache_update_success", key=list_key)
-
-            except Exception as e:
-                log.error(
-                    event="cache_update_failed",
-                    list_key=list_key,
-                    error=str(object=e),
-                    exc_info=True,
-                )
-
-        log.info(event="cache_update_single_complete", package=name)
-
-    async def update_batch(
-        self, packages: list[Package], kinds: list[PackageKind]
-    ) -> None:
-        """Update multiple package entries in cache.
-
-        Args:
-            packages: List of Package instances to update.
-            kinds: List of PackageKind to update.
-        """
-        log.info(event="cache_update_batch_start", count=len(packages))
-
-        for kind in kinds:
-            list_key = f"installed_{kind.value}"
-            map_key = f"installed_map_{kind.value}"
-
-            try:
-                cached_list = self.cache.get(key=list_key)
-                cached_map = self.cache.get(key=map_key)
-
-                if cached_list is None or cached_map is None:
-                    log.debug(event="cache_update_batch_skipped", kind=kind.value)
-                    continue
-
-                # Update entries
-                for pkg in packages:
-                    if pkg.kind == kind:
-                        pkg_dict: dict = pkg.to_serializable_dict()
+                    elif action in ("add", "update"):
+                        pkg_dict: dict[str, Any] = pkg.to_serializable_dict()
                         cached_map[pkg.name] = pkg_dict
                         cached_list: list = [
                             p for p in cached_list if p.get("name") != pkg.name
                         ]
                         cached_list.append(pkg_dict)
 
-                # Re-sort
                 cached_list.sort(
                     key=lambda p: (p.get("kind", ""), p.get("name", "").lower())
                 )
@@ -526,16 +456,13 @@ class CacheManager:
                 self.cache.set(key=list_key, value=cached_list)
                 self.cache.set(key=map_key, value=cached_map)
 
-                log.debug(event="cache_update_batch_success", kind=kind.value)
-
             except Exception as e:
                 log.error(
-                    event="cache_update_batch_failed",
-                    kind=kind.value,
+                    event="cache_update_failed",
+                    key=list_key,
                     error=str(object=e),
+                    exc_info=True,
                 )
-
-        log.info(event="cache_update_batch_complete", count=len(packages))
 
     async def get_details_from_cache(
         self, name: str, kind: PackageKind
@@ -559,7 +486,7 @@ class CacheManager:
 
         # Try map cache first
         try:
-            cached_map = self.cache.get(key=map_key)
+            cached_map: dict | None = self.cache.get(key=map_key)
             if cached_map is not None and name in cached_map:
                 log.debug(event="cache_hit_map", key=map_key, package=name)
                 return Package.package_from_dict(data=cached_map[name])
@@ -568,7 +495,7 @@ class CacheManager:
 
         # Try list cache
         try:
-            cached_list = self.cache.get(key=list_key)
+            cached_list: dict | None = self.cache.get(key=list_key)
             if cached_list is not None:
                 for pkg_data in cached_list:
                     if pkg_data.get("name") == name:

@@ -88,7 +88,7 @@ class Repository:
             await brew_cask.install(name)
             pkg: Package = await brew_cask.info(name)
 
-        await self.cache_mgr.update_single(name=name, kind=kind, action="add", pkg=pkg)
+        await self.cache_mgr.update_packages(packages=pkg, action="add")
 
         return pkg
 
@@ -111,7 +111,11 @@ class Repository:
         else:
             await brew_cask.uninstall(name)
 
-        await self.cache_mgr.update_single(name=name, kind=kind, action="remove")
+        pkg: Package | None = await self.cache_mgr.get_details_from_cache(
+            name=name, kind=kind
+        )
+        if pkg:
+            await self.cache_mgr.update_packages(packages=pkg, action="remove")
 
     @log_operation(event_prefix="get_outdated", log_args=["name", "kind"])
     async def get_outdated(self, live: bool = False) -> list[Package]:
@@ -164,9 +168,7 @@ class Repository:
             await brew_cask.upgrade(name)
             pkg: Package = await brew_cask.info(name)
 
-        await self.cache_mgr.update_single(
-            name=name, kind=kind, action="update", pkg=pkg
-        )
+        await self.cache_mgr.update_packages(packages=pkg, action="update")
 
         return pkg
 
@@ -243,6 +245,6 @@ class Repository:
         if success_cask_names:
             upgraded_kinds.append(PackageKind.CASK)
 
-        await self.cache_mgr.update_batch(packages=upgraded_pkgs, kinds=upgraded_kinds)
+        await self.cache_mgr.update_packages(packages=upgraded_pkgs, action="update")
 
         return upgraded, failures
