@@ -29,7 +29,7 @@ ENV_OVERRIDES: dict[str, str] = {
 
 async def run_brew_command(
     subcommand: Literal["install", "uninstall", "upgrade"],
-    name: str,
+    names: list[str],
     flags: list[str],
     timeout: int = 120,
 ) -> tuple[str, str, int]:
@@ -48,21 +48,17 @@ async def run_brew_command(
         BrewCommandError: If the command fails.
         BrewTimeoutError: If the command times out.
     """
-    cmd: list[str] = ["brew", subcommand, *flags, name]
-    log.info(
-        event="brew_command_start", subcommand=subcommand, package=name, flags=flags
-    )
-    start: int | float = time.perf_counter()
+    cmd: list[str] = ["brew", subcommand, *flags, *names]
 
     out, err, code = await run_capture(*cmd, timeout=timeout)
-    duration_ms = int((time.perf_counter() - start) * 1000)
 
-    if (
-        code != 0
-        and subcommand == "install"
-        and "already installed" in (err + out).lower()
-    ):
-        raise AlreadyInstalledWarning(package=name)
+    for name in names:
+        if (
+            code != 0
+            and subcommand == "install"
+            and "already installed" in (err + out).lower()
+        ):
+            raise AlreadyInstalledWarning(package=name)
 
     if code != 0 and subcommand == "upgrade" and "pinned" in (err + out).lower():
         raise PinnedPackageWarning(package=name)
@@ -75,7 +71,6 @@ async def run_brew_command(
             flags=flags,
             error=err or out,
             returncode=code,
-            duration_ms=duration_ms,
         )
         raise BrewCommandError(command=" ".join(cmd), returncode=code, error=err or out)
 
@@ -84,7 +79,6 @@ async def run_brew_command(
         subcommand=subcommand,
         package=name,
         flags=flags,
-        duration_ms=duration_ms,
     )
 
     return out, err, code

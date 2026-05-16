@@ -119,30 +119,25 @@ async def list_installed() -> List[Package]:
     return pkgs
 
 
-async def info(name: str) -> Package:
-    """Get Homebrew formula info by name.
+async def info(names: list[str]) -> list[Package]:
+    """Get Homebrew formula info by name(s).
 
     Args:
-        name: Name of the formula.
+        names: Name(s) of the formula.
 
     Returns:
-        A Package instance with detailed information.
+        Package instance(s) with detailed information.
     """
-    start: int | float = time.perf_counter()
-    log.debug(event="formula_info_start", package=name)
+    data: Any = await run_json("brew", "info", "--json=v2", *names)
+    formulae: Any | dict = data.get("formulae") or [{}]
 
-    data: Any = await run_json("brew", "info", "--json=v2", name)
-    f: Any | dict[Unknown, Unknown] = (data.get("formulae") or [{}])[0]
+    if not formulae:
+        if len(names) == 1:
+            log.error(event="formula_not_found", package=names[0])
+            raise PackageNotFoundError(package=names[0], kind="formula")
+        return []
 
-    if not f:
-        log.error(event="formula_not_found", package=name)
-        raise PackageNotFoundError(package=name, kind="formula")
-
-    pkg: Package = (await list_installed_from_items(items=[f]))[0]
-    duration_ms = int((time.perf_counter() - start) * 1000)
-    log.info(event="formula_info_complete", package=name, duration_ms=duration_ms)
-
-    return pkg
+    return await list_installed_from_items(items=[formulae])
 
 
 async def list_installed_from_items(items) -> List[Package]:
@@ -217,53 +212,53 @@ async def list_installed_from_items(items) -> List[Package]:
     return pkgs
 
 
-async def install(name: str) -> str:
-    """Install a Homebrew formula by name.
+async def install(names: list[str]) -> list[str]:
+    """Install Homebrew formulae by name.
 
     Args:
-        name: Name of the formula to install.
+        names: Name(s) of the formulae to install.
 
     Returns:
-        The package name on success.
+        The package name(s) on success.
 
     Raises:
         BrewCommandError: If the installation fails.
     """
-    await run_brew_command(subcommand="install", name=name, flags=["--formula"])
+    await run_brew_command(subcommand="install", names=names, flags=["--formula"])
 
-    return name
+    return names
 
 
-async def uninstall(name: str) -> str:
-    """Uninstall a Homebrew formula by name.
+async def uninstall(names: list[str]) -> list[str]:
+    """Uninstall Homebrew formulae by name.
 
     Args:
-        name: Name of the formula to uninstall.
+        names: Name(s) of the formulae to uninstall.
 
     Returns:
-        The package name on success.
+        The package name(s) on success.
 
     Raises:
         BrewCommandError: If the uninstallation fails.
     """
-    await run_brew_command(subcommand="uninstall", name=name, flags=["--formula"])
+    await run_brew_command(subcommand="uninstall", names=names, flags=["--formula"])
 
-    return name
+    return names
 
 
-async def upgrade(name: str) -> str:
-    """Upgrade a Homebrew formula by name.
+async def upgrade(names: list[str]) -> list[str]:
+    """Upgrade Homebrew formulae by name.
 
     Args:
-        name: Name of the formula to upgrade.
+        names: Name(s) of the formulae to upgrade.
 
     Returns:
-        The package name on success.
+        The package name(s) on success.
 
     Raises:
         BrewCommandError: If the upgrade fails.
         PinnedPackageWarning: If the package is pinned.
     """
-    await run_brew_command(subcommand="upgrade", name=name, flags=[])
+    await run_brew_command(subcommand="upgrade", names=names, flags=[])
 
-    return name
+    return names

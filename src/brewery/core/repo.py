@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
-from typing import List, Optional
+from typing import Optional
 
 from brewery.core.cache import Cache, CacheManager
 from brewery.core.decorators import log_operation
-from brewery.core.errors import BrewCommandError, PackageNotFoundError
+from brewery.core.errors import PackageNotFoundError
 from brewery.core.models import Package, PackageKind, PackageStatus
 from brewery.core.task_manager import BackgroundTaskManager, get_task_manager
 from brewery.providers import brew_cask, brew_formula, brew_outdated
@@ -24,7 +23,7 @@ class Repository:
     @log_operation(event_prefix="get_all_installed", log_args=["kind_filter"])
     async def get_all_installed(
         self, kind_filter: Optional[PackageKind] = None
-    ) -> List[Package]:
+    ) -> list[Package]:
         """Get all installed packages, optionally filtered by kind.
 
         Args:
@@ -58,64 +57,113 @@ class Repository:
 
         # Fallback on cache miss
         if kind == PackageKind.FORMULA:
-            pkg: Package = await brew_formula.info(name)
+            pkg: list[Package] = await brew_formula.info(names=[name])
         else:
-            pkg: Package = await brew_cask.info(name)
+            pkg: list[Package] = await brew_cask.info(names=[name])
 
         if not pkg:
             raise PackageNotFoundError(package=name, kind=kind.value)
 
-        return pkg
+        return pkg[0]
 
     @log_operation(event_prefix="install_package", log_args=["name", "kind"])
-    async def install_package(self, name: str, kind: PackageKind) -> Package:
-        """Install a package and refresh cache on success.
+    async def install_packages(
+        self, names: list[str], kind: PackageKind = PackageKind.FORMULA
+    ) -> tuple[list[Package], list[tuple[str, str]]]:
+        """Install a package or packages and return details.
 
         Args:
-            name: Name of the package to install.
-            kind: Kind of the package (formula or cask).
+            names: Name of the package(s) to install.
+            kind: Kind of the package(s) - formula (default or cask).
 
         Returns:
-            The package details on success.
+            Package(s) details on success.
 
         Raises:
             BrewCommandError: Propagated from provider.
         """
-        if kind is PackageKind.FORMULA:
-            await brew_formula.install(name)
-            pkg: Package = await brew_formula.info(name)
-        else:
-            await brew_cask.install(name)
-            pkg: Package = await brew_cask.info(name)
+        provider = brew_formula if kind == PackageKind.FORMULA else brew_cask
 
-        await self.cache_mgr.update_packages(packages=pkg, action="add")
+        await provider.install(names=names)
 
-        return pkg
+        installed_pkgs: list[Package] = await provider.info(names=names)
+        installed_names: list[str] = [p.name for p in installed_pkgs if p.versions]
+
+        failures: list[tuple[str, str]] = [
+            (name, "install failed or not found")
+            for name in names
+            if name not in installed_names
+        ]
+
+        await self.cache_mgr.update_packages(packages=installed_pkgs, action="add")
+
+        return installed_pkgs, failures
 
     @log_operation(event_prefix="uninstall_package", log_args=["name", "kind"])
-    async def uninstall_package(self, name: str, kind: PackageKind) -> None:
-        """Uninstall a package and refresh cache on success.
+    async def uninstall_packages(
+        self, names: list[str], kind: PackageKind | None = None
+    ) -> tuple[int, list[tuple[str, str]]]:
+        """Uninstall packages and refresh cache on success.
 
         Args:
-            name: Name of the package to uninstall.
-            kind: Kind of the package (formula or cask).
+            names: Name(s) of the package(s) to uninstall.
+            kind: Kind of the package(s) (formula or cask).
 
         Returns:
-            None
+            Number of successes, and list of failures
 
         Raises:
             BrewCommandError: Propagated from provider.
         """
-        if kind is PackageKind.FORMULA:
-            await brew_formula.uninstall(name)
+        if kind is None:
+            # Resolve kinds and split into two lists
+            all_pkgs: list[Package] = await self.get_all_installed()
+            kind_map: dict[str, PackageKind] = {p.name: p.kind for p in all_pkgs}
+            formula_names: list[str] = [
+                n for n in names if kind_map.get(n) == PackageKind.FORMULA
+            ]
+            cask_names: list[str] = [
+                n for n in names if kind_map.get(n) == PackageKind.CASK
+            ]
+            failures: list[tuple[str, str]] = [
+                (n, "not found") for n in names if n not in kind_map
+            ]
         else:
-            await brew_cask.uninstall(name)
+            formula_names: list[str] | list = (
+                names if kind == PackageKind.FORMULA else []
+            )
+            cask_names: list[str] | list = names if kind == PackageKind.CASK else []
+            failures: list = []
 
-        pkg: Package | None = await self.cache_mgr.get_details_from_cache(
-            name=name, kind=kind
-        )
-        if pkg:
-            await self.cache_mgr.update_packages(packages=pkg, action="remove")
+        succeeded = 0
+
+        for pkg_names, provider, pkg_kind in [
+            (formula_names, brew_formula, PackageKind.FORMULA),
+            (cask_names, brew_cask, PackageKind.CASK),
+        ]:
+            if not pkg_names:
+                continue
+
+            await provider.uninstall(names=pkg_names)
+
+            # Use info to verify what was actually removed
+            still_installed: set[str] = {
+                p.name for p in await provider.info(names=pkg_names) if p.versions
+            }
+            removed: list = [n for n in pkg_names if n not in still_installed]
+            failed: list = [
+                (n, "uninstall failed") for n in pkg_names if n in still_installed
+            ]
+
+            succeeded += len(removed)
+            failures.extend(failed)
+
+            await self.cache_mgr.update_packages(
+                packages=[Package(name=n, kind=pkg_kind) for n in removed],
+                action="remove",
+            )
+
+        return succeeded, failures
 
     @log_operation(event_prefix="get_outdated", log_args=["name", "kind"])
     async def get_outdated(self, live: bool = False) -> list[Package]:
@@ -137,6 +185,7 @@ class Repository:
             outdated_pkgs: list[Package] = [
                 Package.package_from_dict(data=e) for e in outdated_entries
             ]
+
         else:
             # Use cached data
             all_pkgs: list[Package] = await self.get_all_installed()
@@ -146,105 +195,77 @@ class Repository:
 
         return outdated_pkgs
 
-    @log_operation(event_prefix="upgrade_package", log_args=["name", "kind"])
-    async def upgrade_package(self, name: str, kind: PackageKind) -> Package:
-        """Upgrade a single package and refresh cache entry.
+    @log_operation(event_prefix="upgrade_packages", log_args=["name", "kind"])
+    async def upgrade_packages(
+        self, names: list[str] | None = None, kind: PackageKind | None = None
+    ) -> tuple[list[Package], list[tuple[str, str]]]:
+        """Upgrade packages and refresh cache entry.
 
         Args:
-            name: Name of the package to upgrade.
-            kind: Kind of the package (formula or cask).
+            names: Name(s) of the package(s) to upgrade.
+            kind: Kind of the package(s) (formula, cask, auto (default))
 
         Returns:
-            The upgraded package details.
+            Details of the upgraded packages and any failures.
 
         Raises:
             BrewCommandError: Propagated from provider.
-            PackagePinnedWarning: If the package is pinned.
+            PackagePinnedWarning: If any packages are pinned.
         """
-        if kind is PackageKind.FORMULA:
-            await brew_formula.upgrade(name)
-            pkg: Package = await brew_formula.info(name)
+        # Upgrade all
+        if names is None:
+            outdated: list[Package] = await self.get_outdated(live=False)
+            pinned: list[tuple[str, str]] = [
+                (p.name, "pinned - skipped")
+                for p in outdated
+                if PackageStatus.PINNED in p.status
+            ]
+            to_upgrade: list[Package] = [
+                p for p in outdated if PackageStatus.PINNED not in p.status
+            ]
+            formula_names: list[str] = [
+                p.name for p in to_upgrade if p.kind == PackageKind.FORMULA
+            ]
+            cask_names: list[str] = [
+                p.name for p in to_upgrade if p.kind == PackageKind.CASK
+            ]
+            failures: list[tuple[str, str]] = pinned
+
+        # Upgrade specified
         else:
-            await brew_cask.upgrade(name)
-            pkg: Package = await brew_cask.info(name)
+            if kind is None:
+                all_pkgs: list[Package] = await self.get_all_installed()
+                kind_map: dict[str, PackageKind] = {p.name: p.kind for p in all_pkgs}
+                formula_names: list[str] = [
+                    n for n in names if kind_map.get(n) == PackageKind.FORMULA
+                ]
+                cask_names: list[str] = [
+                    n for n in names if kind_map.get(n) == PackageKind.CASK
+                ]
+                failures: list[tuple[str, str]] = [
+                    (n, "not found") for n in names if n not in kind_map
+                ]
+            else:
+                formula_names: list = names if kind == PackageKind.FORMULA else []
+                cask_names: list = names if kind == PackageKind.CASK else []
+                failures: list = []
 
-        await self.cache_mgr.update_packages(packages=pkg, action="update")
+        upgraded_pkgs: list[Package] = []
 
-        return pkg
+        for pkg_names, provider in [
+            (formula_names, brew_formula),
+            (cask_names, brew_cask),
+        ]:
+            if not pkg_names:
+                continue
 
-    @log_operation(event_prefix="upgrade_all_outdated", log_args=["name", "kind"])
-    async def upgrade_all_outdated(self) -> tuple[list[Package], list[tuple[str, str]]]:
-        """Upgrade all outdated packages.
+            await provider.upgrade(names=pkg_names)
+            pkgs: list[Package] = await provider.info(names=pkg_names)
+            upgraded_pkgs.extend(pkgs)
 
-        Returns:
-            A tuple containing a list of upgraded packages and a list of failures.
-        """
-        outdated: list[Package] = await self.get_outdated(live=False)
-        upgraded: list[Package] = []
-        failures: list[tuple[str, str]] = []
-        kind_map: dict[str, str] = {}
+        if upgraded_pkgs:
+            await self.cache_mgr.update_packages(
+                packages=upgraded_pkgs, action="update"
+            )
 
-        formulas_to_upgrade: list[Package] = [
-            p
-            for p in outdated
-            if p.kind == PackageKind.FORMULA and PackageStatus.PINNED not in p.status
-        ]
-        for pkg in formulas_to_upgrade:
-            kind_map[pkg.name] = "brew_formula"
-
-        casks_to_upgrade: list[Package] = [
-            p
-            for p in outdated
-            if p.kind == PackageKind.CASK and PackageStatus.PINNED not in p.status
-        ]
-        for pkg in casks_to_upgrade:
-            kind_map[pkg.name] = "brew_cask"
-
-        for pkg in outdated:
-            if PackageStatus.PINNED in pkg.status:
-                failures.append((pkg.name, "pinned - skipped"))
-
-        async def _upgrade_batch(packages: list[Package], provider) -> list[str]:
-            if not packages:
-                return []
-
-            names: list[str] = [pkg.name for pkg in packages]
-
-            try:
-                await provider.upgrade(names)
-                return names
-
-            except BrewCommandError as e:
-                for pkg in packages:
-                    failures.append((pkg.name, str(object=e.message)))
-                return []
-
-        success_formula_names: list[str] = await _upgrade_batch(
-            packages=formulas_to_upgrade,
-            provider=brew_formula,
-        )
-        success_cask_names: list[str] = await _upgrade_batch(
-            packages=casks_to_upgrade, provider=brew_cask
-        )
-
-        success_names: list[str] = success_formula_names + success_cask_names
-        if not success_names:
-            return [], failures
-
-        info_tasks: list = []
-        for name in success_names:
-            kind: str = kind_map[name]
-            provider = brew_formula if kind == PackageKind.FORMULA else brew_cask
-            info_tasks.append(provider.info(name))
-
-        upgraded_pkgs: list[Package] = list(await asyncio.gather(*info_tasks))
-
-        upgraded_kinds: list[PackageKind] = []
-        if success_formula_names:
-            upgraded_kinds.append(PackageKind.FORMULA)
-        if success_cask_names:
-            upgraded_kinds.append(PackageKind.CASK)
-
-        await self.cache_mgr.update_packages(packages=upgraded_pkgs, action="update")
-
-        return upgraded, failures
+        return upgraded_pkgs, failures

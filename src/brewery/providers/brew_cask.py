@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import TYPE_CHECKING, Any, List
 
@@ -51,7 +52,7 @@ async def list_installed() -> List[Package]:
     Returns:
         A list of installed Package instances.
     """
-    start: int | float = time.perf_counter()
+    start: float = time.perf_counter()
     log.debug(event="cask_list_start")
 
     out, _, _ = await run_capture("brew", "list", "--cask")
@@ -109,115 +110,122 @@ async def list_installed() -> List[Package]:
     return pkgs
 
 
-async def info(name: str) -> Package:
-    """Get cask info by name.
+async def info(names: list[str]) -> list[Package]:
+    """Get cask info by name(s).
 
     Args:
-        name: Name of the cask.
+        names: Name(s) of the cask(s).
 
     Returns:
-        A Package instance with detailed information.
+        Package instance(s) with detailed information.
     """
-    start: int | float = time.perf_counter()
-    log.debug(event="cask_info_start", package=name)
-
-    data: Any = await run_json("brew", "info", "--json=v2", "--cask", name)
-    c: Any | dict[Unknown, Unknown] = (data.get("casks", []) or [{}])[0]
-    if not c:
-        log.error(event="cask_not_found", package=name)
-        raise PackageNotFoundError(package=name, kind="cask")
-
-    version_value: Any | None = c.get("version")
-    versions: list[str] | list[Unknown] = (
-        [str(object=version_value)] if version_value else []
-    )
-
-    status: PackageStatus = derive_status(
-        info={
-            "outdated": c.get("outdated"),
-            "pinned": c.get("pinned"),
-            "keg_only": c.get("keg_only"),
-            "linked_keg": c.get("linked_keg"),
-            "installed": c.get("installed"),
-        }
-    )
+    data: Any = await run_json("brew", "info", "--json=v2", "--cask", *names)
+    casks = data.get("casks", [])
+    if not casks:
+        if len(names) == 1:
+            log.error(event="cask_not_found", package=names[0])
+            raise PackageNotFoundError(package=names[0], kind="cask")
+        return []
 
     caskroom_out, _, caskroom_code = await run_capture("brew", "--caskroom")
     caskroom_path: str = (
         caskroom_out.strip() if caskroom_code == 0 else "/usr/local/Caskroom"
     )
 
-    token: Any = c.get("token") or c.get("name", [None])[0]
-    cask_path: str | None = f"{caskroom_path}/{token}" if token else None
+    tokens: Any = [c.get("token") or c.get("name", [None])[0] for c in casks]
+    cask_paths: list[str | None] = [
+        f"{caskroom_path}/{token}" if token else None for token in tokens
+    ]
 
-    size_kb: int | None = (
-        await get_package_size(path=cask_path) if c.get("installed") else None
+    # Package size helper with checks
+    async def _size_or_none(path: str | None, installed: bool) -> int | None:
+        if path and installed:
+            return await get_package_size(path)
+        return None
+
+    size_kbs: list = await asyncio.gather(
+        *[
+            _size_or_none(path, installed=bool(c.get("installed")))
+            for path, c in zip(cask_paths, casks)
+        ]
     )
 
-    pkg = Package(
-        name=token,
-        kind=PackageKind.CASK,
-        versions=versions,
-        desc=(c.get("desc") or ""),
-        status=status,
-        size_kb=size_kb,
-        path=cask_path,
-        metadata={"latest_version": c.get("version"), "tap": c.get("tap")},
-    )
+    pkgs: list[Package] = []
+    for c, token, cask_path, size_kb in zip(casks, tokens, cask_paths, size_kbs):
+        version_value: str = c.get("version")
+        status: PackageStatus = derive_status(
+            info={
+                "outdated": c.get("outdated"),
+                "pinned": c.get("pinned"),
+                "keg_only": c.get("keg_only"),
+                "linked_keg": c.get("linked_keg"),
+                "installed": c.get("installed"),
+            }
+        )
 
-    duration_ms = int((time.perf_counter() - start) * 1000)
-    log.info(event="cask_info_complete", package=name, duration_ms=duration_ms)
+        pkgs.append(
+            Package(
+                name=token,
+                kind=PackageKind.CASK,
+                versions=[str(object=version_value)] if version_value else [],
+                desc=c.get("desc") or "",
+                status=status,
+                size_kb=size_kb,
+                path=cask_path,
+                metadata={"latest_version": c.get("version"), "tap": c.get("tap")},
+            )
+        )
 
-    return pkg
+    return pkgs
 
 
-async def install(name: str) -> str:
-    """Install a Homebrew cask by name.
+async def install(names: list[str]) -> list[str]:
+    """Install Homebrew casks by name.
 
     Args:
-        name: Name of the cask to install.
+        names: Name(s) of the cask(s) to install.
 
     Returns:
-        The cask name on success.
+        The cask name(s) on success.
 
     Raises:
         BrewCommandError: If the installation fails.
     """
-    await run_brew_command(subcommand="install", name=name, flags=["--cask"])
+    await run_brew_command(subcommand="install", names=names, flags=["--cask"])
 
-    return name
+    return names
 
 
-async def uninstall(name: str) -> str:
-    """Uninstall a Homebrew cask by name.
+async def uninstall(names: list[str]) -> list[str]:
+    """Uninstall Homebrew casks by name.
 
     Args:
-        name: Name of the cask to uninstall.
+        names: Name(s) of the cask(s) to uninstall.
 
     Returns:
-        The cask name on success.
+        The cask name(s) on success.
 
     Raises:
         BrewCommandError: If the uninstallation fails.
     """
-    await run_brew_command(subcommand="uninstall", name=name, flags=["--cask"])
+    await run_brew_command(subcommand="uninstall", names=names, flags=["--cask"])
 
-    return name
+    return names
 
 
-async def upgrade(name: str) -> str:
-    """Upgrade a Homebrew cask by name.
+async def upgrade(names: list[str]) -> list[str]:
+    """Upgrade Homebrew casks by name.
 
     Args:
-        name: Name of the cask to upgrade.
+        names: Name(s) of the cask(s) to upgrade.
 
     Returns:
-        The cask name on success.
+        The cask name(s) on success.
 
     Raises:
         BrewCommandError: If the upgrade fails.
         PinnedPackageWarning: If the package is pinned.
     """
-    await run_brew_command(subcommand="upgrade", name=name, flags=[])
+    await run_brew_command(subcommand="upgrade", names=names, flags=[])
 
-    return name
+    return names
