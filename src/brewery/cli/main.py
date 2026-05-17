@@ -314,7 +314,7 @@ def outdated(
             )
 
         if not pkgs:
-            console.print("[bold green]✅ All packages are up to date![/bold green]")
+            console.print("\n[bold green]✅ All packages are up to date![/bold green]")
             return
 
         console.print(package_table(pkgs))
@@ -370,7 +370,7 @@ def upgrade(
                     console.print("Upgrade cancelled.", style="dim")
                     return
 
-        with console.status(status="[bold yellow]Upgrading...[/bold yellow]"):
+        with console.status(status="\n[bold yellow]Upgrading...[/bold yellow]"):
             upgraded, failures = run_with_task_manager(
                 coro=repo.upgrade_packages(names, kind)
             )

@@ -1,6 +1,7 @@
 """Repository module for managing package data from various backends."""
 
 from __future__ import annotations
+import asyncio
 
 from typing import Optional
 
@@ -41,7 +42,9 @@ class Repository:
         return pkgs
 
     @log_operation(event_prefix="get_details", log_args=["name", "kind"])
-    async def get_details(self, name: str, kind: PackageKind) -> Package:
+    async def get_details(
+        self, name: str, kind: Optional[PackageKind] = None
+    ) -> Package:
         """Get package details by name and kind.
 
         Args:
@@ -51,20 +54,34 @@ class Repository:
         Returns:
             A Package instance with detailed information.
         """
-        pkg: Package | None = await self.cache_mgr.get_details_from_cache(name, kind)
-        if pkg:
-            return pkg
+        if kind is None:
+            for k in [PackageKind.FORMULA, PackageKind.CASK]:
+                pkg: Package | None = await self.cache_mgr.get_details_from_cache(
+                    name, kind=k
+                )
+                if pkg:
+                    return pkg
 
-        # Fallback on cache miss
-        if kind == PackageKind.FORMULA:
-            pkg: list[Package] = await brew_formula.info(names=[name])
+            results = await asyncio.gather(
+                brew_formula.info(names=[name]),
+                brew_cask.info(names=[name]),
+                return_exceptions=True,
+            )
+
+            for result in results:
+                if isinstance(result, list) and result:
+                    return result[0]
+
+            raise PackageNotFoundError(package=name)
+
         else:
-            pkg: list[Package] = await brew_cask.info(names=[name])
+            pkg: Package | None = await self.cache_mgr.get_details_from_cache(
+                name, kind=kind
+            )
+            if pkg:
+                return pkg
 
-        if not pkg:
-            raise PackageNotFoundError(package=name, kind=kind.value)
-
-        return pkg[0]
+            raise PackageNotFoundError(package=name)
 
     @log_operation(event_prefix="install_package", log_args=["name", "kind"])
     async def install_packages(
@@ -176,24 +193,22 @@ class Repository:
             List of packages with OUTDATED status.
         """
         if live:
-            # Background task to refresh cache
-            task_mgr: BackgroundTaskManager = get_task_manager()
-            task_mgr.add_task(coro=self.cache_mgr.refresh_outdated_status())
-
-            # Fetch live outdated data
-            outdated_entries: list = await brew_outdated.fetch_outdated()
+            outdated_entries: list[dict] = await brew_outdated.fetch_outdated()
             outdated_pkgs: list[Package] = [
                 Package.package_from_dict(data=e) for e in outdated_entries
             ]
 
+            task_mgr: BackgroundTaskManager = get_task_manager()
+            task_mgr.add_task(
+                coro=self.cache_mgr.refresh_outdated_status(outdated_entries)
+            )
+
+            return outdated_pkgs
+
         else:
             # Use cached data
             all_pkgs: list[Package] = await self.get_all_installed()
-            outdated_pkgs: list[Package] = [
-                p for p in all_pkgs if PackageStatus.OUTDATED in p.status
-            ]
-
-        return outdated_pkgs
+            return [p for p in all_pkgs if PackageStatus.OUTDATED in p.status]
 
     @log_operation(event_prefix="upgrade_packages", log_args=["name", "kind"])
     async def upgrade_packages(

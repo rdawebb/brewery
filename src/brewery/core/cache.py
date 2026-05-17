@@ -12,10 +12,11 @@ from rich.console import Console
 from structlog.typing import FilteringBoundLogger
 
 from brewery.core.config import CACHE_DIR, BreweryENV, get_brewery_env
+from brewery.core.decorators import log_operation
 from brewery.core.errors import CacheError, TransientError
 from brewery.core.logging import get_logger
 from brewery.core.models import Package, PackageKind, PackageStatus
-from brewery.providers import brew_cask, brew_formula, brew_outdated
+from brewery.providers import brew_cask, brew_formula
 
 log: FilteringBoundLogger = get_logger(name=__name__)
 console = Console()
@@ -341,6 +342,7 @@ class CacheManager:
             )
             return []
 
+    @log_operation(event_prefix="refresh_packages", log_args=["kind"])
     async def refresh_packages(
         self, kind: Optional[PackageKind] = None
     ) -> list[Package]:
@@ -354,8 +356,6 @@ class CacheManager:
         Returns:
             List of fetched packages.
         """
-        start: float = time.perf_counter()
-
         pkgs: list[Package] = []
         tasks: list = []
 
@@ -374,14 +374,6 @@ class CacheManager:
 
         # Update caches
         await self._update_caches(kind=kind, pkgs=pkgs)
-
-        duration_ms = int((time.perf_counter() - start) * 1000)
-        log.info(
-            event="cache_refresh_complete",
-            kind=kind.value if kind else "all",
-            count=len(pkgs),
-            duration_ms=duration_ms,
-        )
 
         return pkgs
 
@@ -423,7 +415,10 @@ class CacheManager:
             [packages] if isinstance(packages, Package) else packages
         )
 
-        for suffix in list({p.kind.value for p in pkg_list} | {"all"}):
+        kinds_to_update: set[str] = {p.kind.value for p in pkg_list}
+        pkg_names: set[str] = {p.name for p in pkg_list}
+
+        for suffix in kinds_to_update:
             list_key = f"installed_{suffix}"
             map_key = f"installed_map_{suffix}"
 
@@ -434,24 +429,28 @@ class CacheManager:
                 if cached_list is None or cached_map is None:
                     continue
 
-                for pkg in pkg_list:
-                    if action == "remove":
-                        cached_map.pop(pkg.name, None)
-                        cached_list: list = [
-                            p for p in cached_list if p.get("name") != pkg.name
-                        ]
+                if action == "remove":
+                    cached_list[:] = [
+                        p for p in cached_list if p.get("name") not in pkg_names
+                    ]
 
-                    elif action in ("add", "update"):
-                        pkg_dict: dict[str, Any] = pkg.to_serializable_dict()
-                        cached_map[pkg.name] = pkg_dict
-                        cached_list: list = [
-                            p for p in cached_list if p.get("name") != pkg.name
-                        ]
+                    for name in pkg_names:
+                        cached_map.pop(name, None)
+
+                elif action in ("add", "update"):
+                    cached_list[:] = [
+                        p for p in cached_list if p.get("name") not in pkg_names
+                    ]
+
+                    for pkg in pkg_list:
+                        pkg_dict: dict = pkg.to_serializable_dict()
                         cached_list.append(pkg_dict)
+                        cached_map[pkg.name] = pkg_dict
 
-                cached_list.sort(
-                    key=lambda p: (p.get("kind", ""), p.get("name", "").lower())
-                )
+                if pkg_list and cached_list:
+                    cached_list.sort(
+                        key=lambda p: (p.get("kind", ""), p.get("name", "").lower())
+                    )
 
                 self.cache.set(key=list_key, value=cached_list)
                 self.cache.set(key=map_key, value=cached_map)
@@ -507,47 +506,35 @@ class CacheManager:
         log.debug(event="cache_miss", package=name, kind=kind.value)
         return None
 
-    async def refresh_outdated_status(self) -> None:
-        """Refresh outdated package status in background.
+    async def refresh_outdated_status(self, outdated_entries: list) -> None:
+        """Refresh outdated package status in cache.
 
-        Fetches outdated packages and updates the cache with latest versions.
+        Args:
+            outdated_entries: The fetched list of outdated entries from Brew.
         """
         try:
-            log.info(event="cache_outdated_refresh_start")
-
-            outdated_entries: list = await brew_outdated.fetch_outdated()
-            outdated_map: dict = {entry["name"]: entry for entry in outdated_entries}
-
-            # Load all packages and mark outdated ones
             all_pkgs: list[Package] = await self.load_packages(kind=None)
             if not all_pkgs:
-                # Try refresh if not in cache
                 all_pkgs: list[Package] = await self.refresh_packages(kind=None)
 
-            updated_pkgs: list = []
+            outdated_map: dict = {e["name"]: e for e in outdated_entries}
+
             for pkg in all_pkgs:
                 if pkg.name in outdated_map:
-                    entry: dict = outdated_map[pkg.name]
+                    entry = outdated_map[pkg.name]
                     pkg.status |= PackageStatus.OUTDATED
                     if pkg.metadata:
                         pkg.metadata["latest_version"] = entry.get("current_version")
 
-                updated_pkgs.append(pkg)
-
-            # Update cache
             cache_key = "installed_all"
-            pkgs_dicts: list = [pkg.to_serializable_dict() for pkg in updated_pkgs]
+            pkgs_dicts: list[dict] = [pkg.to_serializable_dict() for pkg in all_pkgs]
             self.cache.set(key=cache_key, value=pkgs_dicts)
 
-            log.info(
-                event="cache_outdated_refresh_complete", count=len(outdated_entries)
-            )
+            log.info(event="outdated_cache_updated", count=len(outdated_entries))
 
         except Exception as e:
             log.error(
-                event="cache_outdated_refresh_failed",
-                error=str(object=e),
-                exc_info=True,
+                event="outdated_cache_update_failed", error=str(object=e), exc_info=True
             )
 
     async def _update_caches(
@@ -574,6 +561,7 @@ class CacheManager:
             self.cache.set(key=list_key, value=pkgs_dicts)
             self.cache.set(key=map_key, value=mapping)
             log.debug(event="cache_updated", list_key=list_key, count=len(pkgs))
+
         except Exception as e:
             log.error(
                 event="cache_update_failed",

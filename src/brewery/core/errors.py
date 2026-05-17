@@ -229,6 +229,12 @@ class AlreadyInstalledWarning(UserError):
     def __init__(
         self, package: str | None = None, context: dict[str, Any] | None = None
     ) -> None:
+        """Initialise AlreadyInstalledWarning with detailed context.
+
+        Args:
+            package: That name of the package that is already installed.
+            context: Additional context information.
+        """
         ctx: dict[str, Any] = context or {}
         if package:
             ctx["package"] = package
@@ -248,6 +254,11 @@ class PinnedPackageWarning(UserError):
     """
 
     def __init__(self, package: str | None = None) -> None:
+        """Initialise PinnedPackageWarning with detailed context.
+
+        Args:
+            package: That name of the package that is pinned.
+        """
         ctx: dict[str, Any] = {}
         if package:
             ctx["package"] = package

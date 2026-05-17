@@ -2,123 +2,40 @@
 
 from __future__ import annotations
 
-import time
-from datetime import datetime
-from typing import TYPE_CHECKING, Any, List
+from typing import Any
 
 from structlog.typing import FilteringBoundLogger
 
-if TYPE_CHECKING:
-    from ty_extensions import Unknown
-
-from brewery.analysis.status import derive_status
+from brewery.core.decorators import log_operation
 from brewery.core.errors import PackageNotFoundError
 from brewery.core.logging import get_logger
-from brewery.core.models import Dependency, Package, PackageKind, PackageStatus
-from brewery.core.shell import run_brew_command, run_capture, run_json
+from brewery.core.models import Package, PackageKind
+from brewery.core.shell import run_brew_command, run_json
+from brewery.providers.package_builder import build_packages_batch
 
 log: FilteringBoundLogger = get_logger(name=__name__)
 
-
-async def get_package_size(path: str | None) -> int | None:
-    """Get the disk usage of an installed package in kilobytes.
-
-    Args:
-        path: The installation path of the package.
-
-    Returns:
-        Size in kilobytes, or None if the path doesn't exist or size can't be determined.
-    """
-    if not path:
-        return None
-
-    try:
-        stdout, _, returncode = await run_capture("du", "-sk", path)
-        if returncode == 0:
-            size_kb = int(stdout.split()[0])
-            return size_kb
-
-    except (ValueError, IndexError, Exception) as e:
-        log.debug(event="get_size_error", path=path, error=str(object=e))
-
-    return None
+BATCH_SIZE = 30
 
 
-async def list_installed() -> List[Package]:
+@log_operation(event_prefix="list_installed_formulae")
+async def list_installed() -> list[Package]:
     """List installed Homebrew formulae.
 
     Returns:
         A list of installed Package instances.
     """
-    start: int | float = time.perf_counter()
-    log.debug(event="formula_list_start")
-
     data: Any = await run_json("brew", "info", "--json=v2", "--installed")
     items: Any = data.get("formulae", [])
-    pkgs: List[Package] = []
 
-    for f in items:
-        versions: list[Unknown] = []
-        installed: Any = f.get("installed", [])
-        for v in installed:
-            if ver := v.get("version"):
-                versions.append(ver)
-
-        latest: Any = f.get("versions", {}).get("stable") or f.get("versions", {}).get(
-            "head"
-        )
-        if latest and (not versions or versions[-1] != latest):
-            versions.append(latest)
-
-        status: PackageStatus = derive_status(
-            info={
-                "outdated": f.get("outdated"),
-                "pinned": f.get("pinned"),
-                "keg_only": f.get("keg_only"),
-                "linked_keg": f.get("linked_keg"),
-                "installed": installed,
-            }
-        )
-
-        deps: list[Dependency] = [
-            Dependency(name=d) for d in (f.get("dependencies", []))
-        ]
-        installed_on = None
-        if installed:
-            t: Any = installed[-1].get("installed_time")
-            if t:
-                installed_on: datetime = datetime.fromtimestamp(t)
-
-        path: Any = f.get("installed_path")
-        if not path and installed:
-            version: Any | None = installed[-1].get("version") if installed else None
-            if version:
-                path = f"/usr/local/Cellar/{f['name']}/{version}"
-
-        size_kb: int | None = await get_package_size(path) if installed else None
-
-        pkg = Package(
-            name=f["name"],
-            kind=PackageKind.FORMULA,
-            versions=versions,
-            desc=f.get("desc"),
-            status=status,
-            installed_on=installed_on,
-            size_kb=size_kb,
-            deps=deps,
-            tap=f.get("tap"),
-            path=path,
-            metadata={"latest_version": latest},
-        )
-
-        pkgs.append(pkg)
-
-    duration_ms = int((time.perf_counter() - start) * 1000)
-    log.info(event="formula_list_complete", count=len(pkgs), duration_ms=duration_ms)
+    pkgs: list[Package] = await build_packages_batch(
+        items=items, kind=PackageKind.FORMULA
+    )
 
     return pkgs
 
 
+@log_operation(event_prefix="_formulae_package_info", log_args=["names"])
 async def info(names: list[str]) -> list[Package]:
     """Get Homebrew formula info by name(s).
 
@@ -128,86 +45,23 @@ async def info(names: list[str]) -> list[Package]:
     Returns:
         Package instance(s) with detailed information.
     """
-    data: Any = await run_json("brew", "info", "--json=v2", *names)
-    formulae: Any | dict = data.get("formulae") or [{}]
-
-    if not formulae:
-        if len(names) == 1:
-            log.error(event="formula_not_found", package=names[0])
-            raise PackageNotFoundError(package=names[0], kind="formula")
+    if not names:
         return []
 
-    return await list_installed_from_items(items=[formulae])
+    pkgs: list[Package] = []
 
+    for i in range(0, len(names), BATCH_SIZE):
+        batch: list[str] = names[i : i + BATCH_SIZE]
+        data: Any = await run_json("brew", "info", "--json=v2", *batch)
+        items: Any = data.get("formulae") or [{}]
 
-async def list_installed_from_items(items) -> List[Package]:
-    """Helper to list installed packages from given items.
+        if not items and i == 0 and len(names) == 1:
+            raise PackageNotFoundError(package=names[0], kind="formula")
 
-    Args:
-        items: List of formula data items.
-
-    Returns:
-        A list of installed Package instances.
-    """
-    pkgs: List[Package] = []
-
-    for f in items:
-        versions: list[Unknown] = []
-        installed: Unknown = f.get("installed", [])
-        for v in installed:
-            if ver := v.get("version"):
-                versions.append(ver)
-
-        latest: Unknown = f.get("versions", {}).get("stable") or f.get(
-            "versions", {}
-        ).get("head")
-        if latest and (not versions or versions[-1] != latest):
-            versions.append(latest)
-
-        status: PackageStatus = derive_status(
-            info={
-                "outdated": f.get("outdated"),
-                "pinned": f.get("pinned"),
-                "keg_only": f.get("keg_only"),
-                "linked_keg": f.get("linked_keg"),
-                "installed": installed,
-            }
+        batch_pkgs: list[Package] = await build_packages_batch(
+            items=items, kind=PackageKind.FORMULA
         )
-
-        deps: list[Dependency] = [
-            Dependency(name=d) for d in (f.get("dependencies", []))
-        ]
-        installed_on = None
-        if installed:
-            t: Unknown = installed[-1].get("installed_time")
-            if t:
-                installed_on: datetime = datetime.fromtimestamp(t)
-
-        path: Unknown = f.get("installed_path")
-        if not path and installed:
-            version: Unknown | None = (
-                installed[-1].get("version") if installed else None
-            )
-            if version:
-                path = f"/usr/local/Cellar/{f['name']}/{version}"
-
-        size_kb: int | None = await get_package_size(path) if installed else None
-
-        pkg = Package(
-            name=f["name"],
-            kind=PackageKind.FORMULA,
-            versions=versions,
-            desc=f.get("desc"),
-            status=status,
-            installed_on=installed_on,
-            size_kb=size_kb,
-            deps=deps,
-            tap=f.get("tap"),
-            path=path,
-            metadata={"latest_version": latest},
-        )
-
-        pkgs.append(pkg)
+        pkgs.extend(batch_pkgs)
 
     return pkgs
 
