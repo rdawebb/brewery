@@ -3,41 +3,94 @@
 from __future__ import annotations
 
 import logging
-import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TextIO
-
-import structlog
-from structlog.types import FilteringBoundLogger
-
-if TYPE_CHECKING:
-    from ty_extensions import Unknown
+from typing import Any, TextIO
 
 _CONFIGURED = False
 
+_STDLIB_SPECIAL_KWARGS = frozenset({"exc_info", "stack_info", "stacklevel", "extra"})
 
-def sanitise_context(logger: Any, method_name: str, event_dict: dict) -> dict:
-    """Sanitise context by removing None values and ensuring error is a string.
 
-    This processor ensures that structlog processors don't crash when encountering None values in the context dictionary.
+class BreweryLogger:
+    """Thin wrapper around a stdlib Logger that accepts structlog-style keyword args."""
 
-    Args:
-        logger: The logger instance.
-        method_name: The name of the method called on the logger.
-        event_dict: The event dictionary to sanitize.
+    def __init__(self, logger: logging.Logger) -> None:
+        """Initialise the BreweryLogger with a standard logging.Logger instance.
 
-    Returns:
-        The sanitised event dictionary.
-    """
-    sanitised: dict[Unknown, Unknown] = {
-        k: v for k, v in event_dict.items() if v is not None
-    }
+        Args:
+            logger: The logger instance to be wrapped.
+        """
+        self._logger: logging.Logger = logger
 
-    if "error" in sanitised and sanitised["error"] is None:
-        sanitised["error"] = ""
+    def _log(self, level: int, event: str, **kwargs: Any) -> None:
+        """Log a message at the specified logging level with optional context.
 
-    return sanitised
+        Args:
+            level: The logging level (e.g., logging.DEBUG, logging.INFO).
+            event: The main log message to be recorded.
+            **kwargs: Additional keyword arguments for context and special logging parameters.
+        """
+        stdlib_kwargs: dict[str, Any] = {}
+        context: dict[str, Any] = {}
+
+        for k, v in kwargs.items():
+            if k in _STDLIB_SPECIAL_KWARGS:
+                stdlib_kwargs[k] = v
+            elif v is not None:
+                context[k] = v
+
+        if context:
+            suffix: str = " | " + " ".join(f"{k}={v}" for k, v in context.items())
+        else:
+            suffix = ""
+
+        self._logger.log(level, "%s%s", event, suffix, **stdlib_kwargs)
+
+    def debug(self, event: str = "", **kwargs: Any) -> None:
+        """Log a debug message with optional context.
+
+        Args:
+            event: The message to log - defaults to an empty string.
+            **kwargs: Additional contextual information.
+        """
+        self._log(level=logging.DEBUG, event=event, **kwargs)
+
+    def info(self, event: str = "", **kwargs: Any) -> None:
+        """Log an info message with optional context.
+
+        Args:
+            event: The message to log - defaults to an empty string.
+            **kwargs: Additional contextual information.
+        """
+        self._log(level=logging.INFO, event=event, **kwargs)
+
+    def warning(self, event: str = "", **kwargs: Any) -> None:
+        """Log a warning message with optional context.
+
+        Args:
+            event: The message to log - defaults to an empty string.
+            **kwargs: Additional contextual information.
+        """
+        self._log(level=logging.WARNING, event=event, **kwargs)
+
+    def error(self, event: str = "", **kwargs: Any) -> None:
+        """Log an error message with optional context.
+
+        Args:
+            event: The message to log - defaults to an empty string.
+            **kwargs: Additional contextual information.
+        """
+        self._log(level=logging.ERROR, event=event, **kwargs)
+
+    def critical(self, event: str = "", **kwargs: Any) -> None:
+        """Log a critical message with optional context.
+
+        Args:
+            event: The message to log - defaults to an empty string.
+            **kwargs: Additional contextual information.
+        """
+        self._log(level=logging.CRITICAL, event=event, **kwargs)
 
 
 def configure_logging(
@@ -59,85 +112,37 @@ def configure_logging(
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file: Path = log_dir / "backend.log"
 
+    formatter = logging.Formatter(
+        fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
     file_handler = RotatingFileHandler(
         filename=log_file, maxBytes=1 * 1024 * 1024, backupCount=4
     )
+    file_handler.setFormatter(fmt=formatter)
     file_handler.setLevel(level=getattr(logging, level.upper()))
-
-    shared_processors: list[Any] = [
-        sanitise_context,
-        structlog.contextvars.merge_contextvars,
-        structlog.stdlib.add_log_level,
-        structlog.stdlib.add_logger_name,
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.StackInfoRenderer(),
-    ]
-
-    if enable_console:
-        console_handler: logging.StreamHandler[TextIO | Any] = logging.StreamHandler(
-            stream=sys.stderr
-        )
-        console_handler.setLevel(level=getattr(logging, level.upper()))
-        console_handler.setFormatter(fmt=logging.Formatter(fmt="%(message)s"))
-        logging.root.addHandler(hdlr=console_handler)
-
-        structlog.configure(
-            processors=shared_processors
-            + [
-                structlog.processors.ExceptionRenderer(),
-                structlog.dev.ConsoleRenderer(colors=True),
-            ],
-            wrapper_class=structlog.make_filtering_bound_logger(
-                min_level=getattr(logging, level.upper())
-            ),
-            context_class=dict,
-            logger_factory=structlog.stdlib.LoggerFactory(),
-            cache_logger_on_first_use=True,
-        )
-
-    else:
-        structlog.configure(
-            processors=shared_processors
-            + [
-                structlog.processors.format_exc_info,
-                structlog.processors.JSONRenderer(),
-            ],
-            wrapper_class=structlog.make_filtering_bound_logger(
-                min_level=getattr(logging, level.upper())
-            ),
-            context_class=dict,
-            logger_factory=structlog.stdlib.LoggerFactory(),
-            cache_logger_on_first_use=True,
-        )
-
-    logging.root.setLevel(level=getattr(logging, level.upper()))
     logging.root.addHandler(hdlr=file_handler)
 
+    if enable_console:
+        console_handler: logging.StreamHandler[TextIO] = logging.StreamHandler()
+        console_handler.setFormatter(fmt=formatter)
+        console_handler.setLevel(level=getattr(logging, level.upper()))
+        logging.root.addHandler(hdlr=console_handler)
+
+    logging.root.setLevel(level=getattr(logging, level.upper()))
     _CONFIGURED = True
 
 
-def get_logger(name: str = "brewery") -> FilteringBoundLogger:
-    """Get a structlog logger instance.
+def get_logger(name: str = "brewery") -> BreweryLogger:
+    """Get a logger instance.
 
     Args:
         name: Optional name for the logger, typically the module name.
 
     Returns:
-        A structlog FilteringBoundLogger instance.
-
-    Usage:
-        log = get_logger(__name__)
-        log.info("event_name", package="foo", duration_ms=123)
-
-    Standard context keys:
-        - event (str): Name of operation or event
-        - package (str): Name of the package or module
-        - kind (str): "formula" or "cask"
-        - duration_ms (int): Operation duration in milliseconds
-        - error (str): Error message if applicable
-        - exc_info (bool): Whether exception info is included
+        A BreweryLogger instance.
     """
     if not _CONFIGURED:
         configure_logging()
-
-    return structlog.get_logger(name)
+    return BreweryLogger(logger=logging.getLogger(name))

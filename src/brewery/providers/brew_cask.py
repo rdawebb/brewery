@@ -4,32 +4,32 @@ from __future__ import annotations
 
 from typing import Any
 
-from structlog.typing import FilteringBoundLogger
-
 from brewery.core.decorators import log_operation
 from brewery.core.errors import PackageNotFoundError
-from brewery.core.logging import get_logger
+from brewery.core.logging import BreweryLogger, get_logger
 from brewery.core.models import Package, PackageKind
 from brewery.core.shell import run_brew_command, run_capture, run_json
-from brewery.providers.package_builder import build_packages_batch
+from brewery.providers.package_builder import batch_info, build_packages_batch
 
-log: FilteringBoundLogger = get_logger(name=__name__)
+log: BreweryLogger = get_logger(name=__name__)
 
-BATCH_SIZE = 30
+_caskroom_path: str | None = None
 
 
 async def _get_caskroom_path() -> str:
     """Get the caskroom path.
 
-    Return:
+    Returns:
         String representation of the caskroom path.
     """
-    caskroom_out, _, caskroom_code = await run_capture("brew", "--caskroom")
-    caskroom_path: str = (
-        caskroom_out.strip() if caskroom_code == 0 else "/usr/local/Caskroom"
-    )
+    global _caskroom_path
+    if _caskroom_path is None:
+        caskroom_out, _, caskroom_code = await run_capture("brew", "--caskroom")
+        _caskroom_path = (
+            caskroom_out.strip() if caskroom_code == 0 else "/usr/local/Caskroom"
+        )
 
-    return caskroom_path
+    return _caskroom_path
 
 
 @log_operation(event_prefix="list_installed_casks")
@@ -39,22 +39,14 @@ async def list_installed() -> list[Package]:
     Returns:
         A list of installed Package instances.
     """
-    out, _, _ = await run_capture("brew", "list", "--cask")
-    names: list[str] = [name.strip() for name in out.split(sep="\n") if name.strip()]
+    caskroom_path = await _get_caskroom_path()
 
-    caskroom_path: str = await _get_caskroom_path()
+    data: Any = await run_json("brew", "info", "--cask", "--json=v2", "--installed")
+    items: Any = data.get("casks", [])
 
-    pkgs: list[Package] = []
-    for i in range(0, len(names), BATCH_SIZE):
-        batch: list[str] = names[i : i + BATCH_SIZE]
-        data: Any = await run_json("brew", "info", "--json=v2", "--cask", *batch)
-        items: Any = data.get("casks", [])
-
-        batch_pkgs: list[Package] = await build_packages_batch(
-            items=items, kind=PackageKind.CASK, caskroom_path=caskroom_path
-        )
-
-        pkgs.extend(batch_pkgs)
+    pkgs: list[Package] = await build_packages_batch(
+        items=items, kind=PackageKind.CASK, caskroom_path=caskroom_path
+    )
 
     return pkgs
 
@@ -74,19 +66,15 @@ async def info(names: list[str]) -> list[Package]:
 
     caskroom_path: str = await _get_caskroom_path()
 
-    pkgs: list[Package] = []
-    for i in range(0, len(names), BATCH_SIZE):
-        batch: list[str] = names[i : i + BATCH_SIZE]
-        data: Any = await run_json("brew", "info", "--json=v2", "--cask", *batch)
-        items = data.get("casks", [])
-
-        if not items and i == 0 and len(names) == 1:
-            raise PackageNotFoundError(package=names[0], kind="cask")
-
-        batch_pkgs: list[Package] = await build_packages_batch(
-            items=items, kind=PackageKind.CASK, caskroom_path=caskroom_path
-        )
-        pkgs.extend(batch_pkgs)
+    pkgs: list[Package] = await batch_info(
+        names=names,
+        flags=["--cask"],
+        json_key="casks",
+        kind=PackageKind.CASK,
+        caskroom_path=caskroom_path,
+    )
+    if not pkgs and len(names) == 1:
+        raise PackageNotFoundError(package=names[0], kind="cask")
 
     return pkgs
 

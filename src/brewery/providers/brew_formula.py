@@ -4,18 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from structlog.typing import FilteringBoundLogger
-
 from brewery.core.decorators import log_operation
-from brewery.core.errors import PackageNotFoundError
-from brewery.core.logging import get_logger
+from brewery.core.logging import BreweryLogger, get_logger
 from brewery.core.models import Package, PackageKind
 from brewery.core.shell import run_brew_command, run_json
-from brewery.providers.package_builder import build_packages_batch
+from brewery.providers.package_builder import batch_info, build_packages_batch
 
-log: FilteringBoundLogger = get_logger(name=__name__)
-
-BATCH_SIZE = 30
+log: BreweryLogger = get_logger(name=__name__)
 
 
 @log_operation(event_prefix="list_installed_formulae")
@@ -48,20 +43,9 @@ async def info(names: list[str]) -> list[Package]:
     if not names:
         return []
 
-    pkgs: list[Package] = []
-
-    for i in range(0, len(names), BATCH_SIZE):
-        batch: list[str] = names[i : i + BATCH_SIZE]
-        data: Any = await run_json("brew", "info", "--json=v2", *batch)
-        items: Any = data.get("formulae") or [{}]
-
-        if not items and i == 0 and len(names) == 1:
-            raise PackageNotFoundError(package=names[0], kind="formula")
-
-        batch_pkgs: list[Package] = await build_packages_batch(
-            items=items, kind=PackageKind.FORMULA
-        )
-        pkgs.extend(batch_pkgs)
+    pkgs: list[Package] = await batch_info(
+        names=names, flags=[], json_key="formulae", kind=PackageKind.FORMULA
+    )
 
     return pkgs
 

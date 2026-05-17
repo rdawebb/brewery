@@ -8,12 +8,10 @@ import time
 from collections.abc import Sized
 from typing import Any, Awaitable, Callable, TypeVar, cast
 
-from structlog.typing import FilteringBoundLogger
-
 from brewery.core.errors import TransientError
-from brewery.core.logging import get_logger
+from brewery.core.logging import BreweryLogger, get_logger
 
-log: FilteringBoundLogger = get_logger(name=__name__)
+log: BreweryLogger = get_logger(name=__name__)
 
 T = TypeVar(name="T")
 F = TypeVar(name="F", bound=Callable[..., Any])

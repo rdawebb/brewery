@@ -8,7 +8,9 @@ from typing import Any, Coroutine, Optional
 
 from brewery.analysis.status import derive_status
 from brewery.core.models import Dependency, Package, PackageKind, PackageStatus
-from brewery.core.shell import run_capture
+from brewery.core.shell import run_capture, run_json
+
+BATCH_SIZE = 30
 
 
 async def _get_package_size(path: str | None) -> int | None:
@@ -172,3 +174,24 @@ async def build_packages_batch(
         ]
 
     return await asyncio.gather(*tasks)
+
+
+async def batch_info(
+    names: list[str],
+    flags: list[str],
+    json_key: str,
+    kind: PackageKind,
+    caskroom_path: Optional[str] = None,
+) -> list[Package]:
+    """"""
+    pkgs: list[Package] = []
+    for i in range(0, len(names), BATCH_SIZE):
+        batch: list[str] = names[i : i + BATCH_SIZE]
+        data: Any = await run_json("brew", "info", "--json=v2", *flags, *batch)
+        items: Any = data.get(json_key, [])
+        batch_pkgs: list[Package] = await build_packages_batch(
+            items=items, kind=kind, caskroom_path=caskroom_path
+        )
+        pkgs.extend(batch_pkgs)
+
+    return pkgs

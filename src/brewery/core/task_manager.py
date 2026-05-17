@@ -6,11 +6,9 @@ import asyncio
 from asyncio.tasks import Task
 from typing import Awaitable, Callable, Generic, TypeVar
 
-from structlog.typing import FilteringBoundLogger
+from brewery.core.logging import BreweryLogger, get_logger
 
-from brewery.core.logging import get_logger
-
-log: FilteringBoundLogger = get_logger(name=__name__)
+log: BreweryLogger = get_logger(name=__name__)
 
 T = TypeVar(name="T")
 

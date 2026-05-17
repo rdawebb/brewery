@@ -7,7 +7,6 @@ import sys
 from typing import Any, Awaitable, List, Optional
 
 from rich.console import Console
-from structlog.typing import FilteringBoundLogger
 from typer_extensions import ExtendedTyper
 
 from brewery.cli.renderers import package_details, package_table
@@ -25,12 +24,12 @@ from brewery.core.errors import (
     format_error_message,
     suggest_search,
 )
-from brewery.core.logging import configure_logging, get_logger
+from brewery.core.logging import BreweryLogger, configure_logging, get_logger
 from brewery.core.models import Package, PackageKind, PackageStatus
 from brewery.core.repo import Repository
 from brewery.core.task_manager import BackgroundTaskManager, get_task_manager
 
-log: FilteringBoundLogger = get_logger(name=__name__)
+log: BreweryLogger = get_logger(name=__name__)
 
 app = ExtendedTyper(help="Brewery: A package management CLI tool")
 
@@ -266,7 +265,9 @@ def uninstall(
                 return
 
         repo = Repository()
-        with console.status(status="[bold yellow]Uninstalling...", spinner="dots"):
+        with console.status(
+            status=f"[bold yellow]Uninstalling...{pkg_str}", spinner="dots"
+        ):
             count, failures = run_with_task_manager(
                 coro=repo.uninstall_packages(names, kind)
             )

@@ -9,16 +9,15 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Optional
 
 from rich.console import Console
-from structlog.typing import FilteringBoundLogger
 
 from brewery.core.config import CACHE_DIR, BreweryENV, get_brewery_env
 from brewery.core.decorators import log_operation
 from brewery.core.errors import CacheError, TransientError
-from brewery.core.logging import get_logger
+from brewery.core.logging import BreweryLogger, get_logger
 from brewery.core.models import Package, PackageKind, PackageStatus
 from brewery.providers import brew_cask, brew_formula
 
-log: FilteringBoundLogger = get_logger(name=__name__)
+log: BreweryLogger = get_logger(name=__name__)
 console = Console()
 
 _cached_token = None
@@ -310,6 +309,18 @@ class CacheManager:
         self.cache: Cache = cache
         log.debug(event="cache_manager_initialised")
 
+    @staticmethod
+    def _cache_keys(kind_value: str) -> tuple[str, str]:
+        """Return the cache keys based on kind.
+
+        Args:
+            kind_value: The package kind to get the cache keys for.
+
+        Returns:
+            Tuple of list_key and map_key.
+        """
+        return f"installed_{kind_value}", f"installed_map_{kind_value}"
+
     async def load_packages(self, kind: Optional[PackageKind] = None) -> list[Package]:
         """Load packages from cache.
 
@@ -319,16 +330,33 @@ class CacheManager:
         Returns:
             List of cached packages, or empty list if not cached.
         """
-        cache_key = f"installed_{kind.value if kind else 'all'}"
+        list_key, _ = self._cache_keys(kind_value=kind.value if kind else "all")
 
         try:
-            cached_data: Any = self.cache.get(key=cache_key)
+            cached_data: Any = self.cache.get(key=list_key)
 
             if cached_data is not None and isinstance(cached_data, list):
                 pkgs: list[Package] = [
                     Package.package_from_dict(data=d) for d in cached_data
                 ]
-                log.debug(event="cache_load_success", key=cache_key, count=len(pkgs))
+                log.debug(event="cache_load_success", key=list_key, count=len(pkgs))
+
+                if kind is None:
+                    for pkg_kind in PackageKind:
+                        kind_list_key, kind_map_key = self._cache_keys(
+                            kind_value=pkg_kind.value
+                        )
+                        if self.cache.get(key=kind_list_key) is None:
+                            filtered = [
+                                d
+                                for d in cached_data
+                                if d.get("kind") == pkg_kind.value
+                            ]
+                            self.cache.set(key=kind_list_key, value=filtered)
+                            self.cache.set(
+                                key=kind_map_key, value={d["name"]: d for d in filtered}
+                            )
+
                 return pkgs
 
             return []
@@ -336,7 +364,7 @@ class CacheManager:
         except Exception as e:
             log.error(
                 event="cache_load_error",
-                key=cache_key,
+                key=list_key,
                 error=str(object=e),
                 exc_info=True,
             )
@@ -387,8 +415,7 @@ class CacheManager:
 
         # Delete both specific and 'all' caches
         for suffix in [kind.value, "all"]:
-            for prefix in ("installed_", "installed_map_"):
-                key = f"{prefix}{suffix}"
+            for key in self._cache_keys(kind_value=suffix):
                 f: Path = self.cache._file(key)
                 if f.exists():
                     f.unlink()
@@ -419,8 +446,7 @@ class CacheManager:
         pkg_names: set[str] = {p.name for p in pkg_list}
 
         for suffix in kinds_to_update:
-            list_key = f"installed_{suffix}"
-            map_key = f"installed_map_{suffix}"
+            list_key, map_key = self._cache_keys(kind_value=suffix)
 
             try:
                 cached_list: list | None = self.cache.get(key=list_key)
@@ -480,8 +506,7 @@ class CacheManager:
         Returns:
             Package instance if found, None otherwise.
         """
-        map_key = f"installed_map_{kind.value}"
-        list_key = f"installed_{kind.value}"
+        list_key, map_key = self._cache_keys(kind_value=kind.value)
 
         # Try map cache first
         try:
@@ -526,7 +551,7 @@ class CacheManager:
                     if pkg.metadata:
                         pkg.metadata["latest_version"] = entry.get("current_version")
 
-            cache_key = "installed_all"
+            cache_key, _ = self._cache_keys(kind_value="all")
             pkgs_dicts: list[dict] = [pkg.to_serializable_dict() for pkg in all_pkgs]
             self.cache.set(key=cache_key, value=pkgs_dicts)
 
@@ -546,26 +571,29 @@ class CacheManager:
             kind: The kind filter used in refresh.
             pkgs: The packages that were fetched.
         """
-        # Update specific kind cache
-        if kind is not None:
-            list_key = f"installed_{kind.value}"
-            map_key = f"installed_map_{kind.value}"
+        if kind:
+            suffixes: list[str] = [kind.value]
         else:
-            list_key = "installed_all"
-            map_key = "installed_map_all"
+            suffixes: list[str] = ["all"] + [k.value for k in PackageKind]
 
         pkgs_dicts: list = [p.to_serializable_dict() for p in pkgs]
-        mapping: dict = {p["name"]: p for p in pkgs_dicts}
 
-        try:
-            self.cache.set(key=list_key, value=pkgs_dicts)
-            self.cache.set(key=map_key, value=mapping)
-            log.debug(event="cache_updated", list_key=list_key, count=len(pkgs))
+        for suffix in suffixes:
+            list_key, map_key = self._cache_keys(kind_value=suffix)
 
-        except Exception as e:
-            log.error(
-                event="cache_update_failed",
-                list_key=list_key,
-                error=str(object=e),
-                exc_info=True,
-            )
+            if suffix in (k.value for k in PackageKind):
+                filtered: list = [p for p in pkgs_dicts if p.get("kind") == suffix]
+                filtered_map: dict = {p["name"]: p for p in filtered}
+
+            try:
+                self.cache.set(key=list_key, value=filtered)
+                self.cache.set(key=map_key, value=filtered_map)
+                log.debug(event="cache_updated", list_key=list_key, count=len(pkgs))
+
+            except Exception as e:
+                log.error(
+                    event="cache_update_failed",
+                    list_key=list_key,
+                    error=str(object=e),
+                    exc_info=True,
+                )

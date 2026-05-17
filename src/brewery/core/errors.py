@@ -4,11 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Self, TypeVar
 
-from structlog.typing import FilteringBoundLogger
+from brewery.core.logging import BreweryLogger, get_logger
 
-from brewery.core.logging import get_logger
-
-log: FilteringBoundLogger = get_logger(name=__name__)
+log: BreweryLogger = get_logger(name=__name__)
 
 R = TypeVar(name="R")
 AR = TypeVar(name="AR")

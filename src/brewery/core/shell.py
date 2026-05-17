@@ -8,8 +8,6 @@ import time
 from asyncio.subprocess import Process
 from typing import Any, Literal, Optional
 
-from structlog.typing import FilteringBoundLogger
-
 from brewery.core.decorators import retry_on_transient
 from brewery.core.errors import (
     AlreadyInstalledWarning,
@@ -17,9 +15,9 @@ from brewery.core.errors import (
     BrewTimeoutError,
     PinnedPackageWarning,
 )
-from brewery.core.logging import get_logger
+from brewery.core.logging import BreweryLogger, get_logger
 
-log: FilteringBoundLogger = get_logger(name=__name__)
+log: BreweryLogger = get_logger(name=__name__)
 
 ENV_OVERRIDES: dict[str, str] = {
     "LANG": "C",

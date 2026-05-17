@@ -5,13 +5,11 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from structlog.typing import FilteringBoundLogger
-
 from brewery.core.errors import BrewCommandError
-from brewery.core.logging import get_logger
+from brewery.core.logging import BreweryLogger, get_logger
 from brewery.core.shell import run_json
 
-log: FilteringBoundLogger = get_logger(name=__name__)
+log: BreweryLogger = get_logger(name=__name__)
 
 
 def _enrich_entry(entry: dict, kind: str) -> dict:
