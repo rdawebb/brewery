@@ -1,8 +1,8 @@
 """Repository module for managing package data from various backends."""
 
 from __future__ import annotations
-import asyncio
 
+import asyncio
 from typing import Optional
 
 from brewery.core.cache import Cache, CacheManager
@@ -213,7 +213,7 @@ class Repository:
     @log_operation(event_prefix="upgrade_packages", log_args=["name", "kind"])
     async def upgrade_packages(
         self, names: list[str] | None = None, kind: PackageKind | None = None
-    ) -> tuple[list[Package], list[tuple[str, str]]]:
+    ) -> tuple[list[Package], list[Package], list[tuple[str, str]]]:
         """Upgrade packages and refresh cache entry.
 
         Args:
@@ -221,7 +221,7 @@ class Repository:
             kind: Kind of the package(s) (formula, cask, auto (default))
 
         Returns:
-            Details of the upgraded packages and any failures.
+            Details of upgraded packages, already up-to-date packages, and any failures.
 
         Raises:
             BrewCommandError: Propagated from provider.
@@ -266,6 +266,7 @@ class Repository:
                 failures: list = []
 
         upgraded_pkgs: list[Package] = []
+        current_pkgs: list[Package] = []
 
         for pkg_names, provider in [
             (formula_names, brew_formula),
@@ -274,13 +275,23 @@ class Repository:
             if not pkg_names:
                 continue
 
+            pre_fetch: list[Package] = await provider.info(names=pkg_names)
+            current_versions: dict[str, str | None] = {
+                p.name: p.versions[0] if p.versions else None for p in pre_fetch
+            }
+
             await provider.upgrade(names=pkg_names)
             pkgs: list[Package] = await provider.info(names=pkg_names)
-            upgraded_pkgs.extend(pkgs)
+
+            for pkg in pkgs:
+                if pkg.versions and pkg.versions[0] != current_versions.get(pkg.name):
+                    upgraded_pkgs.append(pkg)
+                else:
+                    current_pkgs.append(pkg)
 
         if upgraded_pkgs:
             await self.cache_mgr.update_packages(
                 packages=upgraded_pkgs, action="update"
             )
 
-        return upgraded_pkgs, failures
+        return upgraded_pkgs, current_pkgs, failures

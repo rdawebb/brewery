@@ -373,7 +373,7 @@ def upgrade(
 
         console.print()
         with console.status(status="[bold yellow]Upgrading...[/bold yellow]"):
-            upgraded, failures = run_with_task_manager(
+            upgraded, current, failures = run_with_task_manager(
                 coro=repo.upgrade_packages(names, kind)
             )
 
@@ -390,6 +390,13 @@ def upgrade(
             console.print(
                 f"  [dim]→[/dim] {pkg.name} {pkg.versions[0] if pkg.versions else ''}"
             )
+
+        if current:
+            console.print(f"\n[dim]{len(current)} already up-to-date:[/dim]")
+            for pkg in current:
+                console.print(
+                    f"  [dim]→ {pkg.name} {pkg.versions[0] if pkg.versions else ''}[/dim]"
+                )
 
         if failures:
             console.print(f"\n[bold red]❌ {len(failures)} skipped/failed:[/bold red]")
