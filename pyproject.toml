@@ -9,8 +9,7 @@ description = "Minimal Homebrew Package Manager"
 requires-python = ">=3.11"
 dependencies = [
   "typer-extensions>=0.2.2,<1.0.0",
-  "rich>=15.0.0,<16.0.0",
-  "structlog>=25.5.0,<26.5.0.0"
+  "rich>=15.0.0,<16.0.0"
 ]
 
 [project.scripts]

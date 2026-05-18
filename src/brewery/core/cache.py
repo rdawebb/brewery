@@ -23,6 +23,8 @@ console = Console()
 _cached_token = None
 _token_timestamp = 0
 
+WIDTHS_CACHE: Path = CACHE_DIR / "column_widths.json"
+
 
 class Cache:
     """A simple file-based cache with expiration."""
@@ -98,7 +100,7 @@ class Cache:
         f: Path = self._file(key)
         now = int(time.time())
         token: str = self._update_token()
-        start: int | float = time.perf_counter()
+        start: float = time.perf_counter()
         stale_data = None
 
         if f.exists():
@@ -109,7 +111,7 @@ class Cache:
                 )
                 if ttl_valid and data.get("_token") == token:
                     duration_ms = int((time.perf_counter() - start) * 1000)
-                    age_seconds: Any = now - data["_ts"]
+                    age_seconds: float = now - data["_ts"]
                     log.info(
                         event="cache_hit",
                         key=key,
@@ -162,7 +164,7 @@ class Cache:
 
         except TransientError as e:
             if allow_stale and stale_data is not None:
-                age_seconds: Any = now - data.get("_ts", now)
+                age_seconds: float = now - data.get("_ts", now)
                 log.warning(
                     event="cache_fallback_stale",
                     key=key,
@@ -442,7 +444,7 @@ class CacheManager:
             [packages] if isinstance(packages, Package) else packages
         )
 
-        kinds_to_update: set[str] = {p.kind.value for p in pkg_list}
+        kinds_to_update: set[str] = {p.kind.value for p in pkg_list} | {"all"}
         pkg_names: set[str] = {p.name for p in pkg_list}
 
         for suffix in kinds_to_update:

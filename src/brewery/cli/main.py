@@ -280,7 +280,7 @@ def uninstall(
         sys.exit(handle_error(error=e))
 
 
-@app.command_with_aliases(aliases=["out", "o"])
+@app.command_with_aliases(aliases=["o", "out"])
 def outdated(
     check: bool = app.Option(
         False,
@@ -329,7 +329,7 @@ def outdated(
         sys.exit(handle_error(error=e))
 
 
-@app.command_with_aliases(aliases=["u", "up"])
+@app.command_with_aliases(aliases=["up"])
 def upgrade(
     names: Optional[list[str]] = app.Argument(
         None, help="Package(s) to upgrade (leave empty to upgrade all)"
@@ -371,7 +371,8 @@ def upgrade(
                     console.print("Upgrade cancelled.", style="dim")
                     return
 
-        with console.status(status="\n[bold yellow]Upgrading...[/bold yellow]"):
+        console.print()
+        with console.status(status="[bold yellow]Upgrading...[/bold yellow]"):
             upgraded, failures = run_with_task_manager(
                 coro=repo.upgrade_packages(names, kind)
             )
