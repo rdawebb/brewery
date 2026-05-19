@@ -64,7 +64,7 @@ def handle_error(error: Exception) -> int:
         console.print(f"\n{format_error_message(error)}\n", style="bold red")
 
         if isinstance(error, PackageNotFoundError):
-            package: Any = getattr(error, "context", {}).get("package", "")
+            package: str = getattr(error, "context", {}).get("package", "")
             console.print(suggest_search(package_name=package), style="dim")
 
         if isinstance(error, TransientError):
@@ -123,18 +123,18 @@ def list_pkgs(
     """
     try:
         repo = Repository()
+        pkgs: list[Package]
 
         if refresh:
             with console.status(
-                status="[bold yellow]Refreshing cache...[/bold yellow]"
+                status="[bold yellow]Refreshing cache...[/bold yellow]",
+                refresh_per_second=6,
             ):
-                pkgs: List[Package] = run_with_task_manager(
+                pkgs = run_with_task_manager(
                     coro=repo.cache_mgr.refresh_packages(kind=kind)
                 )
         else:
-            pkgs: List[Package] = run_with_task_manager(
-                coro=repo.get_all_installed(kind_filter=kind)
-            )
+            pkgs = run_with_task_manager(coro=repo.get_all_installed(kind_filter=kind))
 
         _, term_height = _terminal_size()
         page_size: int = term_height - 6  # header + footer buffer
@@ -173,9 +173,9 @@ def info(
             )
             if not matching_pkg:
                 raise PackageNotFoundError(package=name)
-            kind: PackageKind = matching_pkg.kind
+            resolved_kind: PackageKind = matching_pkg.kind
 
-        pkg: Package = run_with_task_manager(coro=repo.get_details(name, kind))
+        pkg: Package = run_with_task_manager(coro=repo.get_details(name, resolved_kind))
 
         console.print(package_details(pkg))
 
@@ -195,7 +195,7 @@ def search(term: str) -> None:
         pkgs: List[Package] = run_with_task_manager(coro=repo.get_all_installed())
 
         q: str = term.lower()
-        pkgs: List[Package] = [
+        pkgs = [
             p for p in pkgs if q in p.name.lower() or (p.desc and q in p.desc.lower())
         ]
 
@@ -209,7 +209,7 @@ def search(term: str) -> None:
 def install(
     names: list[str] = app.Argument(...),
     kind: Optional[PackageKind] = app.Option(
-        None, "--kind", help="formula | cask | auto (default)"
+        None, "--kind", help="formula | cask (default: formula)"
     ),
     yes: bool = app.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ) -> None:
@@ -229,7 +229,7 @@ def install(
                 return
 
         repo = Repository()
-        with console.status(status="[bold green]Installing...", spinner="dots"):
+        with console.status(status="[bold green]Installing...", refresh_per_second=6):
             installed, failures = run_with_task_manager(
                 coro=repo.install_packages(names, kind)
             )
@@ -263,16 +263,17 @@ def uninstall(
         kind: Kind of the package(s) (formula or cask).
         yes: If true, skip confirmation prompt.
     """
+    pkg_str: str = ", ".join(names)
+
     try:
         if not yes:
-            pkg_str: str = ", ".join(names)
             if not app.confirm(text=f"Uninstall: {pkg_str}?", default=False):
                 console.print("Uninstallation cancelled.", style="dim")
                 return
 
         repo = Repository()
         with console.status(
-            status=f"[bold yellow]Uninstalling...{pkg_str}", spinner="dots"
+            status=f"[bold yellow]Uninstalling...{pkg_str}", refresh_per_second=6
         ):
             count, failures = run_with_task_manager(
                 coro=repo.uninstall_packages(names, kind)
@@ -305,23 +306,23 @@ def outdated(
     """
     try:
         repo = Repository()
+        pkgs: list[Package]
 
         if check:
             console.print()
             with console.status(
-                status="[bold yellow]Checking for updates...[/bold yellow]"
+                status="[bold yellow]Checking for updates...[/bold yellow]",
+                refresh_per_second=6,
             ):
-                pkgs: List[Package] = run_with_task_manager(
-                    coro=repo.get_outdated(live=True)
-                )
+                pkgs = run_with_task_manager(coro=repo.get_outdated(live=True))
 
         else:
-            pkgs: List[Package] = run_with_task_manager(
-                coro=repo.get_outdated(live=False)
-            )
+            pkgs = run_with_task_manager(coro=repo.get_outdated(live=False))
 
         if not pkgs:
-            console.print("\n[bold green]✅ All packages are up to date![/bold green]")
+            console.print(
+                "\n[bold green]✅ All packages are up to date![/bold green]\n"
+            )
             return
 
         console.print(package_table(pkgs))
@@ -335,7 +336,7 @@ def outdated(
         sys.exit(handle_error(error=e))
 
 
-@app.command_with_aliases(aliases=["up"])
+@app.command_with_aliases(aliases=["u", "up"])
 def upgrade(
     names: Optional[list[str]] = app.Argument(
         None, help="Package(s) to upgrade (leave empty to upgrade all)"
@@ -348,7 +349,7 @@ def upgrade(
     """Upgrade one, list, or all outdated packages.
 
     Args:
-        name: Name of the package to upgrade (if None, upgrades all outdated).
+        names: Name(s) of the package(s) to upgrade (if None, upgrades all outdated).
         kind: Kind of the package (formula or cask).
         yes: If true, skip confirmation prompt.
     """
@@ -378,7 +379,9 @@ def upgrade(
                     return
 
         console.print()
-        with console.status(status="[bold yellow]Upgrading...[/bold yellow]"):
+        with console.status(
+            status="[bold yellow]Upgrading...[/bold yellow]", refresh_per_second=6
+        ):
             upgraded, current, failures = run_with_task_manager(
                 coro=repo.upgrade_packages(names, kind)
             )
@@ -390,7 +393,7 @@ def upgrade(
             return
 
         console.print(
-            f"\n[bold green]✅ Upgraded {len(upgraded)} package(s)[/bold green]"
+            f"[bold green]✅ Upgraded {len(upgraded)} package(s)[/bold green]\n"
         )
         for pkg in upgraded:
             console.print(

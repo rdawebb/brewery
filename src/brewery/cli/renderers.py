@@ -242,25 +242,25 @@ def paginate(pkgs: list[Package], page_size: int, console: Console) -> None:
     page = 0
     total_pages = -(-len(pkgs) // page_size)
 
-    while True:
-        start = page * page_size
-        console.clear()
-        console.print(package_table(pkgs[start : start + page_size]))
-        console.print(
-            f"\n[dim]Page {page + 1}/{total_pages} · "
-            f"[bold]n[/bold] next  [bold]p[/bold] prev  [bold]q[/bold] quit[/dim]"
-        )
+    with console.screen():
+        while True:
+            start = page * page_size
+            console.print(package_table(pkgs[start : start + page_size]))
+            console.print(
+                f"\n[dim]Page {page + 1}/{total_pages} · "
+                f"[bold]n[/bold] next  [bold]p[/bold] prev  [bold]q[/bold] quit[/dim]"
+            )
 
-        key = readchar.readkey()
-        if (
-            key in ("n", readchar.key.RIGHT, readchar.key.SPACE)
-            and page < total_pages - 1
-        ):
-            page += 1
-        elif key in ("p", readchar.key.LEFT) and page > 0:
-            page -= 1
-        elif key in ("q", readchar.key.ENTER, readchar.key.ESC):
-            break
+            key = readchar.readkey()
+            if (
+                key in ("n", readchar.key.RIGHT, readchar.key.SPACE)
+                and page < total_pages - 1
+            ):
+                page += 1
+            elif key in ("p", readchar.key.LEFT) and page > 0:
+                page -= 1
+            elif key in ("q", readchar.key.ENTER, readchar.key.ESC):
+                break
 
 
 def package_details(pkg: Package) -> Table:

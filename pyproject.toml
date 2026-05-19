@@ -15,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 brewery = "brewery.cli.main:app"
+br = "brewery.cli.main:app"
 
 [project.optional-dependencies]
 dev = [
