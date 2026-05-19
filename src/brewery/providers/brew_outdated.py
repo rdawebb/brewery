@@ -39,7 +39,7 @@ async def fetch_outdated() -> list[dict]:
         BrewCommandError: If the Homebrew command fails.
     """
     try:
-        start: int | float = time.perf_counter()
+        start: float = time.perf_counter()
         log.info(event="outdated_fetch_start")
 
         data: Any = await run_json("brew", "outdated", "--json=v2")

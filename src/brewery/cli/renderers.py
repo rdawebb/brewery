@@ -7,6 +7,7 @@ import re
 import shutil
 from typing import Any, Iterable
 
+import readchar
 from rich import box
 from rich.console import Console
 from rich.table import Table
@@ -97,13 +98,16 @@ class _MeasuringTable(Table):
         return widths
 
 
-def _terminal_width() -> int:
-    """Get current terminal width with sensible fallback
+def _terminal_size() -> tuple[int, int]:
+    """Get current terminal size with sensible fallback
 
     Returns:
         Terminal width, or sensible fallback value
     """
-    return shutil.get_terminal_size(fallback=(120, 24)).columns
+    width = shutil.get_terminal_size(fallback=(120, 24)).columns
+    height = shutil.get_terminal_size(fallback=(120, 24)).lines
+
+    return width, height
 
 
 def _build_table(widths: tuple[int, ...] | None = None) -> Table:
@@ -192,7 +196,7 @@ def package_table(pkgs: Iterable[Package]) -> Table:
         A Rich Table displaying package information.
     """
     pkg_list: list[Package] = list(pkgs)
-    term_width: int = _terminal_width()
+    term_width, _ = _terminal_size()
     cached_widths: tuple[int, ...] | None = _width_cache.get(term_width)
 
     if cached_widths:
@@ -225,6 +229,38 @@ def _populate_rows(table: Table, pkgs: list[Package]) -> None:
             size_mb,
             p.installed_on.isoformat() if p.installed_on else "",
         )
+
+
+def paginate(pkgs: list[Package], page_size: int, console: Console) -> None:
+    """Paginate the table of packages.
+
+    Args:
+        pkgs: List of packages to paginate
+        page_size: Number of packages to display per page
+        console: Console instance to display output
+    """
+    page = 0
+    total_pages = -(-len(pkgs) // page_size)
+
+    while True:
+        start = page * page_size
+        console.clear()
+        console.print(package_table(pkgs[start : start + page_size]))
+        console.print(
+            f"\n[dim]Page {page + 1}/{total_pages} · "
+            f"[bold]n[/bold] next  [bold]p[/bold] prev  [bold]q[/bold] quit[/dim]"
+        )
+
+        key = readchar.readkey()
+        if (
+            key in ("n", readchar.key.RIGHT, readchar.key.SPACE)
+            and page < total_pages - 1
+        ):
+            page += 1
+        elif key in ("p", readchar.key.LEFT) and page > 0:
+            page -= 1
+        elif key in ("q", readchar.key.ENTER, readchar.key.ESC):
+            break
 
 
 def package_details(pkg: Package) -> Table:

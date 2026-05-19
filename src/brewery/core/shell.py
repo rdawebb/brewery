@@ -95,7 +95,7 @@ async def run_capture(*cmd: str, timeout: Optional[int] = 30) -> tuple[str, str,
     Raises:
         BrewTimeoutError: If the command times out.
     """
-    start: int | float = time.perf_counter()
+    start: float = time.perf_counter()
     log.debug(event="command_start", command=" ".join(cmd), timeout=timeout)
 
     process: Process = await asyncio.create_subprocess_exec(
@@ -149,7 +149,7 @@ async def run_json(*cmd: str, timeout: Optional[int] = 30) -> Any:
         BrewCommandError: If the command fails or JSON parsing fails.
         BrewTimeoutError: If the command times out (retried automatically).
     """
-    start: int | float = time.perf_counter()
+    start: float = time.perf_counter()
     out, err, code = await run_capture(*cmd, timeout=timeout)
     duration_ms = int((time.perf_counter() - start) * 1000)
 

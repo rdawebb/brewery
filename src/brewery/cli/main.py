@@ -9,7 +9,12 @@ from typing import Any, Awaitable, List, Optional
 from rich.console import Console
 from typer_extensions import ExtendedTyper
 
-from brewery.cli.renderers import package_details, package_table
+from brewery.cli.renderers import (
+    _terminal_size,
+    package_details,
+    package_table,
+    paginate,
+)
 from brewery.core.errors import (
     EXIT_SYSTEM_ERROR,
     EXIT_TRANSIENT_ERROR,
@@ -25,7 +30,7 @@ from brewery.core.errors import (
     suggest_search,
 )
 from brewery.core.logging import BreweryLogger, configure_logging, get_logger
-from brewery.core.models import Package, PackageKind, PackageStatus
+from brewery.core.models import Package, PackageKind
 from brewery.core.repo import Repository
 from brewery.core.task_manager import BackgroundTaskManager, get_task_manager
 
@@ -33,7 +38,7 @@ log: BreweryLogger = get_logger(name=__name__)
 
 app = ExtendedTyper(help="Brewery: A package management CLI tool")
 
-console = Console()
+console = Console(highlight=False)
 
 
 def handle_error(error: Exception) -> int:
@@ -108,35 +113,36 @@ def list_pkgs(
     kind: Optional[PackageKind] = app.Option(
         None, "--kind", "-k", help="formula | cask | all"
     ),
-    outdated: bool = app.Option(False, help="Only outdated"),
-    search: Optional[str] = app.Option(None, "--search", "-s", help="Filter by text"),
+    refresh: bool = app.Option(False, "--refresh", "-r", help="Refresh cache"),
 ) -> None:
     """List packages in the repository.
 
     Args:
         kind: Filter by package kind.
-        outdated: If true, only show outdated packages.
-        search: Text to filter package names/descriptions.
+        refresh: Refresh cache before listing packages.
     """
     try:
         repo = Repository()
-        pkgs: List[Package] = run_with_task_manager(
-            coro=repo.get_all_installed(kind_filter=kind)
-        )
 
-        if outdated:
-            pkgs: List[Package] = [
-                p for p in pkgs if PackageStatus.OUTDATED in p.status
-            ]
-        if search:
-            q: str = search.lower()
-            pkgs: List[Package] = [
-                p
-                for p in pkgs
-                if q in p.name.lower() or (p.desc and q in p.desc.lower())
-            ]
+        if refresh:
+            with console.status(
+                status="[bold yellow]Refreshing cache...[/bold yellow]"
+            ):
+                pkgs: List[Package] = run_with_task_manager(
+                    coro=repo.cache_mgr.refresh_packages(kind=kind)
+                )
+        else:
+            pkgs: List[Package] = run_with_task_manager(
+                coro=repo.get_all_installed(kind_filter=kind)
+            )
 
-        console.print(package_table(pkgs))
+        _, term_height = _terminal_size()
+        page_size: int = term_height - 6  # header + footer buffer
+
+        if len(pkgs) > page_size:
+            paginate(pkgs=pkgs, page_size=page_size, console=console)
+        else:
+            console.print(package_table(pkgs), emoji=False)
 
     except Exception as e:
         sys.exit(handle_error(error=e))

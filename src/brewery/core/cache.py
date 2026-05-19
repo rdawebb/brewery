@@ -6,13 +6,13 @@ import asyncio
 import json
 import time
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Literal, Optional
 
 from rich.console import Console
 
 from brewery.core.config import CACHE_DIR, BreweryENV, get_brewery_env
 from brewery.core.decorators import log_operation
-from brewery.core.errors import CacheError, TransientError
+from brewery.core.errors import CacheError
 from brewery.core.logging import BreweryLogger, get_logger
 from brewery.core.models import Package, PackageKind, PackageStatus
 from brewery.providers import brew_cask, brew_formula
@@ -59,7 +59,7 @@ class Cache:
             A string token representing the current state.
         """
         global _cached_token, _token_timestamp
-        now: int | float = time.time()
+        now: float = time.time()
         if _cached_token and (now - _token_timestamp) < 1:
             return _cached_token
 
@@ -79,136 +79,6 @@ class Cache:
         _token_timestamp = now
 
         return _cached_token
-
-    def get_or_set(
-        self,
-        key: str,
-        ttl: Optional[int],
-        loader: Callable[[], Any],
-        allow_stale: bool = False,
-    ) -> Any:
-        """Get a cached value or set it using the loader function.
-
-        Args:
-            key: The cache key.
-            ttl: Time-to-live in seconds, or None for no expiration.
-            loader: A callable that returns the value to cache.
-
-        Returns:
-            Cached or fresh value.
-        """
-        f: Path = self._file(key)
-        now = int(time.time())
-        token: str = self._update_token()
-        start: float = time.perf_counter()
-        stale_data = None
-
-        if f.exists():
-            try:
-                data: Any = json.loads(s=f.read_text())
-                ttl_valid: Literal[True] | Any = ttl is None or (
-                    now - data.get("_ts", 0) < ttl
-                )
-                if ttl_valid and data.get("_token") == token:
-                    duration_ms = int((time.perf_counter() - start) * 1000)
-                    age_seconds: float = now - data["_ts"]
-                    log.info(
-                        event="cache_hit",
-                        key=key,
-                        namespace=self.cache_path.name,
-                        age_seconds=age_seconds,
-                        duration_ms=duration_ms,
-                    )
-
-                    return data.get("value")
-
-                else:
-                    reason: Literal["expired", "token_mismatch"] = (
-                        "expired"
-                        if (now - data.get("_ts", 0) >= ttl)
-                        else "token_mismatch"
-                    )
-                    log.debug(
-                        event="cache_invalid",
-                        key=key,
-                        namespace=self.cache_path.name,
-                        reason=reason,
-                    )
-                    if allow_stale:
-                        stale_data: Any = data.get("value")
-
-            except json.JSONDecodeError:
-                log.warning(
-                    event="cache_corrupted",
-                    key=key,
-                    namespace=self.cache_path.name,
-                    exc_info=True,
-                )
-            except Exception as e:
-                log.error(
-                    event="cache_read_error",
-                    key=key,
-                    namespace=self.cache_path.name,
-                    exc_info=True,
-                )
-                raise CacheError(
-                    key=key,
-                    namespace=self.cache_path.name,
-                    operation="read",
-                ) from e
-
-        log.info(event="cache_miss", key=key, namespace=self.cache_path.name)
-
-        try:
-            value: Any = loader()
-
-        except TransientError as e:
-            if allow_stale and stale_data is not None:
-                age_seconds: float = now - data.get("_ts", now)
-                log.warning(
-                    event="cache_fallback_stale",
-                    key=key,
-                    namespace=self.cache_path.name,
-                    age_seconds=age_seconds,
-                    error=str(object=e),
-                )
-                console.print(
-                    "⚠️ Using cached data due to temporary error (may be outdated).\n",
-                    style="bold yellow",
-                )
-                return stale_data
-
-            else:
-                raise
-
-        try:
-            f.write_text(
-                data=json.dumps(obj={"_ts": now, "_token": token, "value": value})
-            )
-            duration_ms = int((time.perf_counter() - start) * 1000)
-            log.info(
-                event="cache_set",
-                key=key,
-                namespace=self.cache_path.name,
-                duration_ms=duration_ms,
-            )
-
-        except Exception as e:
-            log.error(
-                event="cache_write_error",
-                key=key,
-                namespace=self.cache_path.name,
-                error=str(object=e),
-                exc_info=True,
-            )
-            raise CacheError(
-                key=key,
-                namespace=self.cache_path.name,
-                operation="write",
-                path=str(object=f),
-            ) from e
-
-        return value
 
     def get(self, key: str) -> Optional[Any]:
         """Get a cached value by key.
@@ -269,7 +139,7 @@ class Cache:
         f: Path = self._file(key)
         now = int(time.time())
         token: str = self._update_token()
-        start: int | float = time.perf_counter()
+        start: float = time.perf_counter()
 
         try:
             f.write_text(
@@ -343,22 +213,6 @@ class CacheManager:
                 ]
                 log.debug(event="cache_load_success", key=list_key, count=len(pkgs))
 
-                if kind is None:
-                    for pkg_kind in PackageKind:
-                        kind_list_key, kind_map_key = self._cache_keys(
-                            kind_value=pkg_kind.value
-                        )
-                        if self.cache.get(key=kind_list_key) is None:
-                            filtered = [
-                                d
-                                for d in cached_data
-                                if d.get("kind") == pkg_kind.value
-                            ]
-                            self.cache.set(key=kind_list_key, value=filtered)
-                            self.cache.set(
-                                key=kind_map_key, value={d["name"]: d for d in filtered}
-                            )
-
                 return pkgs
 
             return []
@@ -424,7 +278,6 @@ class CacheManager:
                     log.debug(event="cache_file_deleted", key=key)
 
         # Refresh both specific and 'all' caches
-        await self.refresh_packages(kind=kind)
         await self.refresh_packages(kind=None)
 
         log.info(event="cache_invalidate_complete", kind=kind.value)
@@ -454,8 +307,20 @@ class CacheManager:
                 cached_list: list | None = self.cache.get(key=list_key)
                 cached_map: dict | None = self.cache.get(key=map_key)
 
-                if cached_list is None or cached_map is None:
+                if cached_list is None and cached_map is not None:
+                    cached_list = list(cached_map.values())
+                    log.warning(event="cache_list_rebuilt_from_map", key=list_key)
+                elif cached_map is None and cached_list is not None:
+                    cached_map = {p["name"]: p for p in cached_list}
+                    log.warning(event="cache_map_rebuilt_from_list", key=map_key)
+                elif cached_list is None and cached_map is None:
+                    log.warning(event="rebuilding_missing_cache", key=list_key)
+                    await self.refresh_packages(
+                        kind=PackageKind(suffix) if suffix != "all" else None
+                    )
                     continue
+
+                assert cached_list is not None and cached_map is not None
 
                 if action == "remove":
                     cached_list[:] = [
@@ -545,6 +410,7 @@ class CacheManager:
                 all_pkgs: list[Package] = await self.refresh_packages(kind=None)
 
             outdated_map: dict = {e["name"]: e for e in outdated_entries}
+            changed: list[Package] = []
 
             for pkg in all_pkgs:
                 if pkg.name in outdated_map:
@@ -552,10 +418,10 @@ class CacheManager:
                     pkg.status |= PackageStatus.OUTDATED
                     if pkg.metadata:
                         pkg.metadata["latest_version"] = entry.get("current_version")
+                    changed.append(pkg)
 
-            cache_key, _ = self._cache_keys(kind_value="all")
-            pkgs_dicts: list[dict] = [pkg.to_serializable_dict() for pkg in all_pkgs]
-            self.cache.set(key=cache_key, value=pkgs_dicts)
+            if changed:
+                await self.update_packages(packages=changed, action="update")
 
             log.info(event="outdated_cache_updated", count=len(outdated_entries))
 
@@ -585,7 +451,10 @@ class CacheManager:
 
             if suffix in (k.value for k in PackageKind):
                 filtered: list = [p for p in pkgs_dicts if p.get("kind") == suffix]
-                filtered_map: dict = {p["name"]: p for p in filtered}
+            else:
+                filtered: list = pkgs_dicts
+
+            filtered_map: dict = {p["name"]: p for p in filtered}
 
             try:
                 self.cache.set(key=list_key, value=filtered)
