@@ -6,11 +6,16 @@ import asyncio
 from datetime import datetime
 from typing import Any, Coroutine, Optional
 
-from brewery.analysis.status import derive_status
+from brewery.analysis.status import StatusInfo, derive_status
+from brewery.core.config import get_brewery_env
+from brewery.core.logging import BreweryLogger, get_logger
 from brewery.core.models import Dependency, Package, PackageKind, PackageStatus
 from brewery.core.shell import run_capture, run_json
 
-BATCH_SIZE = 30
+log: BreweryLogger = get_logger()
+
+_BATCH_SIZE = 30
+_SEMAPHORE_SIZE = asyncio.Semaphore(20)
 
 
 async def _get_package_size(path: str | None) -> int | None:
@@ -23,16 +28,47 @@ async def _get_package_size(path: str | None) -> int | None:
         Size in kilobytes, or None if the path doesn't exist or size can't be determined.
     """
     if not path:
+        log.warning(event="package_size_skipped", reason="no_path")
         return None
 
-    try:
-        stdout, _, returncode = await run_capture("du", "-sk", path)
-        if returncode == 0:
-            size_kb = int(stdout.split()[0])
-            return size_kb
+    async with _SEMAPHORE_SIZE:
+        try:
+            stdout, stderr, returncode = await run_capture("du", "-sk", path)
+            if returncode == 0:
+                return int(stdout.split()[0])
 
-    except (ValueError, IndexError, Exception):
-        return None
+            log.warning(
+                event="package_size_failed",
+                path=path,
+                returncode=returncode,
+                stderr=stderr,
+            )
+            return None
+
+        except ValueError as e:
+            log.warning(
+                event="package_size_parse_error",
+                path=path,
+                error=str(e),
+            )
+            return None
+
+        except IndexError as e:
+            log.warning(
+                event="package_size_index_error",
+                path=path,
+                error=str(e),
+            )
+            return None
+
+        except Exception as e:
+            log.warning(
+                event="package_size_unexpected_error",
+                path=path,
+                error=str(e),
+                exc_info=True,
+            )
+            return None
 
 
 async def _build_formula_package(formula_data: dict[str, Any]) -> Package:
@@ -47,7 +83,7 @@ async def _build_formula_package(formula_data: dict[str, Any]) -> Package:
     f: dict[str, Any] = formula_data
 
     versions: list[str] = []
-    installed: Any = f.get("installed", [])
+    installed: list[dict[str, Any]] = f.get("installed", [])
 
     for v in installed:
         if ver := v.get("version"):
@@ -56,32 +92,34 @@ async def _build_formula_package(formula_data: dict[str, Any]) -> Package:
     latest: Any = f.get("versions", {}).get("stable") or f.get("versions", {}).get(
         "head"
     )
-    if latest and (not versions or versions[-1] != latest):
+    if latest and installed and (not versions or versions[-1] != latest):
         versions.append(latest)
 
     status: PackageStatus = derive_status(
-        info={
-            "outdated": f.get("outdated"),
-            "pinned": f.get("pinned"),
-            "keg_only": f.get("keg_only"),
-            "linked_keg": f.get("linked_keg"),
-            "installed": installed,
-        }
+        info=StatusInfo(
+            outdated=f.get("outdated"),
+            pinned=f.get("pinned"),
+            keg_only=f.get("keg_only"),
+            linked_keg=f.get("linked_keg"),
+            installed=installed,
+        )
     )
 
     deps: list[Dependency] = [Dependency(name=d) for d in f.get("dependencies", [])]
 
-    installed_on = None
+    installed_on: datetime | None = None
     if installed:
-        t: Any = installed[-1].get("installed_time")
-        if t:
-            installed_on: datetime = datetime.fromtimestamp(t)
+        if ts := installed[-1].get("time"):
+            installed_on = datetime.fromtimestamp(int(ts))
 
     path: Any = f.get("installed_path")
     if not path and installed:
-        version: Any | None = installed[-1].get("version") if installed else None
+        version: str | None = installed[-1].get("version")
         if version:
-            path = f"/usr/local/Cellar/{f['name']}/{version}"
+            path = str(get_brewery_env().cellar / f["name"] / version)
+
+    if installed and not path:
+        log.warning(event="formula_path_unresolved", name=f["name"])
 
     size_kb: int | None = await _get_package_size(path) if installed else None
 
@@ -115,33 +153,47 @@ async def _build_cask_package(
     """
     c: dict[str, Any] = cask_data
 
-    version_value: Any = c.get("version")
-    versions: list[str] = [str(object=version_value)] if version_value else []
+    installed: str | None = c.get("installed")
+
+    version_value: str | None = c.get("version")
+    versions: list[str] = [installed] if installed else []
+    if version_value and (not versions or versions[-1] != version_value):
+        versions.append(version_value)
+
+    installed_on: datetime | None = None
+    if raw_ts := c.get("installed_time"):
+        try:
+            installed_on = datetime.fromtimestamp(float(raw_ts))
+        except (ValueError, OSError):
+            pass
 
     status: PackageStatus = derive_status(
-        info={
-            "outdated": c.get("outdated"),
-            "pinned": c.get("pinned"),
-            "keg_only": c.get("keg_only"),
-            "linked_keg": c.get("linked_keg"),
-            "installed": c.get("installed"),
-        }
+        info=StatusInfo(
+            outdated=c.get("outdated"),
+            pinned=c.get("pinned"),
+            keg_only=c.get("keg_only"),
+            linked_keg=c.get("linked_keg"),
+            installed=installed,
+        )
     )
 
-    token: Any = c.get("token") or c.get("name", [None])[0]
-    cask_path: str | None = f"{caskroom_path}/{token}" if token else None
+    token: str | None = c.get("token") or c.get("name", [None])[0]
+    if not token:
+        raise ValueError(f"Could not determine token for cask: {c}")
 
+    cask_path: str = f"{caskroom_path}/{token}"
     size_kb: int | None = await _get_package_size(path=cask_path)
 
     return Package(
         name=token,
         kind=PackageKind.CASK,
         versions=versions,
-        desc=c.get("desc") or "",
+        desc=c.get("desc"),
         status=status,
+        installed_on=installed_on,
         size_kb=size_kb,
         path=cask_path,
-        metadata={"latest_version": c.get("version"), "tap": c.get("tap")},
+        metadata={"latest_version": version_value, "tap": c.get("tap")},
     )
 
 
@@ -183,11 +235,24 @@ async def batch_info(
     kind: PackageKind,
     caskroom_path: Optional[str] = None,
 ) -> list[Package]:
-    """"""
+    """Fetch and build Package objects for named packages in batches.
+
+    Args:
+        names: Package names to look up.
+        flags: Extra flags for `brew info` (e.g. ["--cask"]).
+        json_key: Key in the JSON response containing results ("formulae" or "casks").
+        kind: Package kind, forwarded to build_packages_batch.
+        caskroom_path: Required when kind is CASK.
+
+    Returns:
+        List of Package instances for all named packages found.
+    """
     pkgs: list[Package] = []
-    for i in range(0, len(names), BATCH_SIZE):
-        batch: list[str] = names[i : i + BATCH_SIZE]
-        data: Any = await run_json("brew", "info", "--json=v2", *flags, *batch)
+    for i in range(0, len(names), _BATCH_SIZE):
+        batch: list[str] = names[i : i + _BATCH_SIZE]
+        data: dict[str, Any] = await run_json(
+            "brew", "info", "--json=v2", *flags, *batch
+        )
         items: Any = data.get(json_key, [])
         batch_pkgs: list[Package] = await build_packages_batch(
             items=items, kind=kind, caskroom_path=caskroom_path

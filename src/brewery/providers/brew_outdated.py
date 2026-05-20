@@ -7,6 +7,7 @@ from typing import Any
 
 from brewery.core.errors import BrewCommandError
 from brewery.core.logging import BreweryLogger, get_logger
+from brewery.core.models import PackageStatus
 from brewery.core.shell import run_json
 
 log: BreweryLogger = get_logger(name=__name__)
@@ -24,8 +25,9 @@ def _enrich_entry(entry: dict, kind: str) -> dict:
     """
     entry["kind"] = kind
     entry["versions"] = entry.get("installed_versions", [])
-    entry["status"] = 1  # PackageStatus.OUTDATED
+    entry["status"] = PackageStatus.OUTDATED
     entry["metadata"] = {"latest_version": entry.get("current_version")}
+
     return entry
 
 
@@ -56,6 +58,5 @@ async def fetch_outdated() -> list[dict]:
 
         return entries
 
-    except BrewCommandError as e:
-        log.error(event="outdated_fetch_failed", error=str(object=e))
-        return []
+    except BrewCommandError:
+        raise

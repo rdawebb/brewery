@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import platform
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from brewery.core.logging import BreweryLogger, get_logger
+
+log: BreweryLogger = get_logger(__name__)
 
 
 @dataclass
@@ -19,10 +24,19 @@ class BreweryENV:
 _DEF_CACHE = Path.home() / ".brewery" / "cache"
 _DEF_CACHE.mkdir(parents=True, exist_ok=True)
 _BREW_PREFIX_CACHE = _DEF_CACHE / "brew_prefix.txt"
+_FALLBACK_PREFIX = (
+    Path("/opt/homebrew") if platform.machine() == "arm64" else Path("/usr/local")
+)
+
+_env_cache: BreweryENV | None = None
 
 
 def get_brewery_env() -> BreweryENV:
     """Get or discover Brewery environment based on system settings."""
+    global _env_cache
+
+    if _env_cache is not None:
+        return _env_cache
 
     if _BREW_PREFIX_CACHE.exists():
         try:
@@ -35,23 +49,23 @@ def get_brewery_env() -> BreweryENV:
         prefix = None
 
     if prefix is None:
-        print("Attempting to discover brew prefix...")
+        log.info(event="brew_prefix_discover_start")
         try:
             output: str = subprocess.check_output(
                 args=["brew", "--prefix"], text=True
             ).strip()
             prefix = Path(output)
             _BREW_PREFIX_CACHE.write_text(data=str(object=prefix))
-            print(f"Cached brew prefix: {prefix}")
+            log.info(event="brew_prefix_cached", prefix=str(prefix))
 
         except (subprocess.CalledProcessError, FileNotFoundError):
-            prefix: Path = Path("/usr/local") / "brew"
+            prefix = _FALLBACK_PREFIX
 
-    _brewery_env = BreweryENV(
+    _env_cache = BreweryENV(
         prefix=prefix, cellar=prefix / "Cellar", caskroom=prefix / "Caskroom"
     )
 
-    return _brewery_env
+    return _env_cache
 
 
 CACHE_DIR: Path = _DEF_CACHE
