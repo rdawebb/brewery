@@ -23,7 +23,7 @@ from brewery.core.errors import (
     BrewError,
     PackageNotFoundError,
     PinnedPackageWarning,
-    SystemError,
+    SysError,
     TransientError,
     UserError,
     format_error_message,
@@ -71,7 +71,7 @@ def handle_error(error: Exception) -> int:
             return EXIT_TRANSIENT_ERROR
         elif isinstance(error, UserError):
             return EXIT_USER_ERROR
-        elif isinstance(error, SystemError):
+        elif isinstance(error, SysError):
             return EXIT_SYSTEM_ERROR
         else:
             return EXIT_USER_ERROR

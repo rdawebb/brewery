@@ -84,7 +84,7 @@ class UserError(BrewError):
     pass
 
 
-class SystemError(BrewError):
+class SysError(BrewError):
     """Errors due to system-level issues.
 
     These errors indicate problems with the system environment, such as
@@ -267,7 +267,7 @@ class PinnedPackageWarning(UserError):
         )
 
 
-class CacheError(SystemError):
+class CacheError(SysError):
     """Errors related to cache access or corruption.
 
     Typically indicates:
@@ -276,7 +276,7 @@ class CacheError(SystemError):
         - Corrupted cache files
         - Read-only file system
 
-    This is a SystemError - may require user/system intervention.
+    This is a SysError - may require user/system intervention.
     """
 
     def __init__(
@@ -346,7 +346,7 @@ ERROR_TEMPLATES: dict[type[BrewError], str] = {
         "⚠️ Temporary failure: {message}\n   This may resolve itself - try again in a moment"
     ),
     UserError: "❌ {message}",
-    SystemError: (
+    SysError: (
         "⚠️ System error: {message}\n   Please check your system configuration and try again"
     ),
     BrewError: "❌ {message}",

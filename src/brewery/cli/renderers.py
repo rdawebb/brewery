@@ -44,6 +44,7 @@ def _load_width_cache() -> None:
         if WIDTHS_CACHE.exists():
             data: Any = json.loads(WIDTHS_CACHE.read_text())
             _width_cache.update({int(k): tuple(v) for k, v in data.items()})
+
     except Exception:
         pass
 
@@ -95,6 +96,7 @@ class _MeasuringTable(Table):
         """
         widths: list[int] = super()._calculate_column_widths(console, options)
         self.resolved_widths: tuple[int, ...] = tuple(widths)
+
         return widths
 
 
@@ -102,12 +104,11 @@ def _terminal_size() -> tuple[int, int]:
     """Get current terminal size with sensible fallback
 
     Returns:
-        Terminal width, or sensible fallback value
+        Terminal width and height, or sensible fallback values
     """
-    width = shutil.get_terminal_size(fallback=(120, 24)).columns
-    height = shutil.get_terminal_size(fallback=(120, 24)).lines
+    _size: tuple[int, int] = shutil.get_terminal_size(fallback=(120, 24))
 
-    return width, height
+    return _size.columns, _size.lines
 
 
 def _build_table(widths: tuple[int, ...] | None = None) -> Table:
@@ -180,6 +181,7 @@ def _save_width_cache() -> None:
                 obj={str(object=k): list(v) for k, v in _width_cache.items()}
             )
         )
+
     except Exception:
         pass
 

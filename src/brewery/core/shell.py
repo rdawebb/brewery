@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from asyncio.subprocess import Process
 from typing import Any, Literal, Optional
@@ -35,7 +36,7 @@ async def run_brew_command(
 
     Args:
         subcommand: The Homebrew subcommand to run (install or uninstall).
-        name: The name of the formula or cask to operate on.
+        names: The name(s) of the formulae or casks to operate on.
         flags: Additional flags to pass (e.g. `--formula`, `--cask`).
         timeout: Timeout in seconds (default: 120).
 
@@ -50,22 +51,21 @@ async def run_brew_command(
 
     out, err, code = await run_capture(*cmd, timeout=timeout)
 
-    for name in names:
-        if (
-            code != 0
-            and subcommand == "install"
-            and "already installed" in (err + out).lower()
-        ):
-            raise AlreadyInstalledWarning(package=name)
+    combined = (err + out).lower()
 
-    if code != 0 and subcommand == "upgrade" and "pinned" in (err + out).lower():
-        raise PinnedPackageWarning(package=name)
+    if code != 0 and subcommand == "install" and "already installed" in combined:
+        matched = [n for n in names if n in combined] or names
+        raise AlreadyInstalledWarning(package=", ".join(matched))
+
+    if code != 0 and subcommand == "upgrade" and "pinned" in combined:
+        pinned = [n for n in names if n in combined] or names
+        raise PinnedPackageWarning(package=", ".join(pinned))
 
     if code != 0:
         log.error(
             event="brew_command_failed",
             subcommand=subcommand,
-            package=name,
+            packages=names,
             flags=flags,
             error=err or out,
             returncode=code,
@@ -75,7 +75,7 @@ async def run_brew_command(
     log.info(
         event="brew_command_success",
         subcommand=subcommand,
-        package=name,
+        packages=names,
         flags=flags,
     )
 
@@ -99,7 +99,10 @@ async def run_capture(*cmd: str, timeout: Optional[int] = 30) -> tuple[str, str,
     log.debug(event="command_start", command=" ".join(cmd), timeout=timeout)
 
     process: Process = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env={**os.environ, **ENV_OVERRIDES},
     )
 
     try:
@@ -125,11 +128,11 @@ async def run_capture(*cmd: str, timeout: Optional[int] = 30) -> tuple[str, str,
         finally:
             raise BrewTimeoutError(command=" ".join(cmd), timeout=timeout) from e
 
-    return (
-        out.decode().strip(),
-        err.decode().strip(),
-        int(process.returncode) if process.returncode is not None else -1,
-    )
+    if process.returncode is None:
+        log.warning(event="process_returncode_none", command=" ".join(cmd))
+        return out.decode().strip(), err.decode().strip(), -1
+
+    return (out.decode().strip(), err.decode().strip(), int(process.returncode))
 
 
 @retry_on_transient(max_retries=3, base_delay=1.0)
