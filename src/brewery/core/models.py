@@ -36,6 +36,15 @@ class Dependency:
     build: bool = False
     test: bool = False
 
+    @classmethod
+    def from_dict(cls, data: dict) -> "Dependency":
+        return cls(
+            name=data["name"],
+            optional=data.get("optional", False),
+            build=data.get("build", False),
+            test=data.get("test", False),
+        )
+
 
 def to_serializable(obj: Any) -> Any:
     """Convert an object to a serializable format.
@@ -54,8 +63,8 @@ def to_serializable(obj: Any) -> Any:
         return [to_serializable(obj=item) for item in obj]
     if isinstance(obj, dict):
         return {key: to_serializable(obj=value) for key, value in obj.items()}
-    if is_dataclass(obj):
-        return to_serializable(obj=asdict(obj))
+    if is_dataclass(obj) and not isinstance(obj, type):
+        return {key: to_serializable(obj=value) for key, value in asdict(obj).items()}
 
     return obj
 
@@ -96,7 +105,7 @@ class Package:
                 else None
             ),
             size_kb=data.get("size_kb"),
-            deps=[Dependency(**dep) for dep in data.get("deps", [])],
+            deps=[Dependency.from_dict(dep) for dep in data.get("deps", [])],
             used_by=data.get("used_by", []),
             tap=data.get("tap"),
             path=data.get("path"),

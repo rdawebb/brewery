@@ -51,6 +51,7 @@ async def run_brew_command(
 
     out, err, code = await run_capture(*cmd, timeout=timeout)
 
+    # Matched against brew's human-readable output which may change in future versions
     combined = (err + out).lower()
 
     if code != 0 and subcommand == "install" and "already installed" in combined:

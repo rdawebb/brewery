@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import inspect
 import time
 from collections.abc import Sized
 from typing import Any, Awaitable, Callable, TypeVar, cast
@@ -37,11 +38,18 @@ def log_operation(
         async def wrapper(*args: Any, **kwargs: Any) -> T:
             start: float = time.perf_counter()
 
-            # Extract args to log
-            log_context: dict = {}
-            for arg_name in log_args:
-                if arg_name in kwargs:
-                    log_context[arg_name] = kwargs[arg_name]
+            sig = inspect.signature(func)
+            try:
+                bound_args = sig.bind(*args, **kwargs)
+                bound_args.apply_defaults()
+                log_context = {
+                    k: bound_args.arguments[k]
+                    for k in (log_args or [])
+                    if k in bound_args.arguments
+                }
+
+            except TypeError:
+                log_context = {}
 
             log.info(event=f"{event_prefix}_start", **log_context)
 
@@ -103,15 +111,17 @@ def retry_on_transient(
     Note:
         - Only retries on TransientError exceptions.
         - Logs each retry attempt with context information.
-        - Works with sync and async functions.
+        - Works only with async functions.
         - Delays: 1s, 2s, 4s with default settings.
     """
 
     def decorator(func: F) -> F:
         """Decorator to apply retry logic to the function."""
+        if not asyncio.iscoroutinefunction(func):
+            raise TypeError("retry_on_transient only supports async functions")
 
         @functools.wraps(wrapped=func)
-        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
             for attempt in range(1, max_retries + 1):
                 try:
                     return await func(*args, **kwargs)
@@ -137,39 +147,6 @@ def retry_on_transient(
                         context=getattr(e, "context", {}),
                     )
                     await asyncio.sleep(delay)
-
-        @functools.wraps(wrapped=func)
-        def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
-            for attempt in range(1, max_retries + 1):
-                try:
-                    return func(*args, **kwargs)
-                except TransientError as e:
-                    if attempt == max_retries:
-                        log.error(
-                            event="retry_exhausted",
-                            function=getattr(func, "__name__", repr(func)),
-                            attempts=max_retries,
-                            error=str(object=e),
-                            context=getattr(e, "context", {}),
-                        )
-                        raise
-
-                    delay: float = base_delay * (backoff ** (attempt - 1))
-                    log.warning(
-                        event="retry_attempt",
-                        function=getattr(func, "__name__", repr(func)),
-                        attempt=attempt,
-                        max_attempts=max_retries,
-                        delay_seconds=delay,
-                        error=str(object=e),
-                        context=getattr(e, "context", {}),
-                    )
-                    time.sleep(delay)
-
-        if asyncio.iscoroutinefunction(func):
-            wrapper = async_wrapper
-        else:
-            wrapper = sync_wrapper
 
         return cast(typ=F, val=wrapper)
 

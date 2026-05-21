@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 import shutil
 from typing import Any, Iterable
 
@@ -50,18 +49,6 @@ def _load_width_cache() -> None:
 
 
 _load_width_cache()
-
-
-def _strip_markup(s: str) -> str:
-    """Strip markup from a string.
-
-    Args:
-        s: The string to be stripped.
-
-    Returns:
-        A plain text string.
-    """
-    return re.sub(pattern=r"\[/?[^\]]+\]", repl="", string=s)
 
 
 class _MeasuringTable(Table):
@@ -141,20 +128,26 @@ def _render_and_cache_widths(
         term_width: The terminal width to render against.
 
     Returns:
-        The rendered table and its resolved column widths.
+        A rendered table using the resolved column widths.
     """
-    table = _MeasuringTable(box=box.MINIMAL_HEAVY_HEAD)
+    measuring = _MeasuringTable(box=box.MINIMAL_HEAVY_HEAD)
     cols: list[dict] = COLUMN_DEFINITIONS
 
     for col in cols:
-        table.add_column(**col)
-    _populate_rows(table, pkgs)
+        measuring.add_column(**col)
+    _populate_rows(measuring, pkgs)
 
     scratch = Console(record=True, width=term_width)
     with scratch.capture():
-        scratch.print(table)
+        scratch.print(measuring)
 
-    return table, table.resolved_widths or ()
+    widths = measuring.resolved_widths or ()
+    valid = widths and not any(w == 0 for w in widths)
+
+    display_table = _build_table(widths=widths if valid else None)
+    _populate_rows(display_table, pkgs)
+
+    return display_table, widths
 
 
 def status_to_str(status: PackageStatus) -> str:
@@ -278,10 +271,15 @@ def package_details(pkg: Package) -> Table:
     t.add_row("Name", pkg.name, style="bold blue")
     t.add_row("Kind", pkg.kind.value)
     t.add_row("Description", pkg.desc or "")
-    t.add_row("Installed Versions", ", ".join(pkg.versions))
-    t.add_row("Latest", pkg.metadata.get("latest_version") or "")
+
+    latest = pkg.metadata.get("latest_version") or ""
+    installed_display = [v for v in pkg.versions if v != latest] or pkg.versions
+
+    t.add_row("Installed Versions", ", ".join(installed_display))
+    t.add_row("Latest", latest)
     t.add_row("Status", status_to_str(pkg.status))
     t.add_row("Size (MB)", f"{(pkg.size_kb or 0) / 1024:.2f}")
+
     if pkg.deps:
         t.add_row("Depends on", ", ".join(d.name for d in pkg.deps))
     if pkg.used_by:
