@@ -38,7 +38,7 @@ log: BreweryLogger = get_logger(name=__name__)
 
 app = ExtendedTyper(help="Brewery: A package management CLI tool")
 
-console = Console(highlight=False)
+console = Console(emoji=False, highlight=False)
 
 
 def handle_error(error: Exception) -> int:
@@ -78,7 +78,7 @@ def handle_error(error: Exception) -> int:
 
     else:
         log.error(event="unexpected_error", error=str(object=error), exc_info=True)
-        console.print(f"\n⚠️ Unexpected error occurred: {error}\n", style="bold red")
+        console.print(f"\n⚠ Unexpected error occurred: {error}\n", style="bold red")
         return EXIT_SYSTEM_ERROR
 
 
@@ -236,13 +236,13 @@ def install(
 
         for pkg in installed:
             console.print(
-                f"✅ Installed [bold]{pkg.name}[/bold] {pkg.versions[0] if pkg.versions else ''}"
+                f"[green]✓ Installed [bold]{pkg.name}[/bold] {pkg.versions[0] if pkg.versions else ''}[/green]"
             )
         for name, reason in failures:
-            console.print(f"[bold red]❌ Failed {name}: {reason}[/bold red]")
+            console.print(f"[bold red] Failed {name}: {reason}[/bold red]")
 
     except AlreadyInstalledWarning as e:
-        console.print(f"\n[bold yellow]⚠️ {e.message}[/bold yellow]\n")
+        console.print(f"\n[bold yellow]⚠ {e.message}[/bold yellow]\n")
 
     except Exception as e:
         sys.exit(handle_error(error=e))
@@ -279,9 +279,9 @@ def uninstall(
                 coro=repo.uninstall_packages(names, kind)
             )
 
-        console.print(f"✅ Uninstalled {count} package(s)")
+        console.print(f"✓ Uninstalled {count} package(s)")
         for name, reason in failures:
-            console.print(f"[bold red]❌ Failed {name}: {reason}[/bold red]")
+            console.print(f"[bold red]✗ Failed {name}: {reason}[/bold red]")
 
     except Exception as e:
         sys.exit(handle_error(error=e))
@@ -320,9 +320,7 @@ def outdated(
             pkgs = run_with_task_manager(coro=repo.get_outdated(live=False))
 
         if not pkgs:
-            console.print(
-                "\n[bold green]✅ All packages are up to date![/bold green]\n"
-            )
+            console.print("\n[bold green]✓ All packages are up to date![/bold green]\n")
             return
 
         console.print(package_table(pkgs))
@@ -368,7 +366,7 @@ def upgrade(
                 )
                 if not outdated:
                     console.print(
-                        "\n[bold green]✅ All packages are up to date![/bold green]\n"
+                        "\n[bold green]✓ All packages are up to date![/bold green]\n"
                     )
                     return
                 console.print(package_table(pkgs=outdated))
@@ -387,13 +385,11 @@ def upgrade(
             )
 
         if not upgraded and not failures:
-            console.print(
-                "\n[bold green]✅ All packages are up to date![/bold green]\n"
-            )
+            console.print("\n[bold green]✓ All packages are up to date![/bold green]\n")
             return
 
         console.print(
-            f"[bold green]✅ Upgraded {len(upgraded)} package(s)[/bold green]\n"
+            f"[bold green]✓ Upgraded {len(upgraded)} package(s)[/bold green]\n"
         )
         for pkg in upgraded:
             console.print(
@@ -408,12 +404,12 @@ def upgrade(
                 )
 
         if failures:
-            console.print(f"\n[bold red]❌ {len(failures)} skipped/failed:[/bold red]")
+            console.print(f"\n[bold red]✗ {len(failures)} skipped/failed:[/bold red]")
             for pkg_name, reason in failures:
                 console.print(f"  - {pkg_name}: [dim]{reason}[/dim]")
 
     except PinnedPackageWarning as e:
-        console.print(f"\n[bold yellow]⚠️ {e.message}[/bold yellow]\n")
+        console.print(f"\n[bold yellow]⚠ {e.message}[/bold yellow]\n")
     except Exception as e:
         sys.exit(handle_error(error=e))
 

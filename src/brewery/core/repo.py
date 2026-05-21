@@ -6,20 +6,22 @@ import asyncio
 from typing import Optional
 
 from brewery.core.cache import Cache, CacheManager
+from brewery.core.config import get_brewery_env
 from brewery.core.decorators import log_operation
 from brewery.core.errors import PackageNotFoundError
 from brewery.core.models import Package, PackageKind, PackageStatus
-from brewery.core.task_manager import BackgroundTaskManager, get_task_manager
 from brewery.providers import brew_cask, brew_formula, brew_outdated
 
 
 class Repository:
     """Repository for managing package data from various backends."""
 
-    def __init__(self):
+    def __init__(
+        self, cache: Cache | None = None, cache_mgr: CacheManager | None = None
+    ):
         """Initialise the repository."""
-        self.cache = Cache(namespace="repository")
-        self.cache_mgr = CacheManager(self.cache)
+        _cache = cache or Cache(namespace="repository")
+        self.cache_mgr = cache_mgr or CacheManager(_cache)
 
     @log_operation(event_prefix="get_all_installed", log_args=["kind_filter"])
     async def get_all_installed(
@@ -55,10 +57,11 @@ class Repository:
             A Package instance with detailed information.
         """
         if kind is None:
-            for k in [PackageKind.FORMULA, PackageKind.CASK]:
-                pkg: Package | None = await self.cache_mgr.get_details_from_cache(
-                    name, kind=k
-                )
+            cache_results = await asyncio.gather(
+                self.cache_mgr.get_details_from_cache(name, kind=PackageKind.FORMULA),
+                self.cache_mgr.get_details_from_cache(name, kind=PackageKind.CASK),
+            )
+            for pkg in cache_results:
                 if pkg:
                     return pkg
 
@@ -75,9 +78,7 @@ class Repository:
             raise PackageNotFoundError(package=name)
 
         else:
-            pkg: Package | None = await self.cache_mgr.get_details_from_cache(
-                name, kind=kind
-            )
+            pkg = await self.cache_mgr.get_details_from_cache(name, kind=kind)
             if pkg:
                 return pkg
 
@@ -163,17 +164,10 @@ class Repository:
 
             await provider.uninstall(names=pkg_names)
 
-            # Use info to verify what was actually removed
-            still_installed: set[str] = {
-                p.name for p in await provider.info(names=pkg_names) if p.versions
-            }
-            removed: list = [n for n in pkg_names if n not in still_installed]
-            failed: list = [
-                (n, "uninstall failed") for n in pkg_names if n in still_installed
-            ]
+            removed, failed_names = await self._verify_removed(pkg_names, pkg_kind)
+            failures.extend((n, "uninstall failed") for n in failed_names)
 
             succeeded += len(removed)
-            failures.extend(failed)
 
             await self.cache_mgr.update_packages(
                 packages=[Package(name=n, kind=pkg_kind) for n in removed],
@@ -181,6 +175,28 @@ class Repository:
             )
 
         return succeeded, failures
+
+    async def _verify_removed(
+        self, names: list[str], kind: PackageKind
+    ) -> tuple[list[str], list[str]]:
+        """Return (removed, failed) based on filesystem presence.
+
+        Args:
+            names: List of package names to verify.
+            kind: Package kind (formula or cask).
+
+        Returns:
+            Tuple of (removed, failed) package names.
+        """
+        env = get_brewery_env()
+
+        base = env.cellar if kind == PackageKind.FORMULA else env.caskroom
+
+        removed, failed = [], []
+        for name in names:
+            (failed if (base / name).exists() else removed).append(name)
+
+        return removed, failed
 
     @log_operation(event_prefix="get_outdated", log_args=["name", "kind"])
     async def get_outdated(self, live: bool = False) -> list[Package]:
@@ -193,15 +209,11 @@ class Repository:
             List of packages with OUTDATED status.
         """
         if live:
-            outdated_entries: list[dict] = await brew_outdated.fetch_outdated()
-            outdated_pkgs: list[Package] = [
-                Package.package_from_dict(data=e) for e in outdated_entries
-            ]
+            outdated_entries = await brew_outdated.fetch_outdated()
+            await self.cache_mgr.refresh_outdated_status(outdated_entries)
 
-            task_mgr: BackgroundTaskManager = get_task_manager()
-            task_mgr.add_task(
-                coro=self.cache_mgr.refresh_outdated_status(outdated_entries)
-            )
+            all_pkgs = await self.get_all_installed()
+            outdated_pkgs = [p for p in all_pkgs if PackageStatus.OUTDATED in p.status]
 
             return outdated_pkgs
 
@@ -210,7 +222,7 @@ class Repository:
             all_pkgs: list[Package] = await self.get_all_installed()
             return [p for p in all_pkgs if PackageStatus.OUTDATED in p.status]
 
-    @log_operation(event_prefix="upgrade_packages", log_args=["name", "kind"])
+    @log_operation(event_prefix="upgrade_packages", log_args=["names", "kind"])
     async def upgrade_packages(
         self, names: list[str] | None = None, kind: PackageKind | None = None
     ) -> tuple[list[Package], list[Package], list[tuple[str, str]]]:

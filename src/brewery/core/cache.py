@@ -23,6 +23,7 @@ console = Console()
 _cached_token = None
 _token_timestamp = 0
 
+_KIND_VALUES: frozenset[str] = frozenset(k.value for k in PackageKind)
 WIDTHS_CACHE: Path = CACHE_DIR / "column_widths.json"
 
 
@@ -33,8 +34,6 @@ class Cache:
         """Initialise the cache for a specific namespace."""
         self.cache_path: Path = CACHE_DIR / namespace
         self.cache_path.mkdir(parents=True, exist_ok=True)
-        self._cached_token = None
-        self._token_timestamp = 0
         log.debug(
             event="cache_initialised",
             namespace=namespace,
@@ -217,6 +216,9 @@ class CacheManager:
 
             return []
 
+        except CacheError:
+            raise
+
         except Exception as e:
             log.error(
                 event="cache_load_error",
@@ -320,7 +322,12 @@ class CacheManager:
                     )
                     continue
 
-                assert cached_list is not None and cached_map is not None
+                if cached_list is None or cached_map is None:
+                    log.warning(event="cache_missing", key=list_key)
+                    await self.refresh_packages(
+                        kind=PackageKind(suffix) if suffix != "all" else None
+                    )
+                    continue
 
                 if action == "remove":
                     cached_list[:] = [
@@ -416,8 +423,7 @@ class CacheManager:
                 if pkg.name in outdated_map:
                     entry = outdated_map[pkg.name]
                     pkg.status |= PackageStatus.OUTDATED
-                    if pkg.metadata:
-                        pkg.metadata["latest_version"] = entry.get("current_version")
+                    pkg.metadata["latest_version"] = entry.get("current_version")
                     changed.append(pkg)
 
             if changed:
@@ -449,10 +455,11 @@ class CacheManager:
         for suffix in suffixes:
             list_key, map_key = self._cache_keys(kind_value=suffix)
 
-            if suffix in (k.value for k in PackageKind):
-                filtered: list = [p for p in pkgs_dicts if p.get("kind") == suffix]
-            else:
-                filtered: list = pkgs_dicts
+            filtered = (
+                [p for p in pkgs_dicts if p.get("kind") == suffix]
+                if suffix in _KIND_VALUES
+                else pkgs_dicts
+            )
 
             filtered_map: dict = {p["name"]: p for p in filtered}
 
