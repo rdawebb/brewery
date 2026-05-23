@@ -71,10 +71,16 @@ class Cache:
             except FileNotFoundError:
                 return 0
 
-        cellar_mtime: int = mtime(p=brewery.cellar)
-        caskroom_mtime: int = mtime(p=brewery.caskroom)
+        taps_path: Path = brewery.prefix / "Homebrew" / "Library" / "Taps"
 
-        _cached_token = f"{cellar_mtime}-{caskroom_mtime}"
+        _cached_token = "-".join(
+            str(mtime(p))
+            for p in [
+                brewery.cellar,
+                brewery.caskroom,
+                taps_path,
+            ]
+        )
         _token_timestamp = now
 
         return _cached_token

@@ -15,7 +15,7 @@ from brewery.core.shell import run_capture, run_json
 log: BreweryLogger = get_logger()
 
 _BATCH_SIZE = 30
-_SEMAPHORE_SIZE = asyncio.Semaphore(20)
+_SEMAPHORE_SIZE = asyncio.Semaphore(5)
 
 
 async def _get_package_size(path: str | None) -> int | None:
