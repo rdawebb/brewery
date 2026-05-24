@@ -33,10 +33,16 @@ from brewery.core.logging import BreweryLogger, configure_logging, get_logger
 from brewery.core.models import Package, PackageKind
 from brewery.core.repo import Repository
 from brewery.core.task_manager import BackgroundTaskManager, get_task_manager
+from brewery.daemon.daemon import daemon_app
 
 log: BreweryLogger = get_logger(name=__name__)
 
 app = ExtendedTyper(help="Brewery: A package management CLI tool")
+app.add_typer(
+    daemon_app,
+    name="daemon",
+    help="Daemon: Manage the Brewery background refresh daemon.",
+)
 
 console = Console(emoji=False, highlight=False)
 
