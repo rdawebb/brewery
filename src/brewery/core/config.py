@@ -69,3 +69,42 @@ def get_brewery_env() -> BreweryENV:
 
 
 CACHE_DIR: Path = _DEF_CACHE
+
+KNOWN_COMMANDS = {
+    # List commands/aliases
+    "list",
+    "ls",
+    "l",
+    # Info commands/aliases
+    "info",
+    "i",
+    "in",
+    # Search commands/aliases
+    "search",
+    "s",
+    "find",
+    # Install commands/aliases
+    "install",
+    "add",
+    # Uninstall commands/aliases
+    "uninstall",
+    "rm",
+    "remove",
+    # Outdated commands/aliases
+    "outdated",
+    "o",
+    "out",
+    # Upgrade commands/aliases
+    "upgrade",
+    "u",
+    "up",
+    # Daemon commands
+    "daemon",
+    "start",
+    "a",
+    "stop",
+    "d",
+    "status",
+    "st",
+    "stat",
+}
