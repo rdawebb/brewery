@@ -414,8 +414,11 @@ def upgrade(
             for pkg_name, reason in failures:
                 console.print(f"  - {pkg_name}: [dim]{reason}[/dim]")
 
+        console.print()
+
     except PinnedPackageWarning as e:
         console.print(f"\n[bold yellow]⚠ {e.message}[/bold yellow]\n")
+
     except Exception as e:
         sys.exit(handle_error(error=e))
 

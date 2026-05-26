@@ -1,5 +1,3 @@
-<!-- scripts/brewery.outdated.plist -->
-<!-- Install to ~/Library/LaunchAgents/ -->
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -9,11 +7,15 @@
     <string>com.brewery.outdated</string>
     <key>ProgramArguments</key>
     <array>
-        <!-- Absolute path required; launchd does not inherit PATH -->
-        <string>/opt/homebrew/bin/python3</string>
+        <string>python3</string>
         <string>-m</string>
         <string>brewery.daemon.outdated_refresh</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin</string>
+    </dict>
     <key>StartInterval</key>
     <integer>1800</integer>
     <key>RunAtLoad</key>

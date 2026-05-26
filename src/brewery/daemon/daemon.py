@@ -26,21 +26,34 @@ def _plist_source() -> Path:
         return Path(p)
 
 
-def _patch_python_path(plist_path: Path) -> None:
-    """Rewrite the Python interpreter path for the current Homebrew prefix.
+def _patch_executable_paths(plist_path: Path) -> None:
+    """Rewrite the Python interpreter and brew paths for the current Homebrew prefix.
 
     Args:
         plist_path: The path to the plist file to patch.
     """
     python = shutil.which("python3") or sys.executable
-    text = plist_path.read_text()
-    # Replace the placeholder path written at build time
-    import re
+    brew = shutil.which("brew")
+    if not brew:
+        console.print(
+            "\nCould not locate brew on PATH — daemon may not work\n",
+            style="bold yellow",
+        )
+        return
 
-    text = re.sub(
-        r"<string>/[^<]+/python3</string>", f"<string>{python}</string>", text, count=1
+    import plistlib
+
+    data = plistlib.loads(plist_path.read_bytes())
+
+    args = data.get("ProgramArguments", [])
+    if args:
+        args[0] = python
+
+    data.setdefault("EnvironmentVariables", {})["PATH"] = (
+        f"{Path(brew).parent}:/usr/local/bin:/usr/bin:/bin"
     )
-    plist_path.write_text(text)
+
+    plist_path.write_bytes(plistlib.dumps(data))
 
 
 @daemon_app.command_with_aliases(aliases=["a", "add"])
@@ -58,32 +71,34 @@ def start(
 
     if PLIST_DEST.exists() and not force:
         console.print(
-            f"Daemon already installed at {PLIST_DEST}. Use --force to reinstall.",
+            f"\nDaemon already installed at {PLIST_DEST}. Use --force to reinstall.",
             style="bold yellow",
         )
         sys.exit(1)
 
     shutil.copy2(_plist_source(), PLIST_DEST)
-    _patch_python_path(PLIST_DEST)
+    _patch_executable_paths(PLIST_DEST)
 
     result = subprocess.run(["launchctl", "load", "-w", str(PLIST_DEST)])
     if result.returncode != 0:
         console.print("launchctl load failed.", style="bold red")
         sys.exit(result.returncode)
 
-    daemon_app.echo(f"✓ Daemon installed and loaded ({PLIST_LABEL})")
+    console.print(
+        f"\n✓ Daemon installed and loaded ({PLIST_LABEL})\n", style="bold green"
+    )
 
 
 @daemon_app.command_with_aliases(aliases=["d", "rm"])
 def stop() -> None:
     """Deactivate the background refresh daemon."""
     if not PLIST_DEST.exists():
-        console.print("\nDaemon is not installed.", style="bold yellow")
+        console.print("\nDaemon is not installed\n", style="bold yellow")
         sys.exit(1)
 
     subprocess.run(["launchctl", "unload", "-w", str(PLIST_DEST)])
     PLIST_DEST.unlink()
-    console.print(f"\n✓ Daemon removed ({PLIST_LABEL})", style="bold green")
+    console.print(f"\n✓ Daemon removed ({PLIST_LABEL})\n", style="bold green")
 
 
 @daemon_app.command_with_aliases(aliases=["st", "stat"])
@@ -96,7 +111,7 @@ def status() -> None:
     )
     if result.returncode == 0:
         console.print("\n✓ Background refresh is active", style="bold green")
-        console.print("- Use `brewery daemon stop` to deactivate.\n", style="dim")
+        console.print("- Use `brewery daemon stop` to deactivate\n", style="dim")
     else:
         console.print("\n✗ Background refresh is not active", style="bold red")
-        console.print("- Use `brewery daemon start` to activate.\n", style="dim")
+        console.print("- Use `brewery daemon start` to activate\n", style="dim")
