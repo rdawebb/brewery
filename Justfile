@@ -42,4 +42,4 @@ run:
 
 # Clean up temporary files
 clean:
-  @which python3 > /dev/null && uv run python3 scripts/clean.py || uv run python scripts/clean.py
+  @which python3 > /dev/null && uv run python3 src/brewery/scripts/clean.py || uv run python src/brewery/scripts/clean.py

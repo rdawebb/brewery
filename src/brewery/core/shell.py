@@ -30,7 +30,7 @@ async def run_brew_command(
     subcommand: Literal["install", "uninstall", "upgrade"],
     names: list[str],
     flags: list[str],
-    timeout: int = 120,
+    timeout: int | None = None,
 ) -> tuple[str, str, int]:
     """Run a Homebrew command asynchronously with optional timeout.
 
@@ -83,7 +83,7 @@ async def run_brew_command(
     return out, err, code
 
 
-async def run_capture(*cmd: str, timeout: Optional[int] = 30) -> tuple[str, str, int]:
+async def run_capture(*cmd: str, timeout: Optional[int] = None) -> tuple[str, str, int]:
     """Run a shell command asynchronously with optional timeout
 
     Args:

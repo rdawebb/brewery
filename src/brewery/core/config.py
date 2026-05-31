@@ -70,7 +70,7 @@ def get_brewery_env() -> BreweryENV:
 
 CACHE_DIR: Path = _DEF_CACHE
 
-KNOWN_COMMANDS = {
+KNOWN_COMMANDS: set[str] = {
     # List commands/aliases
     "list",
     "ls",
@@ -98,8 +98,11 @@ KNOWN_COMMANDS = {
     "upgrade",
     "u",
     "up",
-    # Daemon commands
+    # Daemon commands/aliases
     "daemon",
+}
+
+DAEMON_SUBCOMMANDS: set[str] = {
     "start",
     "a",
     "stop",

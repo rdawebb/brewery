@@ -101,6 +101,13 @@ def stop() -> None:
     console.print(f"\n✓ Daemon removed ({PLIST_LABEL})\n", style="bold green")
 
 
+@daemon_app.command_with_aliases(aliases=["r"])
+def restart() -> None:
+    """Restart the background refresh daemon."""
+    stop()
+    start()
+
+
 @daemon_app.command_with_aliases(aliases=["st", "stat"])
 def status() -> None:
     """Check whether the daemon is currently active."""

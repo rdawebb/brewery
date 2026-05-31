@@ -14,18 +14,18 @@ dependencies = [
 ]
 
 [project.scripts]
-brewery = "brewery.cli.main:app"
-br = "brewery.cli.main:app"
+brewery = "brewery.cli.main:main"
+br = "brewery.cli.main:main"
 
 [project.optional-dependencies]
 dev = [
   "icecream>=2.2.0,<3.0.0",
-  "prek>=0.4.1,<1.0.0",
+  "prek>=0.4.3,<1.0.0",
   "pytest>=9.0.3,<10.0.0",
   "pytest-cov>=7.1.0,<8.0.0",
-  "ruff>=0.15.14,<0.16.0",
+  "ruff>=0.15.15,<0.16.0",
   "rust-just>=1.51.0,<2.0.0",
-  "ty>=0.0.39,<1.0.0"
+  "ty>=0.0.40,<1.0.0"
 ]
 
 [tool.setuptools]

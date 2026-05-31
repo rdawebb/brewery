@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
+import subprocess
 import sys
 from typing import Any, Awaitable, List, Optional
 
@@ -15,6 +17,7 @@ from brewery.cli.renderers import (
     package_table,
     paginate,
 )
+from brewery.core.config import KNOWN_COMMANDS
 from brewery.core.errors import (
     EXIT_SYSTEM_ERROR,
     EXIT_TRANSIENT_ERROR,
@@ -86,6 +89,30 @@ def handle_error(error: Exception) -> int:
         log.error(event="unexpected_error", error=str(object=error), exc_info=True)
         console.print(f"\n⚠ Unexpected error occurred: {error}\n", style="bold red")
         return EXIT_SYSTEM_ERROR
+
+
+def _brew_passthrough(argv: list[str]) -> int:
+    """Forward an unknown brewery command straight to brew.
+
+    Args:
+        argv: The command and arguments to pass to brew.
+
+    Returns:
+        The exit code of the brew command.
+    """
+    if shutil.which("brew") is None:
+        console.print("\n❌ brew not found on PATH\n", style="bold red")
+        return EXIT_SYSTEM_ERROR
+
+    try:
+        return subprocess.run(["brew", *argv]).returncode
+
+    except FileNotFoundError:
+        console.print("\n❌ brew not found\n", style="bold red")
+        return EXIT_SYSTEM_ERROR
+
+    except KeyboardInterrupt:
+        return 130
 
 
 def run_with_task_manager(coro: Awaitable) -> Any:
@@ -331,9 +358,9 @@ def outdated(
 
         console.print(package_table(pkgs))
         console.print(
-            f"\n[dim]{len(pkgs)} outdated package(s) - "
-            f"Run [bold]brewery outdated --check[/bold] to refresh, "
-            f"or [bold]brewery upgrade[/bold] to update all.[/dim]"
+            f"\n[dim] - {len(pkgs)} outdated package(s)"
+            f"\n - Run [bold]brewery upgrade[/bold] to update all outdated packages, "
+            f"\n   or [bold]brewery upgrade <packages>[/bold] to update specific packages\n"
         )
 
     except Exception as e:
@@ -390,20 +417,18 @@ def upgrade(
                 coro=repo.upgrade_packages(names, kind)
             )
 
-        if not upgraded and not failures:
+        if not upgraded and not failures and not current:
             console.print("\n[bold green]✓ All packages are up to date![/bold green]\n")
             return
 
-        console.print(
-            f"[bold green]✓ Upgraded {len(upgraded)} package(s)[/bold green]\n"
-        )
+        console.print(f"[bold green]✓ Upgraded {len(upgraded)} package(s)[/bold green]")
         for pkg in upgraded:
             console.print(
-                f"  [dim]→[/dim] {pkg.name} {pkg.versions[0] if pkg.versions else ''}"
+                f"\n  [dim]→[/dim] {pkg.name} {pkg.versions[0] if pkg.versions else ''}"
             )
 
         if current:
-            console.print(f"\n[dim]{len(current)} already up-to-date:[/dim]")
+            console.print(f"\n[dim]{len(current)} already up-to-date:[/dim]\n")
             for pkg in current:
                 console.print(
                     f"  [dim]→ {pkg.name} {pkg.versions[0] if pkg.versions else ''}[/dim]"
@@ -423,5 +448,16 @@ def upgrade(
         sys.exit(handle_error(error=e))
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Intercepts the entry point for the brewery CLI to handle commands passthrough."""
+    argv = sys.argv[1:]
+
+    # Pass unknown and non-flag arguments straight to brew
+    if argv and not argv[0].startswith("-") and argv[0] not in KNOWN_COMMANDS:
+        sys.exit(_brew_passthrough(argv))
+
     app()
+
+
+if __name__ == "__main__":
+    main()

@@ -21,8 +21,8 @@ print("Fixing brewery entry point...")
 entry_point_content = f"""#!{VENV_PYTHON}
 import sys
 sys.path.insert(0, '{SRC_PATH}')
-from brewery.cli.main import app
-sys.exit(app())
+from brewery.cli.main import main
+sys.exit(main())
 """
 
 ENTRY_POINT.write_text(data=entry_point_content)
