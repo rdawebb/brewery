@@ -15,7 +15,7 @@ from brewery.core.decorators import log_operation
 from brewery.core.errors import CacheError
 from brewery.core.logging import BreweryLogger, get_logger
 from brewery.core.models import Package, PackageKind, PackageStatus
-from brewery.providers import brew_cask, brew_formula
+from brewery.providers import base, brew_cask, brew_formula
 
 log: BreweryLogger = get_logger(name=__name__)
 console = Console()
@@ -177,13 +177,21 @@ class Cache:
 class CacheManager:
     """Manages all repository cache operations."""
 
-    def __init__(self, cache: Cache):
+    def __init__(
+        self,
+        cache: Cache,
+        formula_backend: base.PackageBackend = brew_formula.backend,
+        cask_backend: base.PackageBackend = brew_cask.backend,
+    ):
         """Initialise CacheManager with a Cache instance
 
         Args:
             cache: A Cache instance to use for storage.
         """
         self.cache: Cache = cache
+        self.formula = formula_backend
+        self.cask = cask_backend
+
         log.debug(event="cache_manager_initialised")
 
     @staticmethod
@@ -253,9 +261,9 @@ class CacheManager:
 
         # Gather tasks based on kind
         if kind in (None, PackageKind.FORMULA):
-            tasks.append(brew_formula.list_installed())
+            tasks.append(self.formula.list_installed())
         if kind in (None, PackageKind.CASK):
-            tasks.append(brew_cask.list_installed())
+            tasks.append(self.cask.list_installed())
 
         if tasks:
             results: list = await asyncio.gather(*tasks)

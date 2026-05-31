@@ -20,8 +20,8 @@ async def list_installed() -> list[Package]:
     Returns:
         A list of installed Package instances.
     """
-    data: Any = await run_json("brew", "info", "--json=v2", "--installed")
-    items: Any = data.get("formulae", [])
+    data: dict[str, Any] = await run_json("brew", "info", "--json=v2", "--installed")
+    items: list[dict[str, Any]] = data.get("formulae", [])
 
     pkgs: list[Package] = await build_packages_batch(
         items=items, kind=PackageKind.FORMULA
@@ -100,3 +100,16 @@ async def upgrade(names: list[str]) -> list[str]:
     await run_brew_command(subcommand="upgrade", names=names, flags=[])
 
     return names
+
+
+class _Backend:
+    """Backend for Homebrew formulae."""
+
+    list_installed = staticmethod(list_installed)
+    info = staticmethod(info)
+    install = staticmethod(install)
+    uninstall = staticmethod(uninstall)
+    upgrade = staticmethod(upgrade)
+
+
+backend = _Backend()

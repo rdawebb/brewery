@@ -41,8 +41,10 @@ async def list_installed() -> list[Package]:
     """
     caskroom_path = await _get_caskroom_path()
 
-    data: Any = await run_json("brew", "info", "--cask", "--json=v2", "--installed")
-    items: Any = data.get("casks", [])
+    data: dict[str, Any] = await run_json(
+        "brew", "info", "--cask", "--json=v2", "--installed"
+    )
+    items: list[dict[str, Any]] = data.get("casks", [])
 
     pkgs: list[Package] = await build_packages_batch(
         items=items, kind=PackageKind.CASK, caskroom_path=caskroom_path
@@ -129,3 +131,16 @@ async def upgrade(names: list[str]) -> list[str]:
     await run_brew_command(subcommand="upgrade", names=names, flags=[])
 
     return names
+
+
+class _Backend:
+    """Backend for Homebrew casks."""
+
+    list_installed = staticmethod(list_installed)
+    info = staticmethod(info)
+    install = staticmethod(install)
+    uninstall = staticmethod(uninstall)
+    upgrade = staticmethod(upgrade)
+
+
+backend = _Backend()

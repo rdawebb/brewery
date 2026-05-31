@@ -15,7 +15,21 @@ from brewery.core.shell import run_capture, run_json
 log: BreweryLogger = get_logger()
 
 _BATCH_SIZE = 30
-_SEMAPHORE_SIZE = asyncio.Semaphore(5)
+_SEMAPHORE: asyncio.Semaphore | None = None
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    """Get the semaphore for limiting concurrent package size checks.
+
+    Returns:
+        The semaphore instance.
+    """
+    global _SEMAPHORE
+
+    if _SEMAPHORE is None:
+        _SEMAPHORE = asyncio.Semaphore(5)
+
+    return _SEMAPHORE
 
 
 async def _get_package_size(path: str | None) -> int | None:
@@ -31,7 +45,7 @@ async def _get_package_size(path: str | None) -> int | None:
         log.warning(event="package_size_skipped", reason="no_path")
         return None
 
-    async with _SEMAPHORE_SIZE:
+    async with _get_semaphore():
         try:
             stdout, stderr, returncode = await run_capture("du", "-sk", path)
             if returncode == 0:
@@ -102,7 +116,8 @@ async def _build_formula_package(formula_data: dict[str, Any]) -> Package:
             keg_only=f.get("keg_only"),
             linked_keg=f.get("linked_keg"),
             installed=installed,
-        )
+        ),
+        kind=PackageKind.FORMULA,
     )
 
     deps: list[Dependency] = [Dependency(name=d) for d in f.get("dependencies", [])]
@@ -174,7 +189,8 @@ async def _build_cask_package(
             keg_only=c.get("keg_only"),
             linked_keg=c.get("linked_keg"),
             installed=installed,
-        )
+        ),
+        kind=PackageKind.CASK,
     )
 
     token: str | None = c.get("token") or c.get("name", [None])[0]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, TextIO
@@ -108,7 +109,9 @@ def configure_logging(
         return
 
     if log_file is None:
-        log_dir: Path = Path.home() / ".brewery" / "logs"
+        log_dir: Path = Path(
+            os.environ.get("BREWERY_LOG_DIR", Path.home() / ".brewery" / "logs")
+        )
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file: Path = log_dir / "backend.log"
 
@@ -143,6 +146,4 @@ def get_logger(name: str = "brewery") -> BreweryLogger:
     Returns:
         A BreweryLogger instance.
     """
-    if not _CONFIGURED:
-        configure_logging()
     return BreweryLogger(logger=logging.getLogger(name))

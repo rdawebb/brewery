@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, TypedDict
 
-from brewery.core.models import PackageStatus
+from brewery.core.models import PackageKind, PackageStatus
 
 InstalledFormula = list[dict[str, Any]]
 InstalledCask = str
@@ -22,7 +22,9 @@ class StatusInfo(TypedDict, total=False):
     service: dict | None
 
 
-def derive_status(info: StatusInfo) -> PackageStatus:
+def derive_status(
+    info: StatusInfo, kind: PackageKind = PackageKind.FORMULA
+) -> PackageStatus:
     """Derive the PackageStatus from package info dictionary.
 
     Args:
@@ -37,12 +39,14 @@ def derive_status(info: StatusInfo) -> PackageStatus:
         status |= PackageStatus.OUTDATED
     if info.get("pinned") is True:
         status |= PackageStatus.PINNED
-    if info.get("keg_only") is True:
-        status |= PackageStatus.KEG_ONLY
-    if info.get("linked_keg") in (None, "") and info.get("installed"):
-        status |= PackageStatus.NOT_LINKED
     service = info.get("service")
     if isinstance(service, dict) and service:
         status |= PackageStatus.HAS_SERVICE
+
+    if kind == PackageKind.FORMULA:
+        if info.get("keg_only") is True:
+            status |= PackageStatus.KEG_ONLY
+        if info.get("linked_keg") in (None, "") and info.get("installed"):
+            status |= PackageStatus.NOT_LINKED
 
     return status

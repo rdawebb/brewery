@@ -2,6 +2,7 @@
 
 import asyncio
 
+from brewery.core.logging import configure_logging
 from brewery.core.repo import Repository
 
 
@@ -12,4 +13,5 @@ async def background_refresh() -> None:
 
 
 if __name__ == "__main__":
+    configure_logging(level="INFO")
     asyncio.run(background_refresh())

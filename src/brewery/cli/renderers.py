@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.table import Table
 
 from brewery.core.cache import WIDTHS_CACHE
+from brewery.core.config import ensure_cache_dir
 from brewery.core.models import Package, PackageStatus
 
 STATUS_LABELS: dict[PackageStatus, str] = {
@@ -35,6 +36,7 @@ COLUMN_DEFINITIONS: list[dict] = [
 
 # Terminal width mapped to column headers
 _width_cache: dict[int, tuple[int, ...]] = {}
+_width_cache_loaded = False
 
 
 def _load_width_cache() -> None:
@@ -48,7 +50,13 @@ def _load_width_cache() -> None:
         pass
 
 
-_load_width_cache()
+def _ensure_width_cache_loaded() -> None:
+    """Ensure the width cache is loaded from disk."""
+    global _width_cache_loaded
+
+    if not _width_cache_loaded:
+        _load_width_cache()
+        _width_cache_loaded = True
 
 
 class _MeasuringTable(Table):
@@ -169,6 +177,7 @@ def status_to_str(status: PackageStatus) -> str:
 def _save_width_cache() -> None:
     """Save calculated column widths to file cache"""
     try:
+        ensure_cache_dir()
         WIDTHS_CACHE.write_text(
             data=json.dumps(
                 obj={str(object=k): list(v) for k, v in _width_cache.items()}
@@ -190,6 +199,8 @@ def package_table(pkgs: Iterable[Package]) -> Table:
     Returns:
         A Rich Table displaying package information.
     """
+    _ensure_width_cache_loaded()
+
     pkg_list: list[Package] = list(pkgs)
     term_width, _ = _terminal_size()
     cached_widths: tuple[int, ...] | None = _width_cache.get(term_width)

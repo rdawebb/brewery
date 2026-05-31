@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import platform
 import subprocess
 from dataclasses import dataclass
@@ -21,8 +22,9 @@ class BreweryENV:
     caskroom: Path
 
 
-_DEF_CACHE = Path.home() / ".brewery" / "cache"
-_DEF_CACHE.mkdir(parents=True, exist_ok=True)
+_DEF_CACHE = Path(
+    os.environ.get("BREWERY_CACHE_DIR", Path.home() / ".brewery" / "cache")
+)
 _BREW_PREFIX_CACHE = _DEF_CACHE / "brew_prefix.txt"
 _FALLBACK_PREFIX = (
     Path("/opt/homebrew") if platform.machine() == "arm64" else Path("/usr/local")
@@ -31,8 +33,23 @@ _FALLBACK_PREFIX = (
 _env_cache: BreweryENV | None = None
 
 
+def ensure_cache_dir() -> Path:
+    """Ensure the cache directory exists.
+
+    Returns:
+        The cache directory path.
+    """
+    _DEF_CACHE.mkdir(parents=True, exist_ok=True)
+
+    return _DEF_CACHE
+
+
 def get_brewery_env() -> BreweryENV:
-    """Get or discover Brewery environment based on system settings."""
+    """Get or discover Brewery environment based on system settings.
+
+    Returns:
+        The Brewery environment.
+    """
     global _env_cache
 
     if _env_cache is not None:
@@ -55,6 +72,8 @@ def get_brewery_env() -> BreweryENV:
                 args=["brew", "--prefix"], text=True
             ).strip()
             prefix = Path(output)
+
+            ensure_cache_dir()
             _BREW_PREFIX_CACHE.write_text(data=str(object=prefix))
             log.info(event="brew_prefix_cached", prefix=str(prefix))
 

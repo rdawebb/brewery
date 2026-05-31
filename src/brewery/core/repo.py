@@ -10,18 +10,24 @@ from brewery.core.config import get_brewery_env
 from brewery.core.decorators import log_operation
 from brewery.core.errors import PackageNotFoundError
 from brewery.core.models import Package, PackageKind, PackageStatus
-from brewery.providers import brew_cask, brew_formula, brew_outdated
+from brewery.providers import base, brew_cask, brew_formula, brew_outdated
 
 
 class Repository:
     """Repository for managing package data from various backends."""
 
     def __init__(
-        self, cache: Cache | None = None, cache_mgr: CacheManager | None = None
+        self,
+        cache: Cache | None = None,
+        cache_mgr: CacheManager | None = None,
+        formula_backend: base.PackageBackend = brew_formula.backend,
+        cask_backend: base.PackageBackend = brew_cask.backend,
     ):
         """Initialise the repository."""
         _cache = cache or Cache(namespace="repository")
         self.cache_mgr = cache_mgr or CacheManager(_cache)
+        self.formula = formula_backend
+        self.cask = cask_backend
 
     @log_operation(event_prefix="get_all_installed", log_args=["kind_filter"])
     async def get_all_installed(
@@ -66,8 +72,8 @@ class Repository:
                     return pkg
 
             results = await asyncio.gather(
-                brew_formula.info(names=[name]),
-                brew_cask.info(names=[name]),
+                self.formula.info(names=[name]),
+                self.cask.info(names=[name]),
                 return_exceptions=True,
             )
 
@@ -100,7 +106,7 @@ class Repository:
         Raises:
             BrewCommandError: Propagated from provider.
         """
-        provider = brew_formula if kind == PackageKind.FORMULA else brew_cask
+        provider = self.formula if kind == PackageKind.FORMULA else self.cask
 
         await provider.install(names=names)
 
@@ -156,8 +162,8 @@ class Repository:
         succeeded = 0
 
         for pkg_names, provider, pkg_kind in [
-            (formula_names, brew_formula, PackageKind.FORMULA),
-            (cask_names, brew_cask, PackageKind.CASK),
+            (formula_names, self.formula, PackageKind.FORMULA),
+            (cask_names, self.cask, PackageKind.CASK),
         ]:
             if not pkg_names:
                 continue
@@ -281,8 +287,8 @@ class Repository:
         current_pkgs: list[Package] = []
 
         for pkg_names, provider in [
-            (formula_names, brew_formula),
-            (cask_names, brew_cask),
+            (formula_names, self.formula),
+            (cask_names, self.cask),
         ]:
             if not pkg_names:
                 continue

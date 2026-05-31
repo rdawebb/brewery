@@ -207,6 +207,8 @@ def info(
             if not matching_pkg:
                 raise PackageNotFoundError(package=name)
             resolved_kind: PackageKind = matching_pkg.kind
+        else:
+            resolved_kind = kind
 
         pkg: Package = run_with_task_manager(coro=repo.get_details(name, resolved_kind))
 
