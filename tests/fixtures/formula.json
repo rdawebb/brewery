@@ -1,0 +1,253 @@
+{
+  "formulae": [
+    {
+      "name": "yazi",
+      "full_name": "yazi",
+      "tap": "homebrew/core",
+      "oldnames": [],
+      "aliases": [],
+      "versioned_formulae": [],
+      "desc": "Blazing fast terminal file manager written in Rust, based on async I/O",
+      "license": "MIT",
+      "homepage": "https://github.com/sxyazi/yazi",
+      "versions": {
+        "stable": "26.5.6",
+        "head": "HEAD",
+        "bottle": true
+      },
+      "urls": {
+        "stable": {
+          "url": "https://github.com/sxyazi/yazi/archive/refs/tags/v26.5.6.tar.gz",
+          "tag": null,
+          "revision": null,
+          "using": null,
+          "checksum": "a18445df86a20068f7b17609d12d6f635de488958579ae7a2b143a244ba7e63f"
+        },
+        "head": {
+          "url": "https://github.com/sxyazi/yazi.git",
+          "branch": "main",
+          "using": null
+        }
+      },
+      "revision": 0,
+      "version_scheme": 0,
+      "compatibility_version": null,
+      "autobump": true,
+      "no_autobump_message": null,
+      "skip_livecheck": false,
+      "bottle": {
+        "stable": {
+          "rebuild": 0,
+          "root_url": "https://ghcr.io/v2/homebrew/core",
+          "files": {
+            "arm64_tahoe": {
+              "cellar": ":any_skip_relocation",
+              "url": "https://ghcr.io/v2/homebrew/core/yazi/blobs/sha256:b31572f1b22a938079f658e5b9fce190dcbba90aec41b052cddfa8950d883605",
+              "sha256": "b31572f1b22a938079f658e5b9fce190dcbba90aec41b052cddfa8950d883605"
+            },
+            "arm64_sequoia": {
+              "cellar": ":any_skip_relocation",
+              "url": "https://ghcr.io/v2/homebrew/core/yazi/blobs/sha256:19349642822262d015014fb68ffa11927f5eed6b60ce01da5f91282e9d0b7d60",
+              "sha256": "19349642822262d015014fb68ffa11927f5eed6b60ce01da5f91282e9d0b7d60"
+            },
+            "arm64_sonoma": {
+              "cellar": ":any_skip_relocation",
+              "url": "https://ghcr.io/v2/homebrew/core/yazi/blobs/sha256:fa9938e057c497ad4be2e7012d93133266b970e3aa0e763fa2be8bfa35d3e7d9",
+              "sha256": "fa9938e057c497ad4be2e7012d93133266b970e3aa0e763fa2be8bfa35d3e7d9"
+            },
+            "sonoma": {
+              "cellar": ":any_skip_relocation",
+              "url": "https://ghcr.io/v2/homebrew/core/yazi/blobs/sha256:0e8278a478e91973b686f46b2543a4ded02fcdcebdc8b05793e85782107de2dc",
+              "sha256": "0e8278a478e91973b686f46b2543a4ded02fcdcebdc8b05793e85782107de2dc"
+            },
+            "arm64_linux": {
+              "cellar": ":any_skip_relocation",
+              "url": "https://ghcr.io/v2/homebrew/core/yazi/blobs/sha256:981c7ef81931fce515159a9360b6127d025d66aeaa1db5f607157ada64585be6",
+              "sha256": "981c7ef81931fce515159a9360b6127d025d66aeaa1db5f607157ada64585be6"
+            },
+            "x86_64_linux": {
+              "cellar": ":any_skip_relocation",
+              "url": "https://ghcr.io/v2/homebrew/core/yazi/blobs/sha256:b9a80c02b0a7d6e5f3e22415cba4fc5914c7f5f5956985d7b44869c487799e55",
+              "sha256": "b9a80c02b0a7d6e5f3e22415cba4fc5914c7f5f5956985d7b44869c487799e55"
+            }
+          }
+        }
+      },
+      "pour_bottle_only_if": null,
+      "keg_only": false,
+      "keg_only_reason": null,
+      "options": [],
+      "build_dependencies": ["rust"],
+      "dependencies": [],
+      "test_dependencies": [],
+      "recommended_dependencies": [],
+      "optional_dependencies": [],
+      "uses_from_macos": [],
+      "uses_from_macos_bounds": [],
+      "requirements": [],
+      "conflicts_with": [],
+      "conflicts_with_reasons": [],
+      "link_overwrite": [],
+      "caveats": null,
+      "installed": [
+        {
+          "version": "26.5.6",
+          "used_options": [],
+          "built_as_bottle": true,
+          "poured_from_bottle": true,
+          "time": 1779032846,
+          "runtime_dependencies": [],
+          "installed_on_request": true
+        }
+      ],
+      "linked_keg": "26.5.6",
+      "pinned": false,
+      "outdated": false,
+      "deprecated": false,
+      "deprecation_date": null,
+      "deprecation_reason": null,
+      "deprecation_replacement_formula": null,
+      "deprecation_replacement_cask": null,
+      "deprecate_args": null,
+      "disabled": false,
+      "disable_date": null,
+      "disable_reason": null,
+      "disable_replacement_formula": null,
+      "disable_replacement_cask": null,
+      "disable_args": null,
+      "post_install_steps": [],
+      "post_install_defined": false,
+      "service": null,
+      "tap_git_head": "7e11334f92982679fb2c724064dd576b85f31382",
+      "ruby_source_path": "Formula/y/yazi.rb",
+      "ruby_source_checksum": {
+        "sha256": "143cf609fa54510e87b7cf0b03f647338ac1917b26ac3027ebeadf65ed72ca95"
+      }
+    },
+    {
+      "name": "act",
+      "full_name": "act",
+      "tap": "homebrew/core",
+      "oldnames": [],
+      "aliases": [],
+      "versioned_formulae": [],
+      "desc": "Run your GitHub Actions locally",
+      "license": "MIT",
+      "homepage": "https://github.com/nektos/act",
+      "versions": {
+        "stable": "0.2.88",
+        "head": "HEAD",
+        "bottle": true
+      },
+      "urls": {
+        "stable": {
+          "url": "https://github.com/nektos/act/archive/refs/tags/v0.2.89.tar.gz",
+          "tag": null,
+          "revision": null,
+          "using": null,
+          "checksum": "649cd5b91cad870871d2283fb3ad95c8fa1d5ced7a1db8d7b346d1a7dcd3ec71"
+        },
+        "head": {
+          "url": "https://github.com/nektos/act.git",
+          "branch": "master",
+          "using": null
+        }
+      },
+      "revision": 0,
+      "version_scheme": 0,
+      "compatibility_version": null,
+      "autobump": true,
+      "no_autobump_message": null,
+      "skip_livecheck": false,
+      "bottle": {
+        "stable": {
+          "rebuild": 0,
+          "root_url": "https://ghcr.io/v2/homebrew/core",
+          "files": {
+            "arm64_tahoe": {
+              "cellar": ":any_skip_relocation",
+              "url": "https://ghcr.io/v2/homebrew/core/act/blobs/sha256:c7160d747ebccc9567e63440d17f6b2e34fb8b2eb3c29f6f0f799270196a179a",
+              "sha256": "c7160d747ebccc9567e63440d17f6b2e34fb8b2eb3c29f6f0f799270196a179a"
+            },
+            "arm64_sequoia": {
+              "cellar": ":any_skip_relocation",
+              "url": "https://ghcr.io/v2/homebrew/core/act/blobs/sha256:4590846108557ae0ecaab4b237f6261b881e507c586159935ab662bcb2c3d3c5",
+              "sha256": "4590846108557ae0ecaab4b237f6261b881e507c586159935ab662bcb2c3d3c5"
+            },
+            "arm64_sonoma": {
+              "cellar": ":any_skip_relocation",
+              "url": "https://ghcr.io/v2/homebrew/core/act/blobs/sha256:4d7a57a0e211586db7df63f53caa2aa128c56850efbcb0d338de6892bf1d0fa0",
+              "sha256": "4d7a57a0e211586db7df63f53caa2aa128c56850efbcb0d338de6892bf1d0fa0"
+            },
+            "sonoma": {
+              "cellar": ":any_skip_relocation",
+              "url": "https://ghcr.io/v2/homebrew/core/act/blobs/sha256:89b51dceceab1c24002907a8ea6e389922a62625bcd4275af3a82feb33258d5c",
+              "sha256": "89b51dceceab1c24002907a8ea6e389922a62625bcd4275af3a82feb33258d5c"
+            },
+            "arm64_linux": {
+              "cellar": ":any_skip_relocation",
+              "url": "https://ghcr.io/v2/homebrew/core/act/blobs/sha256:6ef5d5ad9ddaa902c13f1d54e1d510899d1c8fa400e36a5e311c3b50ed3a3b9e",
+              "sha256": "6ef5d5ad9ddaa902c13f1d54e1d510899d1c8fa400e36a5e311c3b50ed3a3b9e"
+            },
+            "x86_64_linux": {
+              "cellar": ":any",
+              "url": "https://ghcr.io/v2/homebrew/core/act/blobs/sha256:a6ce2149491416e54a5e7967a8d65bc3e8e5e05dab6bc09103cf0bc62e3a94a1",
+              "sha256": "a6ce2149491416e54a5e7967a8d65bc3e8e5e05dab6bc09103cf0bc62e3a94a1"
+            }
+          }
+        }
+      },
+      "pour_bottle_only_if": null,
+      "keg_only": false,
+      "keg_only_reason": null,
+      "options": [],
+      "build_dependencies": ["go"],
+      "dependencies": [],
+      "test_dependencies": [],
+      "recommended_dependencies": [],
+      "optional_dependencies": [],
+      "uses_from_macos": [],
+      "uses_from_macos_bounds": [],
+      "requirements": [],
+      "conflicts_with": [],
+      "conflicts_with_reasons": [],
+      "link_overwrite": [],
+      "caveats": null,
+      "installed": [
+        {
+          "version": "0.2.88",
+          "used_options": [],
+          "built_as_bottle": true,
+          "poured_from_bottle": true,
+          "time": 1777809461,
+          "runtime_dependencies": [],
+          "installed_on_request": true
+        }
+      ],
+      "linked_keg": "0.2.88",
+      "pinned": false,
+      "outdated": false,
+      "deprecated": false,
+      "deprecation_date": null,
+      "deprecation_reason": null,
+      "deprecation_replacement_formula": null,
+      "deprecation_replacement_cask": null,
+      "deprecate_args": null,
+      "disabled": false,
+      "disable_date": null,
+      "disable_reason": null,
+      "disable_replacement_formula": null,
+      "disable_replacement_cask": null,
+      "disable_args": null,
+      "post_install_steps": [],
+      "post_install_defined": false,
+      "service": null,
+      "tap_git_head": "3259c9dae315e03dbf6670aeef2e20030b0b1177",
+      "ruby_source_path": "Formula/a/act.rb",
+      "ruby_source_checksum": {
+        "sha256": "145f256181ca74a49bdbbbc6061e1bebc2451a04eeadf1787db02c9c11ee621b"
+      }
+    }
+  ],
+  "casks": []
+}

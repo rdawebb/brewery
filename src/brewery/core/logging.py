@@ -130,7 +130,7 @@ def configure_logging(
     if enable_console:
         console_handler: logging.StreamHandler[TextIO] = logging.StreamHandler()
         console_handler.setFormatter(fmt=formatter)
-        console_handler.setLevel(level=getattr(logging, level.upper()))
+        console_handler.setLevel(level=logging.ERROR)
         logging.root.addHandler(hdlr=console_handler)
 
     logging.root.setLevel(level=getattr(logging, level.upper()))

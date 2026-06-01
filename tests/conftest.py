@@ -49,7 +49,7 @@ def _reset_module_state():
             if mod is not None and hasattr(mod, attr):
                 setattr(mod, attr, value)
 
-        # The renderer width cache is a dict, clear in place if present
+        # Clear renderer width cache in place if present
         renderers = sys.modules.get("brewery.cli.renderers")
         if renderers is not None and hasattr(renderers, "_width_cache"):
             renderers._width_cache.clear()

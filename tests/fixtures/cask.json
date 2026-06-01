@@ -1,0 +1,107 @@
+{
+  "formulae": [],
+  "casks": [
+    {
+      "token": "iina",
+      "full_token": "iina",
+      "old_tokens": [],
+      "tap": "homebrew/cask",
+      "name": [
+        "IINA"
+      ],
+      "desc": "Free and open-source media player",
+      "homepage": "https://iina.io/",
+      "url": "https://dl.iina.io/IINA.v1.4.3.dmg",
+      "url_specs": {},
+      "version": "1.4.3",
+      "autobump": true,
+      "no_autobump_message": null,
+      "skip_livecheck": false,
+      "installed": "1.4.1,160",
+      "installed_time": 1770221226,
+      "bundle_version": "164",
+      "bundle_short_version": "1.4.2",
+      "pinned": false,
+      "pinned_version": null,
+      "outdated": false,
+      "sha256": "899a15c3cee499d6e5d1a47bce02194a5a2709b3aa1c7ba82fb16a002fa81e02",
+      "artifacts": [
+        {
+          "uninstall": [
+            {
+              "quit": "com.colliderli.iina"
+            }
+          ]
+        },
+        {
+          "app": [
+            "IINA.app"
+          ],
+          "target": "/Applications/IINA.app"
+        },
+        {
+          "binary": [
+            "/Applications/IINA.app/Contents/MacOS/iina-cli",
+            {
+              "target": "iina"
+            }
+          ],
+          "target": "/usr/local/bin/iina"
+        },
+        {
+          "zap": [
+            {
+              "trash": [
+                "~/Library/Application Scripts/com.colliderli.iina.OpenInIINA",
+                "~/Library/Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.ApplicationRecentDocuments/com.colliderli.iina.sfl*",
+                "~/Library/Application Support/com.colliderli.iina",
+                "~/Library/Application Support/CrashReporter/IINA*.plist",
+                "~/Library/Caches/com.colliderli.iina",
+                "~/Library/Containers/com.colliderli.iina.OpenInIINA",
+                "~/Library/Cookies/com.colliderli.iina.binarycookies",
+                "~/Library/HTTPStorages/com.colliderli.iina",
+                "~/Library/Logs/com.colliderli.iina",
+                "~/Library/Logs/DiagnosticReports/IINA*.crash",
+                "~/Library/Preferences/com.colliderli.iina.plist",
+                "~/Library/Safari/Extensions/Open in IINA*.safariextz",
+                "~/Library/Saved Application State/com.colliderli.iina.savedState",
+                "~/Library/WebKit/com.colliderli.iina"
+              ]
+            }
+          ]
+        }
+      ],
+      "caveats": null,
+      "caveats_rosetta": null,
+      "depends_on": {
+        "macos": {
+          ">=": [
+            "10.15"
+          ]
+        }
+      },
+      "conflicts_with": null,
+      "container": null,
+      "rename": [],
+      "auto_updates": true,
+      "deprecated": false,
+      "deprecation_date": null,
+      "deprecation_reason": null,
+      "deprecation_replacement_formula": null,
+      "deprecation_replacement_cask": null,
+      "deprecate_args": null,
+      "disabled": false,
+      "disable_date": null,
+      "disable_reason": null,
+      "disable_replacement_formula": null,
+      "disable_replacement_cask": null,
+      "disable_args": null,
+      "tap_git_head": "d34022b320337a88f982d9c9b2cd780eae24a7ec",
+      "languages": [],
+      "ruby_source_path": "Casks/i/iina.rb",
+      "ruby_source_checksum": {
+        "sha256": "d10fd7b82928bbdcea66d52a0bccb9786d7e9af5f684be76458f4c94971d919d"
+      }
+    }
+  ]
+}
