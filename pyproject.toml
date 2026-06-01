@@ -22,6 +22,7 @@ dev = [
   "icecream>=2.2.0,<3.0.0",
   "prek>=0.4.3,<1.0.0",
   "pytest>=9.0.3,<10.0.0",
+  "pytest-asyncio>=1.4.0,<2.0.0",
   "pytest-cov>=7.1.0,<8.0.0",
   "ruff>=0.15.15,<0.16.0",
   "rust-just>=1.51.0,<2.0.0",
@@ -33,3 +34,11 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+  "unit: fast isolated tests with no subprocess or network",
+  "integration: tests that exercise the provider pipeline against fixtures",
+]
