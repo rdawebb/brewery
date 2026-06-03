@@ -16,6 +16,19 @@ log: BreweryLogger = get_logger(name=__name__)
 _RECEIPT_NAME = "INSTALL_RECEIPT.json"
 _CASK_METADATA_DIR = ".metadata"
 
+# Directories where linked kegs/casks are stored (current + legacy)
+_LINKED_DIRS: tuple[Path, ...] = (
+    Path("var/homebrew/linked"),
+    Path("Library/LinkedKegs"),
+)
+_PINNED_DIRS: tuple[Path, ...] = (
+    Path("var/homebrew/pinned"),
+    Path("Library/PinnedKegs"),
+)
+
+# Subdirectories to probe for linked keg/cask executables (used as fallback)
+_LINK_PROBE_SUBDIRS: tuple[str, ...] = ("bin", "sbin")
+
 
 @dataclass(slots=True)
 class InstalledRecord:
@@ -48,7 +61,11 @@ def scan_installed(env: BreweryENV | None = None) -> list[InstalledRecord]:
         One InstalledRecord per installed formula and cask.
     """
     env = env or get_brewery_env()
-    records: list[InstalledRecord] = [*_scan_formulae(env), *_scan_casks(env)]
+
+    formulae: list[InstalledRecord] = _scan_formulae(env)
+    _apply_link_pin_state(records=formulae, env=env)
+
+    records: list[InstalledRecord] = [*formulae, *_scan_casks(env)]
     log.info(event="fs_scan_complete", count=len(records))
 
     return records
@@ -120,6 +137,132 @@ def _scan_casks(env: BreweryENV) -> list[InstalledRecord]:
         )
 
     return records
+
+
+def _apply_link_pin_state(records: list[InstalledRecord], env: BreweryENV) -> None:
+    """Populate `linked` and `pinned` boolean flags on a list of formula records in place.
+
+    Linked state prefers the bookkeeping directory but falls back to the path-independent
+    cross-check when directory is missing.
+
+    Args:
+        records: Formula records to enrich (mutated in place).
+        env: Brewery environment.
+    """
+    linked: set[str] | None = linked_names(env.prefix)
+    pinned: set[str] = pinned_names(env.prefix)
+
+    use_fallback: bool = linked is None
+    if use_fallback:
+        log.warning(event="linked_dir_absent_using_fallback")
+
+    for record in records:
+        record.pinned = record.name in pinned
+        record.linked = (
+            is_effectively_linked(name=record.name, env=env)
+            if use_fallback
+            else record.name in linked
+        )
+
+
+def linked_names(prefix: Path) -> set[str] | None:
+    """Return the set of linked formula names from brew's bookkeeping.
+
+    Args:
+        prefix: The Homebrew prefix.
+
+    Returns:
+        The set of linked names, or None if no bookkeeping directory exists.
+    """
+    return _bookkeeping_names(prefix=prefix, candidates=_LINKED_DIRS)
+
+
+def pinned_names(prefix: Path) -> set[str]:
+    """Return the set of pinned formula names from brew's bookkeeping.
+
+    Args:
+        prefix: The Homebrew prefix.
+
+    Returns:
+        The set of pinned names (empty when no bookkeeping directory exists).
+    """
+    return _bookkeeping_names(prefix=prefix, candidates=_PINNED_DIRS) or set()
+
+
+def _bookkeeping_names(prefix: Path, candidates: tuple[Path, ...]) -> set[str] | None:
+    """Read formula names from the first existing bookkeeping directory.
+
+    Args:
+        prefix: The Homebrew prefix.
+        candidates: Relative directories to try in order of preference.
+
+    Returns:
+        The set of entry names, or None if none of the candidates exist.
+    """
+    for rel in candidates:
+        directory: Path = prefix / rel
+        if directory.is_dir():
+            try:
+                return {
+                    p.name for p in directory.iterdir() if not p.name.startswith(".")
+                }
+
+            except OSError as e:
+                log.warning(
+                    event="bookkeeping_dir_unreadable",
+                    path=str(object=directory),
+                    error=str(object=e),
+                )
+                return None
+
+    return None
+
+
+def is_effectively_linked(name: str, env: BreweryENV) -> bool:
+    """Path-independent fallback check for whether a formula is linked.
+
+    A formula is effectively linked if its `opt` keg resolves and at least one
+    executable in the prefix's `bin`/`sbin` is a symlink into that keg.
+
+    Args:
+        name: Formula name.
+        env: Brewery environment.
+
+    Returns:
+        True if the formula appears linked by this heuristic.
+    """
+    opt: Path = env.prefix / "opt" / name
+    try:
+        keg: Path = opt.resolve(strict=True)
+
+    except (OSError, RuntimeError):
+        return False
+
+    if not keg.is_dir():
+        return False
+
+    for subdir in _LINK_PROBE_SUBDIRS:
+        probe: Path = env.prefix / subdir
+        try:
+            entries = list(probe.iterdir())
+
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+
+        for entry in entries:
+            if not entry.is_symlink():
+                continue
+
+            try:
+                target: Path = entry.resolve()
+
+            except (OSError, RuntimeError):
+                continue
+
+            if keg == target or keg in target.parents:
+                return True
+
+    return False
 
 
 def _active_keg(name: str, cellar: Path, prefix: Path) -> Path | None:
