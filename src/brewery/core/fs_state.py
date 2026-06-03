@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from brewery.core.config import BreweryENV, get_brewery_env
+from brewery.core.config import BreweryENV, ensure_cache_dir, get_brewery_env
 from brewery.core.logging import BreweryLogger, get_logger
 from brewery.core.models import PackageKind, split_keg_version
+from brewery.core.shell import run_capture
 
 log: BreweryLogger = get_logger(name=__name__)
 
 _RECEIPT_NAME = "INSTALL_RECEIPT.json"
 _CASK_METADATA_DIR = ".metadata"
+
+_SIZE_CACHE_FILE = "keg_sizes.json"
+_SIZE_CONCURRENCY = 5
 
 # Directories where linked kegs/casks are stored (current + legacy)
 _LINKED_DIRS: tuple[Path, ...] = (
@@ -49,6 +54,8 @@ class InstalledRecord:
     stale_versions: list[str] = field(default_factory=list)
     linked: bool = False
     pinned: bool = False
+    used_by: list[str] = field(default_factory=list)  # Installed reverse-deps
+    size_kb: int | None = None  # Filled by attach_sizes()
 
 
 def scan_installed(env: BreweryENV | None = None) -> list[InstalledRecord]:
@@ -123,7 +130,7 @@ def _scan_casks(env: BreweryENV) -> list[InstalledRecord]:
             log.warning(event="cask_no_version_dir", token=token_dir.name)
             continue
 
-        active: Path = max(version_dirs, key=_safe_mtime)
+        active: Path = max(version_dirs, key=lambda d: _safe_mtime_ns(d) or 0)
         stale: list[str] = [d.name for d in version_dirs if d != active]
         records.append(
             InstalledRecord(
@@ -292,7 +299,7 @@ def _active_keg(name: str, cellar: Path, prefix: Path) -> Path | None:
     if not candidates:
         return None
 
-    return max(candidates, key=_safe_mtime)
+    return max(candidates, key=lambda d: _safe_mtime_ns(d) or 0)
 
 
 def _formula_record(
@@ -390,22 +397,6 @@ def _children(base: Path) -> list[Path]:
         return []
 
 
-def _safe_mtime(path: Path) -> float:
-    """Return a path's mtime, or 0.0 if it cannot be stat'd.
-
-    Args:
-        path: Path to stat.
-
-    Returns:
-        Path's mtime, or 0.0 if it cannot be stat'd.
-    """
-    try:
-        return path.stat().st_mtime
-
-    except OSError:
-        return 0.0
-
-
 def _mtime_dt(path: Path) -> datetime | None:
     """Return a path's mtime as a datetime, or None if it cannot be stat'd.
 
@@ -435,4 +426,165 @@ def _epoch_dt(value: object) -> datetime | None:
         return datetime.fromtimestamp(float(value))  # ty: ignore[invalid-argument-type]
 
     except (TypeError, ValueError, OSError):
+        return None
+
+
+_size_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_size_semaphore() -> asyncio.Semaphore:
+    """Lazily create the size-check semaphore, bound to the running loop.
+
+    Returns:
+        A semaphore bounding concurrent `du` calls.
+    """
+    global _size_semaphore
+    if _size_semaphore is None:
+        _size_semaphore = asyncio.Semaphore(_SIZE_CONCURRENCY)
+
+    return _size_semaphore
+
+
+async def attach_sizes(
+    records: list[InstalledRecord], cache_dir: Path | None = None
+) -> None:
+    """Fill `size_kb` on each record, reusing cached sizes by keg mtime.
+
+    Args:
+        records: Records to size (mutated in place), including casks.
+        cache_dir: Directory for the size cache (defaults to the brewery cache directory).
+    """
+    cache_dir = cache_dir or ensure_cache_dir()
+    cached: dict[str, list] = _load_size_cache(cache_dir)
+
+    sizes: list[tuple[int | None, int | None]] = await asyncio.gather(
+        *(_resolve_size(record=r, cached=cached) for r in records)
+    )
+
+    fresh: dict[str, list[int]] = {}
+    hits = 0
+    for record, (size_kb, mtime_ns) in zip(records, sizes):
+        record.size_kb = size_kb
+
+        if size_kb is not None and mtime_ns is not None:
+            fresh[record.name] = [mtime_ns, size_kb]
+            entry = cached.get(record.name)
+
+            if entry is not None and entry[0] == mtime_ns:
+                hits += 1
+
+    _save_size_cache(cache_dir=cache_dir, data=fresh)
+    log.info(event="sizes_attached", total=len(records), cache_hits=hits)
+
+
+async def _resolve_size(
+    record: InstalledRecord, cached: dict[str, list]
+) -> tuple[int | None, int | None]:
+    """Return `(size_kb, mtime_ns)` for a record, reusing the cache on a hit.
+
+    Args:
+        record: The record to size.
+        cached: The loaded size cache.
+
+    Returns:
+        A tuple of the size in KB (or None) and the keg mtime in ns (or None).
+    """
+    if record.path is None:
+        return None, None
+
+    keg = Path(record.path)
+    mtime_ns: int | None = _safe_mtime_ns(keg)
+    if mtime_ns is None:
+        return None, None
+
+    entry = cached.get(record.name)
+    if entry is not None and entry[0] == mtime_ns:
+        return entry[1], mtime_ns  # Unchanged keg: reuse cached size
+
+    return await _du_kb(keg), mtime_ns
+
+
+async def _du_kb(path: Path) -> int | None:
+    """Measure a path's disk usage in KB via ``du -sk``, under the semaphore.
+
+    Args:
+        path: The path to measure.
+
+    Returns:
+        The disk usage in KB, or `None` if the measurement failed.
+    """
+    async with _get_size_semaphore():
+        try:
+            out, err, code = await run_capture("du", "-sk", str(object=path))
+
+        except Exception as e:  # Subprocess spawn/timeout failures
+            log.warning(
+                event="keg_size_error", path=str(object=path), error=str(object=e)
+            )
+            return None
+
+    if code != 0:
+        log.warning(
+            event="keg_size_failed",
+            path=str(object=path),
+            returncode=code,
+            stderr=err,
+        )
+        return None
+
+    try:
+        return int(out.split()[0])
+
+    except (ValueError, IndexError):
+        log.warning(
+            event="keg_size_parse_error", path=str(object=path), output=out[:80]
+        )
+        return None
+
+
+def _load_size_cache(cache_dir: Path) -> dict[str, list]:
+    """Load the size cache, returning an empty map on any error.
+
+    Args:
+        cache_dir: The directory containing the cache file.
+
+    Returns:
+        The loaded cache data, or an empty dictionary on error.
+    """
+    try:
+        data = json.loads((cache_dir / _SIZE_CACHE_FILE).read_text())
+
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+    return data if isinstance(data, dict) else {}
+
+
+def _save_size_cache(cache_dir: Path, data: dict[str, list]) -> None:
+    """Persist the size cache, swallowing write errors (sizing is best-effort).
+
+    Args:
+        cache_dir: The directory containing the cache file.
+        data: The cache data to persist.
+    """
+    try:
+        (cache_dir / _SIZE_CACHE_FILE).write_text(json.dumps(obj=data))
+
+    except OSError as e:
+        log.warning(event="size_cache_write_failed", error=str(object=e))
+
+
+def _safe_mtime_ns(path: Path) -> int | None:
+    """Return a path's mtime in nanoseconds, or None if it cannot be stat'd.
+
+    Args:
+        path: The path to stat.
+
+    Returns:
+        The mtime in nanoseconds, or None on error.
+    """
+    try:
+        return path.stat().st_mtime_ns
+
+    except OSError:
         return None
