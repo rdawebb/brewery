@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
+import orjson
 import os
 import time
 from asyncio.subprocess import Process
@@ -167,12 +167,12 @@ async def run_json(*cmd: str, timeout: Optional[int] = None) -> Any:
         raise BrewCommandError(command=" ".join(cmd), returncode=code, error=err or out)
 
     try:
-        result: Any = json.loads(out)
+        result: Any = orjson.loads(out)
         log.debug(event="json_parsed", command=" ".join(cmd), duration_ms=duration_ms)
 
         return result
 
-    except json.JSONDecodeError as e:
+    except orjson.JSONDecodeError as e:
         log.error(
             event="json_parse_failed",
             command=" ".join(cmd),

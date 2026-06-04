@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
+import orjson
 import time
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -99,7 +99,7 @@ class Cache:
             return None
 
         try:
-            data: Any = json.loads(s=f.read_text())
+            data: Any = orjson.loads(f.read_bytes())
             token: str = self._update_token()
 
             if token == data.get("_token"):
@@ -112,7 +112,7 @@ class Cache:
                 )
                 return None
 
-        except json.JSONDecodeError:
+        except orjson.JSONDecodeError:
             log.warning(
                 event="cache_corrupted",
                 key=key,
@@ -147,9 +147,7 @@ class Cache:
         start: float = time.perf_counter()
 
         try:
-            f.write_text(
-                data=json.dumps(obj={"_ts": now, "_token": token, "value": value})
-            )
+            f.write_bytes(orjson.dumps({"_ts": now, "_token": token, "value": value}))
             duration_ms = int((time.perf_counter() - start) * 1000)
             log.info(
                 event="cache_set",

@@ -122,6 +122,9 @@ def _formula_outdated(record: InstalledRecord, row: FormulaRow) -> bool:
     if record.head:
         return False
 
+    if record.version_scheme is not None and row.version_scheme > record.version_scheme:
+        return True
+
     installed: str = effective_version(version=record.version, revision=record.revision)
     latest: str = effective_version(version=row.version, revision=row.revision)
 

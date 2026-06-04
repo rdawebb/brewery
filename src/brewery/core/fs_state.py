@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+
+import orjson
 
 from brewery.core.config import BreweryENV, ensure_cache_dir, get_brewery_env
 from brewery.core.logging import BreweryLogger, get_logger
@@ -43,6 +44,7 @@ class InstalledRecord:
     kind: PackageKind
     version: str
     revision: int = 0
+    version_scheme: int | None = None
     installed_on: datetime | None = None
     # Receipt flags, captured now for a future `leaves`/autoremove
     installed_on_request: bool = False
@@ -73,6 +75,7 @@ def scan_installed(env: BreweryENV | None = None) -> list[InstalledRecord]:
     _apply_link_pin_state(records=formulae, env=env)
 
     records: list[InstalledRecord] = [*formulae, *_scan_casks(env)]
+    _apply_reverse_deps(records=records)
     log.info(event="fs_scan_complete", count=len(records))
 
     return records
@@ -170,6 +173,23 @@ def _apply_link_pin_state(records: list[InstalledRecord], env: BreweryENV) -> No
             if use_fallback
             else record.name in linked
         )
+
+
+def _apply_reverse_deps(records: list[InstalledRecord]) -> None:
+    """Populate `used_by` on each record from the installed dependency graph.
+
+    Args:
+        records: All scanned records (mutated in place).
+    """
+    used_by: dict[str, list[str]] = {r.name: [] for r in records}
+    for record in records:
+        for dep in record.deps:
+            key: str = dep if dep in used_by else dep.rsplit("/", 1)[-1]
+            if key in used_by:
+                used_by[key].append(record.name)
+
+    for record in records:
+        record.used_by = sorted(used_by[record.name])
 
 
 def linked_names(prefix: Path) -> set[str] | None:
@@ -318,8 +338,7 @@ def _formula_record(
     """
     version, revision = split_keg_version(active.name)
 
-    # No receipt: API-loaded installs should always write one, but fall back to
-    # the keg mtime for the install date and skip the provenance flags.
+    # If no receipt, fall back to the keg mtime for the install date and skip flags
     if receipt is None:
         log.warning(event="receipt_missing", name=name, path=str(object=active))
         return InstalledRecord(
@@ -336,6 +355,9 @@ def _formula_record(
     runtime: list = receipt.get("runtime_dependencies") or []
     deps: list[str] = [d["full_name"] for d in runtime if d.get("full_name")]
 
+    versions_meta: dict = source.get("versions") or {}
+    version_scheme = versions_meta.get("version_scheme")
+
     raw_time = receipt.get("time")
     installed_on: datetime | None = (
         _epoch_dt(raw_time) if raw_time is not None else _mtime_dt(active)
@@ -346,6 +368,7 @@ def _formula_record(
         kind=PackageKind.FORMULA,
         version=version,
         revision=revision,
+        version_scheme=version_scheme,
         installed_on=installed_on,
         installed_on_request=bool(receipt.get("installed_on_request", False)),
         installed_as_dependency=bool(receipt.get("installed_as_dependency", False)),
@@ -367,12 +390,12 @@ def _read_receipt(path: Path) -> dict | None:
         The parsed receipt dict, or None if missing or unreadable.
     """
     try:
-        data = json.loads(path.read_text())
+        data = orjson.loads(path.read_bytes())
 
     except FileNotFoundError:
         return None
 
-    except (OSError, json.JSONDecodeError) as e:
+    except (OSError, orjson.JSONDecodeError) as e:
         log.warning(
             event="receipt_unreadable", path=str(object=path), error=str(object=e)
         )
@@ -552,9 +575,9 @@ def _load_size_cache(cache_dir: Path) -> dict[str, list]:
         The loaded cache data, or an empty dictionary on error.
     """
     try:
-        data = json.loads((cache_dir / _SIZE_CACHE_FILE).read_text())
+        data = orjson.loads((cache_dir / _SIZE_CACHE_FILE).read_bytes())
 
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except (FileNotFoundError, orjson.JSONDecodeError, OSError):
         return {}
 
     return data if isinstance(data, dict) else {}
@@ -568,7 +591,7 @@ def _save_size_cache(cache_dir: Path, data: dict[str, list]) -> None:
         data: The cache data to persist.
     """
     try:
-        (cache_dir / _SIZE_CACHE_FILE).write_text(json.dumps(obj=data))
+        (cache_dir / _SIZE_CACHE_FILE).write_bytes(orjson.dumps(data))
 
     except OSError as e:
         log.warning(event="size_cache_write_failed", error=str(object=e))

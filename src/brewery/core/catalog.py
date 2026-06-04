@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+import orjson
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -188,9 +188,9 @@ def _json_or_none(value: str | None) -> Any | None:
         return None
 
     try:
-        return json.loads(value)
+        return orjson.loads(value)
 
-    except json.JSONDecodeError:
+    except orjson.JSONDecodeError:
         log.warning(event="catalog_json_decode_failed", raw=value[:120])
         return None
 

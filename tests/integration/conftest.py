@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+import orjson
 
 if TYPE_CHECKING:
     from brewery.core.config import BreweryENV
@@ -50,7 +51,7 @@ def fixture_json(fixture_text) -> dict[str, dict]:
     Returns:
         A dictionary mapping fixture names to their parsed JSON contents.
     """
-    return {k: json.loads(v) for k, v in fixture_text.items()}
+    return {k: orjson.loads(v) for k, v in fixture_text.items()}
 
 
 @pytest.fixture
