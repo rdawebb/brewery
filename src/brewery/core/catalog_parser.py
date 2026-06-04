@@ -53,6 +53,7 @@ def current_platform() -> Platform | None:
     """
     if _platform.system() != "Darwin":
         return None
+
     version: str = _platform.mac_ver()[0]
     if not version:
         return None
