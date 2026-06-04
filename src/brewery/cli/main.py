@@ -423,10 +423,12 @@ def upgrade(
             console.print("\n[bold green]✓ All packages are up to date![/bold green]\n")
             return
 
-        console.print(f"[bold green]✓ Upgraded {len(upgraded)} package(s)[/bold green]")
+        console.print(
+            f"[bold green]✓ Upgraded {len(upgraded)} package(s)[/bold green]\n"
+        )
         for pkg in upgraded:
             console.print(
-                f"\n  [dim]→[/dim] {pkg.name} {pkg.versions[0] if pkg.versions else ''}"
+                f"  [dim]→[/dim] {pkg.name} {pkg.versions[0] if pkg.versions else ''}"
             )
 
         if current:

@@ -137,7 +137,7 @@ async def run_capture(*cmd: str, timeout: Optional[int] = None) -> tuple[str, st
 
 
 @retry_on_transient(max_retries=3, base_delay=1.0)
-async def run_json(*cmd: str, timeout: Optional[int] = 30) -> Any:
+async def run_json(*cmd: str, timeout: Optional[int] = None) -> Any:
     """Run a shell command and parse its JSON output.
 
     Automatically retries on transient errors.

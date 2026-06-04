@@ -384,6 +384,25 @@ class Catalog:
 
         return _cask_from_row(row) if row else None
 
+    def get_casks(self, tokens: list[str]) -> dict[str, CaskRow]:
+        """Batch fetch casks, keyed by name.
+
+        Args:
+            tokens: Cask tokens.
+
+        Returns:
+            Mapping of token to CaskRow for those that exist.
+        """
+        if not tokens:
+            return {}
+
+        placeholders: str = ",".join("?" * len(tokens))
+        rows = self._conn.execute(
+            f"SELECT * FROM cask WHERE token IN ({placeholders})", tokens
+        ).fetchall()
+
+        return {row["token"]: _cask_from_row(row) for row in rows}
+
     def deps_of(self, name: str) -> list[str]:
         """Return the direct dependency names of a formula.
 
