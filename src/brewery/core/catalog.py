@@ -74,6 +74,56 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
 
 _META_SCHEMA_VERSION_KEY = "schema_version"
 
+_FORMULA_COLUMNS: tuple[str, ...] = (
+    "name",
+    "desc",
+    "homepage",
+    "tap",
+    "version",
+    "revision",
+    "version_scheme",
+    "keg_only",
+    "has_service",
+    "post_install",
+    "bottle_url",
+    "bottle_sha256",
+    "bottle_cellar",
+    "bottle_rebuild",
+    "deprecated",
+    "disabled",
+)
+_CASK_COLUMNS: tuple[str, ...] = (
+    "token",
+    "name",
+    "desc",
+    "homepage",
+    "tap",
+    "version",
+    "sha256",
+    "url",
+    "auto_updates",
+    "artifacts",
+    "depends_on",
+    "deprecated",
+    "disabled",
+)
+
+
+def _upsert_sql(table: str, columns: tuple[str, ...]) -> str:
+    """Build an ``INSERT OR REPLACE`` with named placeholders for a table.
+
+    Args:
+        table: The table name to insert into.
+        columns: The columns to insert or replace.
+
+    Returns:
+        The SQL string with named placeholders.
+    """
+    cols: str = ", ".join(columns)
+    named: str = ", ".join(f":{c}" for c in columns)
+
+    return f"INSERT OR REPLACE INTO {table} ({cols}) VALUES ({named})"
+
 
 @dataclass(frozen=True, slots=True)
 class FormulaRow:
@@ -427,6 +477,55 @@ class Catalog:
             results.extend(_cask_from_row(row) for row in cask_rows)
 
         return results
+
+    def write_formulae(
+        self,
+        formulae: list[dict[str, Any]],
+        deps: list[dict[str, Any]],
+        aliases: list[dict[str, Any]],
+    ) -> None:
+        """Replace the formula catalog in one atomic transaction and rebuild FTS.
+
+        Args:
+            formulae: Formula column dicts (keys = formula columns).
+            deps: Dep edge dicts with keys ``pkg``, ``dep``, ``kind``.
+            aliases: Alias dicts with keys ``alias``, ``name``.
+        """
+        formula_sql: str = _upsert_sql("formula", _FORMULA_COLUMNS)
+        with self._conn:
+            self._conn.executemany(formula_sql, formulae)
+            self._conn.execute("DELETE FROM deps")
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO deps (pkg, dep, kind) "
+                "VALUES (:pkg, :dep, :kind)",
+                deps,
+            )
+            self._conn.execute("DELETE FROM alias")
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO alias (alias, name) VALUES (:alias, :name)",
+                aliases,
+            )
+            self._conn.execute("INSERT INTO formula_fts(formula_fts) VALUES('rebuild')")
+
+        log.info(
+            event="catalog_formulae_written",
+            formulae=len(formulae),
+            deps=len(deps),
+            aliases=len(aliases),
+        )
+
+    def write_casks(self, casks: list[dict[str, Any]]) -> None:
+        """Replace the cask catalog in one atomic transaction and rebuild FTS.
+
+        Args:
+            casks: Cask column dicts (keys = cask columns).
+        """
+        cask_sql: str = _upsert_sql("cask", _CASK_COLUMNS)
+        with self._conn:
+            self._conn.executemany(cask_sql, casks)
+            self._conn.execute("INSERT INTO cask_fts(cask_fts) VALUES('rebuild')")
+
+        log.info(event="catalog_casks_written", casks=len(casks))
 
     def get_meta(self, key: str) -> str | None:
         """Read a value from the meta table.
