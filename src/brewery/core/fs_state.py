@@ -611,3 +611,72 @@ def _safe_mtime_ns(path: Path) -> int | None:
 
     except OSError:
         return None
+
+
+def _record_to_cache_dict(record: InstalledRecord) -> dict:
+    """Serialise an InstalledRecord to a JSON-safe dict for the record cache.
+
+    Args:
+        record: The InstalledRecord to serialise.
+
+    Returns:
+        A JSON-safe dict representing the record.
+    """
+    return {
+        "name": record.name,
+        "kind": record.kind.value,
+        "version": record.version,
+        "revision": record.revision,
+        "version_scheme": record.version_scheme,
+        "installed_on": record.installed_on.isoformat()
+        if record.installed_on
+        else None,
+        "installed_on_request": record.installed_on_request,
+        "installed_as_dependency": record.installed_as_dependency,
+        "deps": record.deps,
+        "head": record.head,
+        "tap": record.tap,
+        "path": record.path,
+        "stale_versions": record.stale_versions,
+        "linked": record.linked,
+        "pinned": record.pinned,
+        "used_by": record.used_by,
+        "size_kb": record.size_kb,
+    }
+
+
+def _record_from_cache_dict(data: dict) -> InstalledRecord:
+    """Rebuild an InstalledRecord from its cached dict.
+
+    Args:
+        data: The cached dict representing the record.
+
+    Returns:
+        The rebuilt InstalledRecord.
+    """
+    installed_on = data.get("installed_on")
+
+    return InstalledRecord(
+        name=data["name"],
+        kind=PackageKind(data["kind"]),
+        version=data["version"],
+        revision=data.get("revision", 0),
+        version_scheme=data.get("version_scheme"),
+        installed_on=datetime.fromisoformat(installed_on) if installed_on else None,
+        installed_on_request=data.get("installed_on_request", False),
+        installed_as_dependency=data.get("installed_as_dependency", False),
+        deps=data.get("deps", []),
+        head=data.get("head", False),
+        tap=data.get("tap"),
+        path=data.get("path"),
+        stale_versions=data.get("stale_versions", []),
+        linked=data.get("linked", False),
+        pinned=data.get("pinned", False),
+        used_by=data.get("used_by", []),
+        size_kb=data.get("size_kb"),
+    )
+
+
+# Public serialisation API for the FS-record cache
+records_to_cache = _record_to_cache_dict
+record_from_cache = _record_from_cache_dict

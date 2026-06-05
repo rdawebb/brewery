@@ -1,37 +1,44 @@
-"""A simple file-based cache with expiration."""
+"""Token-invalidated file-based cache and installed-state cache manager"""
 
 from __future__ import annotations
 
-import asyncio
-import orjson
 import time
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Optional
 
-from rich.console import Console
+import orjson
 
+from brewery.core.catalog import Catalog
 from brewery.core.config import CACHE_DIR, BreweryENV, get_brewery_env
-from brewery.core.decorators import log_operation
 from brewery.core.errors import CacheError
+from brewery.core.fs_state import (
+    InstalledRecord,
+    attach_sizes,
+    record_from_cache,
+    records_to_cache,
+    scan_installed,
+)
 from brewery.core.logging import BreweryLogger, get_logger
-from brewery.core.models import Package, PackageKind, PackageStatus
-from brewery.providers import base, brew_cask, brew_formula
+from brewery.core.merge import merge
+from brewery.core.models import Package, PackageKind
 
 log: BreweryLogger = get_logger(name=__name__)
-console = Console()
 
 _cached_token = None
 _token_timestamp = 0
 
-_KIND_VALUES: frozenset[str] = frozenset(k.value for k in PackageKind)
 WIDTHS_CACHE: Path = CACHE_DIR / "column_widths.json"
 
 
 class Cache:
-    """A simple file-based cache with expiration."""
+    """A simple file-based cache with mtime-token expiration."""
 
-    def __init__(self, namespace: str):
-        """Initialise the cache for a specific namespace."""
+    def __init__(self, namespace: str) -> None:
+        """Initialise the cache for a specific namespace.
+
+        Args:
+            namespace: The cache namespace.
+        """
         self.cache_path: Path = CACHE_DIR / namespace
         self.cache_path.mkdir(parents=True, exist_ok=True)
         log.debug(
@@ -119,6 +126,7 @@ class Cache:
                 namespace=self.cache_path.name,
                 exc_info=True,
             )
+
         except Exception as e:
             log.error(
                 event="cache_read_error",
@@ -171,319 +179,82 @@ class Cache:
                 path=str(object=f),
             ) from e
 
+    def delete(self, key: str) -> None:
+        """Delete a cached value by key, if it exists."""
+        try:
+            self._file(key).unlink()
+
+        except FileNotFoundError:
+            pass
+
 
 class CacheManager:
-    """Manages all repository cache operations."""
+    """Derives the installed package info from the filesystem and the catalog.
+
+    The installed records are cached under a single token-invalidated key, and the
+    join against the catalog is computed on read.
+    """
+
+    _RECORDS_KEY = "installed_records"
 
     def __init__(
         self,
         cache: Cache,
-        formula_backend: base.PackageBackend = brew_formula.backend,
-        cask_backend: base.PackageBackend = brew_cask.backend,
-    ):
-        """Initialise CacheManager with a Cache instance
+        catalog: Catalog,
+        env: BreweryENV | None = None,
+    ) -> None:
+        """Initialise with a Cache instance, catalog, and optional environment.
 
         Args:
-            cache: A Cache instance to use for storage.
+            cache: File-based cache to use for FS record cache.
+            catalog: A Catalog instance to use for resolving package details.
+            env: Optional BreweryENV instance for environment-specific paths.
         """
         self.cache: Cache = cache
-        self.formula = formula_backend
-        self.cask = cask_backend
+        self.catalog: Catalog = catalog
+        self.env: BreweryENV | None = env
 
         log.debug(event="cache_manager_initialised")
 
-    @staticmethod
-    def _cache_keys(kind_value: str) -> tuple[str, str]:
-        """Return the cache keys based on kind.
-
-        Args:
-            kind_value: The package kind to get the cache keys for.
+    async def installed_records(self) -> list[InstalledRecord]:
+        """Return installed records from cache, or scan if not cached.
 
         Returns:
-            Tuple of list_key and map_key.
+            A list of InstalledRecord instances for the installed packages.
         """
-        return f"installed_{kind_value}", f"installed_map_{kind_value}"
+        cached: Any = self.cache.get(self._RECORDS_KEY)
+        if cached is not None:
+            return [record_from_cache(d) for d in cached]
 
-    async def load_packages(self, kind: Optional[PackageKind] = None) -> list[Package]:
-        """Load packages from cache.
+        records: list[InstalledRecord] = scan_installed(env=self.env)
+        await attach_sizes(records=records)
 
-        Args:
-            kind: Optional filter for package kind.
+        self.cache.set(self._RECORDS_KEY, [records_to_cache(r) for r in records])
 
-        Returns:
-            List of cached packages, or empty list if not cached.
-        """
-        list_key, _ = self._cache_keys(kind_value=kind.value if kind else "all")
+        return records
 
-        try:
-            cached_data: Any = self.cache.get(key=list_key)
-
-            if cached_data is not None and isinstance(cached_data, list):
-                pkgs: list[Package] = [
-                    Package.package_from_dict(data=d) for d in cached_data
-                ]
-                log.debug(event="cache_load_success", key=list_key, count=len(pkgs))
-
-                return pkgs
-
-            return []
-
-        except CacheError:
-            raise
-
-        except Exception as e:
-            log.error(
-                event="cache_load_error",
-                key=list_key,
-                error=str(object=e),
-                exc_info=True,
-            )
-            return []
-
-    @log_operation(event_prefix="refresh_packages", log_args=["kind"])
-    async def refresh_packages(
+    async def installed_packages(
         self, kind: Optional[PackageKind] = None
     ) -> list[Package]:
-        """Refresh cache by fetching from providers.
-
-        Fetches packages from brew providers and updates all related caches.
+        """Return merged installed packages, optionally filtered by kind.
 
         Args:
-            kind: Optional filter for package kind.
+            kind: Optional PackageKind to filter by.
 
         Returns:
-            List of fetched packages.
+            A list of Package instances, sorted by kind, then name.
         """
-        pkgs: list[Package] = []
-        tasks: list = []
+        records: list[InstalledRecord] = await self.installed_records()
+        packages: list[Package] = merge(records, self.catalog)
 
-        # Gather tasks based on kind
-        if kind in (None, PackageKind.FORMULA):
-            tasks.append(self.formula.list_installed())
-        if kind in (None, PackageKind.CASK):
-            tasks.append(self.cask.list_installed())
+        if kind is not None:
+            packages = [p for p in packages if p.kind == kind]
 
-        if tasks:
-            results: list = await asyncio.gather(*tasks)
-            for result in results:
-                pkgs.extend(result)
+        packages.sort(key=lambda p: (p.kind.value, p.name))
 
-        pkgs.sort(key=lambda p: (p.kind.value, p.name.lower()))
+        return packages
 
-        # Update caches
-        await self._update_caches(kind=kind, pkgs=pkgs)
-
-        return pkgs
-
-    async def invalidate_and_refresh(self, kind: PackageKind) -> None:
-        """Invalidate cache for a kind and refresh all related caches.
-
-        Args:
-            kind: The package kind to invalidate.
-        """
-        log.info(event="cache_invalidate_start", kind=kind.value)
-
-        # Delete both specific and 'all' caches
-        for suffix in [kind.value, "all"]:
-            for key in self._cache_keys(kind_value=suffix):
-                f: Path = self.cache._file(key)
-                if f.exists():
-                    f.unlink()
-                    log.debug(event="cache_file_deleted", key=key)
-
-        # Refresh both specific and 'all' caches
-        await self.refresh_packages(kind=None)
-
-        log.info(event="cache_invalidate_complete", kind=kind.value)
-
-    async def update_packages(
-        self,
-        packages: Package | list[Package],
-        action: Literal["add", "remove", "update"],
-    ) -> None:
-        """Update one or more package entries in cache.
-
-        Args:
-            packages: A single Package or list of Packages to update.
-            action: "add", "remove", or "update".
-        """
-        pkg_list: list[Package] = (
-            [packages] if isinstance(packages, Package) else packages
-        )
-
-        kinds_to_update: set[str] = {p.kind.value for p in pkg_list} | {"all"}
-        pkg_names: set[str] = {p.name for p in pkg_list}
-
-        for suffix in kinds_to_update:
-            list_key, map_key = self._cache_keys(kind_value=suffix)
-
-            try:
-                cached_list: list | None = self.cache.get(key=list_key)
-                cached_map: dict | None = self.cache.get(key=map_key)
-
-                if cached_list is None and cached_map is not None:
-                    cached_list = list(cached_map.values())
-                    log.warning(event="cache_list_rebuilt_from_map", key=list_key)
-                elif cached_map is None and cached_list is not None:
-                    cached_map = {p["name"]: p for p in cached_list}
-                    log.warning(event="cache_map_rebuilt_from_list", key=map_key)
-                elif cached_list is None and cached_map is None:
-                    log.warning(event="rebuilding_missing_cache", key=list_key)
-                    await self.refresh_packages(
-                        kind=PackageKind(suffix) if suffix != "all" else None
-                    )
-                    continue
-
-                if cached_list is None or cached_map is None:
-                    log.warning(event="cache_missing", key=list_key)
-                    await self.refresh_packages(
-                        kind=PackageKind(suffix) if suffix != "all" else None
-                    )
-                    continue
-
-                if action == "remove":
-                    cached_list[:] = [
-                        p for p in cached_list if p.get("name") not in pkg_names
-                    ]
-
-                    for name in pkg_names:
-                        cached_map.pop(name, None)
-
-                elif action in ("add", "update"):
-                    cached_list[:] = [
-                        p for p in cached_list if p.get("name") not in pkg_names
-                    ]
-
-                    for pkg in pkg_list:
-                        pkg_dict: dict = pkg.to_serializable_dict()
-                        cached_list.append(pkg_dict)
-                        cached_map[pkg.name] = pkg_dict
-
-                if pkg_list and cached_list:
-                    cached_list.sort(
-                        key=lambda p: (p.get("kind", ""), p.get("name", "").lower())
-                    )
-
-                self.cache.set(key=list_key, value=cached_list)
-                self.cache.set(key=map_key, value=cached_map)
-
-            except Exception as e:
-                log.error(
-                    event="cache_update_failed",
-                    key=list_key,
-                    error=str(object=e),
-                    exc_info=True,
-                )
-
-    async def get_details_from_cache(
-        self, name: str, kind: PackageKind
-    ) -> Optional[Package]:
-        """Fetch package details from cache with fallback chain.
-
-        Tries:
-        1. Map cache (fastest)
-        2. List cache (fallback)
-        3. Returns None if not found
-
-        Args:
-            name: Package name.
-            kind: Package kind.
-
-        Returns:
-            Package instance if found, None otherwise.
-        """
-        list_key, map_key = self._cache_keys(kind_value=kind.value)
-
-        # Try map cache first
-        try:
-            cached_map: dict | None = self.cache.get(key=map_key)
-            if cached_map is not None and name in cached_map:
-                log.debug(event="cache_hit_map", key=map_key, package=name)
-                return Package.package_from_dict(data=cached_map[name])
-        except Exception as e:
-            log.debug(event="cache_lookup_map_failed", error=str(object=e))
-
-        # Try list cache
-        try:
-            cached_list: dict | None = self.cache.get(key=list_key)
-            if cached_list is not None:
-                for pkg_data in cached_list:
-                    if pkg_data.get("name") == name:
-                        log.debug(event="cache_hit_list", key=list_key, package=name)
-                        return Package.package_from_dict(data=pkg_data)
-        except Exception as e:
-            log.debug(event="cache_lookup_list_failed", error=str(object=e))
-
-        log.debug(event="cache_miss", package=name, kind=kind.value)
-        return None
-
-    async def refresh_outdated_status(self, outdated_entries: list) -> None:
-        """Refresh outdated package status in cache.
-
-        Args:
-            outdated_entries: The fetched list of outdated entries from Brew.
-        """
-        try:
-            all_pkgs: list[Package] = await self.load_packages(kind=None)
-            if not all_pkgs:
-                all_pkgs: list[Package] = await self.refresh_packages(kind=None)
-
-            outdated_map: dict = {e["name"]: e for e in outdated_entries}
-            changed: list[Package] = []
-
-            for pkg in all_pkgs:
-                if pkg.name in outdated_map:
-                    entry = outdated_map[pkg.name]
-                    pkg.status |= PackageStatus.OUTDATED
-                    pkg.metadata["latest_version"] = entry.get("current_version")
-                    changed.append(pkg)
-
-            if changed:
-                await self.update_packages(packages=changed, action="update")
-
-            log.info(event="outdated_cache_updated", count=len(outdated_entries))
-
-        except Exception as e:
-            log.error(
-                event="outdated_cache_update_failed", error=str(object=e), exc_info=True
-            )
-
-    async def _update_caches(
-        self, kind: Optional[PackageKind], pkgs: list[Package]
-    ) -> None:
-        """Internal helper: update cache files after refresh.
-
-        Args:
-            kind: The kind filter used in refresh.
-            pkgs: The packages that were fetched.
-        """
-        if kind:
-            suffixes: list[str] = [kind.value]
-        else:
-            suffixes: list[str] = ["all"] + [k.value for k in PackageKind]
-
-        pkgs_dicts: list = [p.to_serializable_dict() for p in pkgs]
-
-        for suffix in suffixes:
-            list_key, map_key = self._cache_keys(kind_value=suffix)
-
-            filtered = (
-                [p for p in pkgs_dicts if p.get("kind") == suffix]
-                if suffix in _KIND_VALUES
-                else pkgs_dicts
-            )
-
-            filtered_map: dict = {p["name"]: p for p in filtered}
-
-            try:
-                self.cache.set(key=list_key, value=filtered)
-                self.cache.set(key=map_key, value=filtered_map)
-                log.debug(event="cache_updated", list_key=list_key, count=len(pkgs))
-
-            except Exception as e:
-                log.error(
-                    event="cache_update_failed",
-                    list_key=list_key,
-                    error=str(object=e),
-                    exc_info=True,
-                )
+    def invalidate(self) -> None:
+        """Invalidate FS cache so it is rebuilt on next access."""
+        self.cache.delete(self._RECORDS_KEY)
+        log.debug(event="installed_records_invalidated")

@@ -36,6 +36,7 @@ from brewery.core.logging import BreweryLogger, configure_logging, get_logger
 from brewery.core.models import Package, PackageKind
 from brewery.core.repo import Repository
 from brewery.core.task_manager import BackgroundTaskManager, get_task_manager
+from brewery.daemon.catalog_refresh import refresh_catalog
 from brewery.daemon.daemon import daemon_app
 
 log: BreweryLogger = get_logger(name=__name__)
@@ -163,9 +164,8 @@ def list_pkgs(
                 status="[bold yellow]Refreshing cache...[/bold yellow]",
                 refresh_per_second=6,
             ):
-                pkgs = run_with_task_manager(
-                    coro=repo.cache_mgr.refresh_packages(kind=kind)
-                )
+                repo.cache_mgr.invalidate()
+                pkgs = run_with_task_manager(coro=repo.get_all_installed(kind=kind))
         else:
             pkgs = run_with_task_manager(coro=repo.get_all_installed(kind_filter=kind))
 
@@ -196,21 +196,7 @@ def info(
     """
     try:
         repo = Repository()
-
-        if kind is None:
-            all_pkgs: List[Package] = run_with_task_manager(
-                coro=repo.get_all_installed()
-            )
-            matching_pkg: Package | None = next(
-                (p for p in all_pkgs if p.name == name), None
-            )
-            if not matching_pkg:
-                raise PackageNotFoundError(package=name)
-            resolved_kind: PackageKind = matching_pkg.kind
-        else:
-            resolved_kind = kind
-
-        pkg: Package = run_with_task_manager(coro=repo.get_details(name, resolved_kind))
+        pkg: Package = run_with_task_manager(coro=repo.get_details(name, kind))
 
         console.print(package_details(pkg))
 
@@ -227,12 +213,7 @@ def search(term: str) -> None:
     """
     try:
         repo = Repository()
-        pkgs: List[Package] = run_with_task_manager(coro=repo.get_all_installed())
-
-        q: str = term.lower()
-        pkgs = [
-            p for p in pkgs if q in p.name.lower() or (p.desc and q in p.desc.lower())
-        ]
+        pkgs: List[Package] = run_with_task_manager(coro=repo.search(term))
 
         console.print(package_table(pkgs))
 
@@ -349,7 +330,7 @@ def outdated(
                 status="[bold yellow]Checking for updates...[/bold yellow]",
                 refresh_per_second=6,
             ):
-                pkgs = run_with_task_manager(coro=repo.get_outdated(live=True))
+                pkgs = run_with_task_manager(coro=_live_outdated(repo))
 
         else:
             pkgs = run_with_task_manager(coro=repo.get_outdated(live=False))
@@ -367,6 +348,13 @@ def outdated(
 
     except Exception as e:
         sys.exit(handle_error(error=e))
+
+
+async def _live_outdated(repo: Repository) -> list[Package]:
+    """--check: refresh catalog and get outdated packages."""
+    await refresh_catalog(catalog=repo.catalog)
+
+    return await repo.get_outdated(live=True)
 
 
 @app.command_with_aliases(aliases=["u", "up"])
