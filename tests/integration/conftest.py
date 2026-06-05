@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import orjson
+
 if TYPE_CHECKING:
+    from brewery.core.catalog import Catalog
     from brewery.core.config import BreweryENV
+    from brewery.core.repo import Repository
 
 import pytest
 
@@ -31,7 +34,7 @@ def fixture_text() -> dict[str, str]:
     """Load all fixture files as strings.
 
     Returns:
-        A dictionary mapping fixture names to their contents as strings.
+        The fixture text data.
     """
     return {
         "formula": _load("formula.json"),
@@ -48,47 +51,136 @@ def fixture_json(fixture_text) -> dict[str, dict]:
         fixture_text: The fixture text fixture.
 
     Returns:
-        A dictionary mapping fixture names to their parsed JSON contents.
+        The parsed JSON data.
     """
-    return {k: json.loads(v) for k, v in fixture_text.items()}
+    return {k: orjson.loads(v) for k, v in fixture_text.items()}
 
 
 @pytest.fixture
-def fake_env(monkeypatch) -> BreweryENV:
-    """Pin the Homebrew prefix so path construction is deterministic and does
-    no subprocess discovery.
+def fake_env(tmp_path, monkeypatch) -> BreweryENV:
+    """Build a hermetic Homebrew prefix in a temp directory and populate
+    Cellar/Caskroom with the directory structure scan_installed needs.
 
     Args:
+        tmp_path: The pytest tmp_path fixture.
         monkeypatch: The pytest monkeypatch fixture.
 
     Returns:
-        The pinned BreweryENV instance.
+        The fake environment.
     """
+    prefix = tmp_path / "homebrew"
+    cellar = prefix / "Cellar"
+    caskroom = prefix / "Caskroom"
+
+    (cellar / "yazi" / "26.5.6").mkdir(parents=True)
+    (cellar / "act" / "0.2.88").mkdir(parents=True)
+    (caskroom / "iina" / "1.4.1,160").mkdir(parents=True)
+
     from brewery.core import config
     from brewery.core.config import BreweryENV
 
-    env = BreweryENV(
-        prefix=Path("/opt/homebrew"),
-        cellar=Path("/opt/homebrew/Cellar"),
-        caskroom=Path("/opt/homebrew/Caskroom"),
-    )
+    env = BreweryENV(prefix=prefix, cellar=cellar, caskroom=caskroom)
     monkeypatch.setattr(config, "_env_cache", env)
 
     return env
 
 
 @pytest.fixture
-def mock_brew(monkeypatch, fixture_text, fake_env):
-    """Patch run_capture everywhere it is imported so the real run_json parses
-    fixture text. Returns the dispatcher so tests can inspect call history.
+def catalog(fixture_json) -> Catalog:
+    """Populate a Catalog from the formula/cask fixture JSON and return it.
+
+    The DB lives in the test-isolated BREWERY_CACHE_DIR (set by the top-level
+    conftest), so it never touches the real ~/.brewery/cache.
+
+    Args:
+        fixture_json: The fixture JSON fixture.
+
+    Returns:
+        The populated Catalog.
+    """
+    from brewery.core.catalog import Catalog
+
+    formula_data: dict = fixture_json["formula"]
+    cask_data: dict = fixture_json["cask"]
+
+    cat = Catalog()
+
+    formulae = [
+        {
+            "name": f["name"],
+            "desc": f.get("desc"),
+            "homepage": f.get("homepage"),
+            "tap": f.get("tap"),
+            "version": f["versions"]["stable"],
+            "revision": f.get("revision", 0),
+            "version_scheme": f.get("version_scheme", 0),
+            "keg_only": int(f.get("keg_only", False)),
+            "has_service": int(bool(f.get("service"))),
+            "post_install": int(bool(f.get("post_install_caveat"))),
+            "bottle_url": None,
+            "bottle_sha256": None,
+            "bottle_cellar": None,
+            "bottle_rebuild": 0,
+            "deprecated": int(f.get("deprecated", False)),
+            "disabled": int(f.get("disabled", False)),
+        }
+        for f in formula_data["formulae"]
+    ]
+
+    deps = [
+        {"pkg": f["name"], "dep": dep, "kind": "runtime"}
+        for f in formula_data["formulae"]
+        for dep in f.get("dependencies", [])
+    ]
+
+    aliases = [
+        {"alias": a, "name": f["name"]}
+        for f in formula_data["formulae"]
+        for a in f.get("aliases", [])
+    ]
+
+    cat.write_formulae(formulae, deps, aliases)
+
+    casks = [
+        {
+            "token": c["token"],
+            "name": c["name"][0] if c.get("name") else None,
+            "desc": c.get("desc"),
+            "homepage": c.get("homepage"),
+            "tap": c.get("tap"),
+            "version": c.get("version"),
+            "sha256": c.get("sha256"),
+            "url": c.get("url"),
+            "auto_updates": int(c.get("autobump", False)),
+            "artifacts": orjson.dumps(c["artifacts"]).decode()
+            if c.get("artifacts")
+            else None,
+            "depends_on": orjson.dumps(c["depends_on"]).decode()
+            if c.get("depends_on")
+            else None,
+            "deprecated": int(c.get("deprecated", False)),
+            "disabled": int(c.get("disabled", False)),
+        }
+        for c in cask_data["casks"]
+    ]
+
+    cat.write_casks(casks)
+
+    return cat
+
+
+@pytest.fixture
+def mock_brew(monkeypatch, fixture_text, fake_env) -> list[tuple[str, ...]]:
+    """Patch run_capture everywhere it is imported so subprocess boundaries
+    never reach the real brew binary.  Returns the call log.
 
     Args:
         monkeypatch: The pytest monkeypatch fixture.
-        fixture_text: The fixture text to parse.
-        fake_env: The fake BreweryENV instance.
+        fixture_text: The fixture text fixture.
+        fake_env: The fake environment fixture.
 
     Returns:
-        The dispatcher instance.
+        The call log.
     """
     calls: list[tuple[str, ...]] = []
 
@@ -97,7 +189,6 @@ def mock_brew(monkeypatch, fixture_text, fake_env):
         calls.append(cmd_t)
 
         if cmd_t[:1] == ("du",):
-            # Size lookup stdout is "<kb>\t<path>"
             return (f"4096\t{cmd_t[-1]}", "", 0)
         if "--caskroom" in cmd_t:
             return ("/opt/homebrew/Caskroom", "", 0)
@@ -109,7 +200,6 @@ def mock_brew(monkeypatch, fixture_text, fake_env):
             return (fixture_text["formula"], "", 0)
         return ("", "", 0)
 
-    # Binding each module to the fake run_capture
     import brewery.core.shell as shell
     import brewery.providers.brew_cask as brew_cask
     import brewery.providers.package_builder as package_builder
@@ -119,3 +209,16 @@ def mock_brew(monkeypatch, fixture_text, fake_env):
     monkeypatch.setattr(brew_cask, "run_capture", fake_run_capture)
 
     return calls
+
+
+@pytest.fixture
+def repo(mock_brew, catalog) -> Repository:
+    """Repository wired to mock subprocesses and a pre-populated catalog.
+
+    Args:
+        mock_brew: The mock subprocess call log.
+        catalog: The pre-populated catalog.
+    """
+    from brewery.core.repo import Repository
+
+    return Repository(catalog=catalog)

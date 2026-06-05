@@ -11,7 +11,7 @@ from datetime import datetime
 import pytest
 
 from brewery.core.models import Package, PackageKind, PackageStatus
-from brewery.providers import brew_cask, brew_formula, brew_outdated
+from brewery.providers import brew_cask, brew_formula
 
 pytestmark = pytest.mark.integration
 
@@ -54,8 +54,8 @@ class TestFormulaPipeline:
     async def test_act_is_clean_at_install_time(self, mock_brew, fake_env):
         """Tests that act is clean at install time."""
         act = _by_name(await brew_formula.list_installed(), "act")
-        assert act.versions == ["0.2.88"]
-        assert act.metadata["latest_version"] == "0.2.88"
+        assert act.versions == ["0.2.88", "0.2.89"]
+        assert act.metadata["latest_version"] == "0.2.89"
         assert act.status == PackageStatus.NONE
         assert act.installed_on == datetime.fromtimestamp(1777809461)
         assert act.path == str(fake_env.cellar / "act" / "0.2.88")
@@ -97,22 +97,3 @@ class TestCaskPipeline:
         """Tests that installed_on is set from the timestamp."""
         iina = (await brew_cask.list_installed())[0]
         assert iina.installed_on == datetime.fromtimestamp(1770221226.0)
-
-
-class TestOutdatedPipeline:
-    """Tests the outdated pipeline."""
-
-    async def test_fetch_enriches_entries(self, mock_brew):
-        """Tests that fetch_enriches_entries returns the correct number of entries."""
-        entries = await brew_outdated.fetch_outdated()
-        assert len(entries) == 3
-        assert {e["name"] for e in entries} == {"act", "libnghttp3", "libngtcp2"}
-
-    async def test_entry_has_status_and_versions(self, mock_brew):
-        """Tests that entry has status and versions."""
-        entries = await brew_outdated.fetch_outdated()
-        act = next(e for e in entries if e["name"] == "act")
-        assert act["kind"] == "formula"
-        assert act["status"] == PackageStatus.OUTDATED
-        assert act["versions"] == ["0.2.88"]
-        assert act["metadata"]["latest_version"] == "0.2.89"

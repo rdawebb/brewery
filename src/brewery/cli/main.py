@@ -2,21 +2,17 @@
 
 from __future__ import annotations
 
-import asyncio
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any, Awaitable, List, Optional
 
 from rich.console import Console
 from typer_extensions import ExtendedTyper
 
-from brewery.cli.renderers import (
-    _terminal_size,
-    package_details,
-    package_table,
-    paginate,
-)
+from brewery.cli.renderers import package_table
 from brewery.core.config import KNOWN_COMMANDS
 from brewery.core.errors import (
     EXIT_SYSTEM_ERROR,
@@ -115,6 +111,17 @@ def _brew_passthrough(argv: list[str]) -> int:
         return 130
 
 
+@contextmanager
+def _repository() -> Iterator[Repository]:
+    """Yield a repository instance and close it on exit."""
+    repo = Repository()
+    try:
+        yield repo
+
+    finally:
+        repo.close()
+
+
 def run_with_task_manager(coro: Awaitable) -> Any:
     """Run a coroutine with the task manager.
 
@@ -124,6 +131,7 @@ def run_with_task_manager(coro: Awaitable) -> Any:
     Returns:
         The result of the coroutine.
     """
+    import asyncio
 
     async def main_with_tasks() -> None:
         result = await coro
@@ -154,28 +162,31 @@ def list_pkgs(
         kind: Filter by package kind.
         refresh: Refresh cache before listing packages.
     """
+    from brewery.cli.renderers import _terminal_size, paginate
+
     try:
-        repo = Repository()
-        pkgs: list[Package]
+        with _repository() as repo:
+            pkgs: list[Package]
 
-        if refresh:
-            with console.status(
-                status="[bold yellow]Refreshing cache...[/bold yellow]",
-                refresh_per_second=6,
-            ):
+            if refresh:
+                with console.status(
+                    status="[bold yellow]Refreshing cache...[/bold yellow]",
+                    refresh_per_second=6,
+                ):
+                    repo.cache_mgr.invalidate()
+                    pkgs = run_with_task_manager(coro=repo.get_all_installed(kind=kind))
+            else:
                 pkgs = run_with_task_manager(
-                    coro=repo.cache_mgr.refresh_packages(kind=kind)
+                    coro=repo.get_all_installed(kind_filter=kind)
                 )
-        else:
-            pkgs = run_with_task_manager(coro=repo.get_all_installed(kind_filter=kind))
 
-        _, term_height = _terminal_size()
-        page_size: int = term_height - 6  # header + footer buffer
+            _, term_height = _terminal_size()
+            page_size: int = term_height - 6  # header + footer buffer
 
-        if len(pkgs) > page_size:
-            paginate(pkgs=pkgs, page_size=page_size, console=console)
-        else:
-            console.print(package_table(pkgs), emoji=False)
+            if len(pkgs) > page_size:
+                paginate(pkgs=pkgs, page_size=page_size, console=console)
+            else:
+                console.print(package_table(pkgs), emoji=False)
 
     except Exception as e:
         sys.exit(handle_error(error=e))
@@ -194,25 +205,13 @@ def info(
         name: Name of the package.
         kind: Kind of the package (formula or cask). If not provided, will auto-detect.
     """
+    from brewery.cli.renderers import package_details
+
     try:
-        repo = Repository()
+        with _repository() as repo:
+            pkg: Package = run_with_task_manager(coro=repo.get_details(name, kind))
 
-        if kind is None:
-            all_pkgs: List[Package] = run_with_task_manager(
-                coro=repo.get_all_installed()
-            )
-            matching_pkg: Package | None = next(
-                (p for p in all_pkgs if p.name == name), None
-            )
-            if not matching_pkg:
-                raise PackageNotFoundError(package=name)
-            resolved_kind: PackageKind = matching_pkg.kind
-        else:
-            resolved_kind = kind
-
-        pkg: Package = run_with_task_manager(coro=repo.get_details(name, resolved_kind))
-
-        console.print(package_details(pkg))
+            console.print(package_details(pkg))
 
     except Exception as e:
         sys.exit(handle_error(error=e))
@@ -226,15 +225,10 @@ def search(term: str) -> None:
         term: Search term.
     """
     try:
-        repo = Repository()
-        pkgs: List[Package] = run_with_task_manager(coro=repo.get_all_installed())
+        with _repository() as repo:
+            pkgs: List[Package] = run_with_task_manager(coro=repo.search(term))
 
-        q: str = term.lower()
-        pkgs = [
-            p for p in pkgs if q in p.name.lower() or (p.desc and q in p.desc.lower())
-        ]
-
-        console.print(package_table(pkgs))
+            console.print(package_table(pkgs))
 
     except Exception as e:
         sys.exit(handle_error(error=e))
@@ -263,18 +257,20 @@ def install(
                 console.print("Installation cancelled.", style="dim")
                 return
 
-        repo = Repository()
-        with console.status(status="[bold green]Installing...", refresh_per_second=6):
-            installed, failures = run_with_task_manager(
-                coro=repo.install_packages(names, kind)
-            )
+        with _repository() as repo:
+            with console.status(
+                status="[bold green]Installing...", refresh_per_second=6
+            ):
+                installed, failures = run_with_task_manager(
+                    coro=repo.install_packages(names, kind)
+                )
 
-        for pkg in installed:
-            console.print(
-                f"[green]✓ Installed [bold]{pkg.name}[/bold] {pkg.versions[0] if pkg.versions else ''}[/green]"
-            )
-        for name, reason in failures:
-            console.print(f"[bold red] Failed {name}: {reason}[/bold red]")
+            for pkg in installed:
+                console.print(
+                    f"[green]✓ Installed [bold]{pkg.name}[/bold] {pkg.versions[0] if pkg.versions else ''}[/green]"
+                )
+            for name, reason in failures:
+                console.print(f"[bold red] Failed {name}: {reason}[/bold red]")
 
     except AlreadyInstalledWarning as e:
         console.print(f"\n[bold yellow]⚠ {e.message}[/bold yellow]\n")
@@ -306,17 +302,17 @@ def uninstall(
                 console.print("Uninstallation cancelled.", style="dim")
                 return
 
-        repo = Repository()
-        with console.status(
-            status=f"[bold yellow]Uninstalling...{pkg_str}", refresh_per_second=6
-        ):
-            count, failures = run_with_task_manager(
-                coro=repo.uninstall_packages(names, kind)
-            )
+        with _repository() as repo:
+            with console.status(
+                status=f"[bold yellow]Uninstalling...{pkg_str}", refresh_per_second=6
+            ):
+                count, failures = run_with_task_manager(
+                    coro=repo.uninstall_packages(names, kind)
+                )
 
-        console.print(f"✓ Uninstalled {count} package(s)")
-        for name, reason in failures:
-            console.print(f"[bold red]✗ Failed {name}: {reason}[/bold red]")
+            console.print(f"✓ Uninstalled {count} package(s)")
+            for name, reason in failures:
+                console.print(f"[bold red]✗ Failed {name}: {reason}[/bold red]")
 
     except Exception as e:
         sys.exit(handle_error(error=e))
@@ -340,33 +336,44 @@ def outdated(
         check: If True, performs a live brew outdated check and updates cache.
     """
     try:
-        repo = Repository()
-        pkgs: list[Package]
+        with _repository() as repo:
+            pkgs: list[Package]
 
-        if check:
-            console.print()
-            with console.status(
-                status="[bold yellow]Checking for updates...[/bold yellow]",
-                refresh_per_second=6,
-            ):
-                pkgs = run_with_task_manager(coro=repo.get_outdated(live=True))
+            if check:
+                console.print()
+                with console.status(
+                    status="[bold yellow]Checking for updates...[/bold yellow]",
+                    refresh_per_second=6,
+                ):
+                    pkgs = run_with_task_manager(coro=_live_outdated(repo))
 
-        else:
-            pkgs = run_with_task_manager(coro=repo.get_outdated(live=False))
+            else:
+                pkgs = run_with_task_manager(coro=repo.get_outdated(live=False))
 
-        if not pkgs:
-            console.print("\n[bold green]✓ All packages are up to date![/bold green]\n")
-            return
+            if not pkgs:
+                console.print(
+                    "\n[bold green]✓ All packages are up to date![/bold green]\n"
+                )
+                return
 
-        console.print(package_table(pkgs))
-        console.print(
-            f"\n[dim] - {len(pkgs)} outdated package(s)"
-            f"\n - Run [bold]brewery upgrade[/bold] to update all outdated packages, "
-            f"\n   or [bold]brewery upgrade <packages>[/bold] to update specific packages\n"
-        )
+            console.print(package_table(pkgs))
+            console.print(
+                f"\n[dim] - {len(pkgs)} outdated package(s)"
+                f"\n - Run [bold]brewery upgrade[/bold] to update all outdated packages, "
+                f"\n   or [bold]brewery upgrade <packages>[/bold] to update specific packages\n"
+            )
 
     except Exception as e:
         sys.exit(handle_error(error=e))
+
+
+async def _live_outdated(repo: Repository) -> list[Package]:
+    """--check: refresh catalog and get outdated packages."""
+    from brewery.daemon.catalog_refresh import refresh_catalog
+
+    await refresh_catalog(catalog=repo.catalog)
+
+    return await repo.get_outdated(live=True)
 
 
 @app.command_with_aliases(aliases=["u", "up"])
@@ -387,61 +394,70 @@ def upgrade(
         yes: If true, skip confirmation prompt.
     """
     try:
-        repo = Repository()
+        with _repository() as repo:
+            if not yes:
+                if names:
+                    pkg_str: str = ", ".join(names)
+                    if not app.confirm(text=f"Upgrade: {pkg_str}?", default=True):
+                        console.print("Upgrade cancelled.", style="dim")
+                        return
 
-        if not yes:
-            if names:
-                pkg_str: str = ", ".join(names)
-                if not app.confirm(text=f"Upgrade: {pkg_str}?", default=True):
-                    console.print("Upgrade cancelled.", style="dim")
-                    return
-            else:
-                outdated: list[Package] = run_with_task_manager(
-                    coro=repo.get_outdated(live=False)
-                )
-                if not outdated:
-                    console.print(
-                        "\n[bold green]✓ All packages are up to date![/bold green]\n"
+                else:
+                    outdated: list[Package] = run_with_task_manager(
+                        coro=repo.get_outdated(live=False)
                     )
-                    return
-                console.print(package_table(pkgs=outdated))
-                if not app.confirm(
-                    text=f"Upgrade {len(outdated)} outdated package(s)?", default=True
-                ):
-                    console.print("Upgrade cancelled.", style="dim")
-                    return
+                    if not outdated:
+                        console.print(
+                            "\n[bold green]✓ All packages are up to date![/bold green]\n"
+                        )
+                        return
 
-        console.print()
-        with console.status(
-            status="[bold yellow]Upgrading...[/bold yellow]", refresh_per_second=6
-        ):
-            upgraded, current, failures = run_with_task_manager(
-                coro=repo.upgrade_packages(names, kind)
-            )
+                    console.print(package_table(pkgs=outdated))
 
-        if not upgraded and not failures and not current:
-            console.print("\n[bold green]✓ All packages are up to date![/bold green]\n")
-            return
+                    if not app.confirm(
+                        text=f"Upgrade {len(outdated)} outdated package(s)?",
+                        default=True,
+                    ):
+                        console.print("Upgrade cancelled.", style="dim")
+                        return
 
-        console.print(f"[bold green]✓ Upgraded {len(upgraded)} package(s)[/bold green]")
-        for pkg in upgraded:
-            console.print(
-                f"\n  [dim]→[/dim] {pkg.name} {pkg.versions[0] if pkg.versions else ''}"
-            )
-
-        if current:
-            console.print(f"\n[dim]{len(current)} already up-to-date:[/dim]\n")
-            for pkg in current:
-                console.print(
-                    f"  [dim]→ {pkg.name} {pkg.versions[0] if pkg.versions else ''}[/dim]"
+            console.print()
+            with console.status(
+                status="[bold yellow]Upgrading...[/bold yellow]", refresh_per_second=6
+            ):
+                upgraded, current, failures = run_with_task_manager(
+                    coro=repo.upgrade_packages(names, kind)
                 )
 
-        if failures:
-            console.print(f"\n[bold red]✗ {len(failures)} skipped/failed:[/bold red]")
-            for pkg_name, reason in failures:
-                console.print(f"  - {pkg_name}: [dim]{reason}[/dim]")
+            if not upgraded and not failures and not current:
+                console.print(
+                    "\n[bold green]✓ All packages are up to date![/bold green]\n"
+                )
+                return
 
-        console.print()
+            console.print(
+                f"[bold green]✓ Upgraded {len(upgraded)} package(s)[/bold green]\n"
+            )
+            for pkg in upgraded:
+                console.print(
+                    f"  [dim]→[/dim] {pkg.name} {pkg.versions[0] if pkg.versions else ''}"
+                )
+
+            if current:
+                console.print(f"\n[dim]{len(current)} already up-to-date:[/dim]\n")
+                for pkg in current:
+                    console.print(
+                        f"  [dim]→ {pkg.name} {pkg.versions[0] if pkg.versions else ''}[/dim]"
+                    )
+
+            if failures:
+                console.print(
+                    f"\n[bold red]✗ {len(failures)} skipped/failed:[/bold red]"
+                )
+                for pkg_name, reason in failures:
+                    console.print(f"  - {pkg_name}: [dim]{reason}[/dim]")
+
+            console.print()
 
     except PinnedPackageWarning as e:
         console.print(f"\n[bold yellow]⚠ {e.message}[/bold yellow]\n")
@@ -450,9 +466,10 @@ def upgrade(
         sys.exit(handle_error(error=e))
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     """Intercepts the entry point for the brewery CLI to handle commands passthrough."""
-    argv = sys.argv[1:]
+    if argv is None:
+        argv = sys.argv[1:]
 
     # Pass unknown and non-flag arguments straight to brew
     if argv and not argv[0].startswith("-") and argv[0] not in KNOWN_COMMANDS:

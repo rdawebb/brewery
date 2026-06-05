@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
+import orjson
 import os
 import time
 from asyncio.subprocess import Process
@@ -137,7 +137,7 @@ async def run_capture(*cmd: str, timeout: Optional[int] = None) -> tuple[str, st
 
 
 @retry_on_transient(max_retries=3, base_delay=1.0)
-async def run_json(*cmd: str, timeout: Optional[int] = 30) -> Any:
+async def run_json(*cmd: str, timeout: Optional[int] = None) -> Any:
     """Run a shell command and parse its JSON output.
 
     Automatically retries on transient errors.
@@ -167,12 +167,12 @@ async def run_json(*cmd: str, timeout: Optional[int] = 30) -> Any:
         raise BrewCommandError(command=" ".join(cmd), returncode=code, error=err or out)
 
     try:
-        result: Any = json.loads(out)
+        result: Any = orjson.loads(out)
         log.debug(event="json_parsed", command=" ".join(cmd), duration_ms=duration_ms)
 
         return result
 
-    except json.JSONDecodeError as e:
+    except orjson.JSONDecodeError as e:
         log.error(
             event="json_parse_failed",
             command=" ".join(cmd),

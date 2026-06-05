@@ -135,7 +135,7 @@
       "license": "MIT",
       "homepage": "https://github.com/nektos/act",
       "versions": {
-        "stable": "0.2.88",
+        "stable": "0.2.89",
         "head": "HEAD",
         "bottle": true
       },

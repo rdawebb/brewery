@@ -1,15 +1,15 @@
-<?xml version="1.0" encoding="UTF-8"?>
+<?xml version="1.0" encoding="UTF-8" ?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.brewery.outdated</string>
+    <string>com.brewery.refresh</string>
     <key>ProgramArguments</key>
     <array>
         <string>python3</string>
         <string>-m</string>
-        <string>brewery.daemon.outdated_refresh</string>
+        <string>brewery.daemon.catalog_refresh</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
@@ -19,8 +19,8 @@
     <key>StartInterval</key>
     <integer>1800</integer>
     <key>RunAtLoad</key>
-    <true/>
+    <true />
     <key>StandardErrorPath</key>
-    <string>/tmp/brewery.outdated.err</string>
+    <string>/tmp/brewery.refresh.err</string>
 </dict>
 </plist>

@@ -8,6 +8,35 @@ from enum import Enum, Flag, auto
 from typing import Any
 
 
+def effective_version(version: str, revision: int = 0) -> str:
+    """Return the effective version string, including revision if non-zero.
+
+    Args:
+        version: The upstream version string.
+        revision: The Homebrew package revision number (zero if absent)
+
+    Returns:
+        'version' if revision is zero, otherwise 'version.revision'
+    """
+    return f"{version}.{revision}" if revision > 0 else version
+
+
+def split_keg_version(keg_name: str) -> tuple[str, int]:
+    """Split an installed keg name into version and revision.
+
+    Args:
+        keg_name: Keg directory name
+
+    Returns:
+        A tuple of (version, revision)
+    """
+    head, sep, tail = keg_name.partition("_")
+    if sep and tail.isdigit():
+        return head, int(tail)
+
+    return keg_name, 0
+
+
 class PackageKind(Enum):
     """Enumeration of package kinds."""
 

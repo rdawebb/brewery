@@ -1,16 +1,16 @@
-"""Repository module for managing package data from various backends."""
+"""Repository module for managing package data from catalog and FS cache."""
 
 from __future__ import annotations
 
-import asyncio
 from typing import Optional
 
 from brewery.core.cache import Cache, CacheManager
-from brewery.core.config import get_brewery_env
+from brewery.core.catalog import Catalog
+from brewery.core.config import BreweryENV, get_brewery_env
 from brewery.core.decorators import log_operation
 from brewery.core.errors import PackageNotFoundError
 from brewery.core.models import Package, PackageKind, PackageStatus
-from brewery.providers import base, brew_cask, brew_formula, brew_outdated
+from brewery.providers import base, brew_cask, brew_formula
 
 
 class Repository:
@@ -19,15 +19,33 @@ class Repository:
     def __init__(
         self,
         cache: Cache | None = None,
+        catalog: Catalog | None = None,
         cache_mgr: CacheManager | None = None,
         formula_backend: base.PackageBackend = brew_formula.backend,
         cask_backend: base.PackageBackend = brew_cask.backend,
-    ):
-        """Initialise the repository."""
+        env: BreweryENV | None = None,
+    ) -> None:
+        """Initialise the repository.
+
+        Args:
+            cache: Optional cache instance.
+            catalog: Optional catalog instance.
+            cache_mgr: Optional cache manager instance.
+            formula_backend: Backend for formulae.
+            cask_backend: Backend for casks.
+            env: Optional Brewery environment.
+        """
         _cache = cache or Cache(namespace="repository")
-        self.cache_mgr = cache_mgr or CacheManager(_cache)
+        self.catalog: Catalog = catalog or Catalog()
+        self.cache_mgr: CacheManager = cache_mgr or CacheManager(
+            _cache, self.catalog, env
+        )
         self.formula = formula_backend
         self.cask = cask_backend
+
+    def close(self) -> None:
+        """Close the catalog connection."""
+        self.catalog.close()
 
     @log_operation(event_prefix="get_all_installed", log_args=["kind_filter"])
     async def get_all_installed(
@@ -41,13 +59,7 @@ class Repository:
         Returns:
             A list of installed Package instances.
         """
-        pkgs: list[Package] = await self.cache_mgr.load_packages(kind=kind_filter)
-        if not pkgs:
-            pkgs: list[Package] = await self.cache_mgr.refresh_packages(
-                kind=kind_filter
-            )
-
-        return pkgs
+        return await self.cache_mgr.installed_packages(kind=kind_filter)
 
     @log_operation(event_prefix="get_details", log_args=["name", "kind"])
     async def get_details(
@@ -56,39 +68,61 @@ class Repository:
         """Get package details by name and kind.
 
         Args:
-            name: Name of the package.
-            kind: Kind of the package (formula or cask).
+            name: Package name, alias, or cask token.
+            kind: Optional kind filter (formula or cask)
 
         Returns:
             A Package instance with detailed information.
+
+        Raises:
+            PackageNotFoundError: If the package is not found.
         """
-        if kind is None:
-            cache_results = await asyncio.gather(
-                self.cache_mgr.get_details_from_cache(name, kind=PackageKind.FORMULA),
-                self.cache_mgr.get_details_from_cache(name, kind=PackageKind.CASK),
-            )
-            for pkg in cache_results:
-                if pkg:
-                    return pkg
+        match: Package | None = await self.cache_mgr.find_installed(name, kind)
+        if match is not None:
+            return match
 
-            results = await asyncio.gather(
-                self.formula.info(names=[name]),
-                self.cask.info(names=[name]),
-                return_exceptions=True,
-            )
+        from brewery.core.merge import catalog_info
 
-            for result in results:
-                if isinstance(result, list) and result:
-                    return result[0]
+        catalog_pkg: Package | None = catalog_info(catalog=self.catalog, name=name)
+        if catalog_pkg is not None and (kind is None or catalog_pkg.kind == kind):
+            return catalog_pkg
 
-            raise PackageNotFoundError(package=name)
+        raise PackageNotFoundError(package=name)
 
-        else:
-            pkg = await self.cache_mgr.get_details_from_cache(name, kind=kind)
-            if pkg:
-                return pkg
+    @log_operation(event_prefix="search", log_args=["term"])
+    async def search(self, term: str) -> list[Package]:
+        """Search the whole catalog, enriching results that are installed.
 
-            raise PackageNotFoundError(package=name)
+        Args:
+            term: Search term to match against package names and descriptions.
+
+        Returns:
+            A list of Package instances matching the search term.
+        """
+        from brewery.core.merge import search_packages
+
+        installed: dict[str, Package] = {
+            p.name: p for p in await self.cache_mgr.installed_packages()
+        }
+
+        return search_packages(catalog=self.catalog, query=term, installed=installed)
+
+    @log_operation(event_prefix="get_outdated", log_args=["live"])
+    async def get_outdated(self, live: bool = False) -> list[Package]:
+        """Return outdated packages (OUTDATED is derived in the merge).
+
+        Args:
+            live: Force a fresh filesystem re-scan before deriving.
+
+        Returns:
+            Packages flagged OUTDATED.
+        """
+        if live:
+            self.cache_mgr.invalidate()
+
+        packages: list[Package] = await self.cache_mgr.installed_packages()
+
+        return [p for p in packages if PackageStatus.OUTDATED in p.status]
 
     @log_operation(event_prefix="install_package", log_args=["name", "kind"])
     async def install_packages(
@@ -110,18 +144,22 @@ class Repository:
 
         await provider.install(names=names)
 
-        installed_pkgs: list[Package] = await provider.info(names=names)
-        installed_names: list[str] = [p.name for p in installed_pkgs if p.versions]
+        self.cache_mgr.invalidate()
+        installed_by_name: dict[str, Package] = {
+            p.name: p for p in await self.cache_mgr.installed_packages(kind=kind)
+        }
 
-        failures: list[tuple[str, str]] = [
-            (name, "install failed or not found")
-            for name in names
-            if name not in installed_names
+        installed: list[Package] = [
+            installed_by_name[n] for n in names if n in installed_by_name
         ]
 
-        await self.cache_mgr.update_packages(packages=installed_pkgs, action="add")
+        failures: list[tuple[str, str]] = [
+            (n, "install failed or not found")
+            for n in names
+            if n not in installed_by_name
+        ]
 
-        return installed_pkgs, failures
+        return installed, failures
 
     @log_operation(event_prefix="uninstall_package", log_args=["name", "kind"])
     async def uninstall_packages(
@@ -146,12 +184,15 @@ class Repository:
             formula_names: list[str] = [
                 n for n in names if kind_map.get(n) == PackageKind.FORMULA
             ]
+
             cask_names: list[str] = [
                 n for n in names if kind_map.get(n) == PackageKind.CASK
             ]
+
             failures: list[tuple[str, str]] = [
                 (n, "not found") for n in names if n not in kind_map
             ]
+
         else:
             formula_names: list[str] | list = (
                 names if kind == PackageKind.FORMULA else []
@@ -159,28 +200,32 @@ class Repository:
             cask_names: list[str] | list = names if kind == PackageKind.CASK else []
             failures: list = []
 
-        succeeded = 0
+        for pkg_names, provider in [
+            (formula_names, self.formula),
+            (cask_names, self.cask),
+        ]:
+            if pkg_names:
+                await provider.uninstall(names=pkg_names)
 
-        for pkg_names, provider, pkg_kind in [
-            (formula_names, self.formula, PackageKind.FORMULA),
-            (cask_names, self.cask, PackageKind.CASK),
+        self.cache_mgr.invalidate()
+
+        removed: list[str] = []
+        failed: list[str] = []
+
+        for pkg_names, k in [
+            (formula_names, PackageKind.FORMULA),
+            (cask_names, PackageKind.CASK),
         ]:
             if not pkg_names:
                 continue
 
-            await provider.uninstall(names=pkg_names)
+            r, f = await self._verify_removed(pkg_names, k)
+            removed += r
+            failed += f
 
-            removed, failed_names = await self._verify_removed(pkg_names, pkg_kind)
-            failures.extend((n, "uninstall failed") for n in failed_names)
+        failures.extend((n, "uninstall failed") for n in failed)
 
-            succeeded += len(removed)
-
-            await self.cache_mgr.update_packages(
-                packages=[Package(name=n, kind=pkg_kind) for n in removed],
-                action="remove",
-            )
-
-        return succeeded, failures
+        return len(removed), failures
 
     async def _verify_removed(
         self, names: list[str], kind: PackageKind
@@ -194,45 +239,21 @@ class Repository:
         Returns:
             Tuple of (removed, failed) package names.
         """
-        env = get_brewery_env()
+        env = self.cache_mgr.env or get_brewery_env()
 
-        base = env.cellar if kind == PackageKind.FORMULA else env.caskroom
+        base_dir = env.cellar if kind == PackageKind.FORMULA else env.caskroom
 
         removed, failed = [], []
         for name in names:
-            (failed if (base / name).exists() else removed).append(name)
+            (failed if (base_dir / name).exists() else removed).append(name)
 
         return removed, failed
-
-    @log_operation(event_prefix="get_outdated", log_args=["name", "kind"])
-    async def get_outdated(self, live: bool = False) -> list[Package]:
-        """Return a list of outdated packages.
-
-        Args:
-            live: If True, call brew directly and refresh cache, otherwise use cached data.
-
-        Returns:
-            List of packages with OUTDATED status.
-        """
-        if live:
-            outdated_entries = await brew_outdated.fetch_outdated()
-            await self.cache_mgr.refresh_outdated_status(outdated_entries)
-
-            all_pkgs = await self.get_all_installed()
-            outdated_pkgs = [p for p in all_pkgs if PackageStatus.OUTDATED in p.status]
-
-            return outdated_pkgs
-
-        else:
-            # Use cached data
-            all_pkgs: list[Package] = await self.get_all_installed()
-            return [p for p in all_pkgs if PackageStatus.OUTDATED in p.status]
 
     @log_operation(event_prefix="upgrade_packages", log_args=["names", "kind"])
     async def upgrade_packages(
         self, names: list[str] | None = None, kind: PackageKind | None = None
     ) -> tuple[list[Package], list[Package], list[tuple[str, str]]]:
-        """Upgrade packages and refresh cache entry.
+        """Upgrade packages and report upgraded, already up-to-date, and failures.
 
         Args:
             names: Name(s) of the package(s) to upgrade.
@@ -245,71 +266,57 @@ class Repository:
             BrewCommandError: Propagated from provider.
             PackagePinnedWarning: If any packages are pinned.
         """
-        # Upgrade all
+        installed: list[Package] = await self.cache_mgr.installed_packages()
+        by_name: dict[str, Package] = {p.name: p for p in installed}
+
+        # Resolve the target set and any pinned skips
         if names is None:
-            outdated: list[Package] = await self.get_outdated(live=False)
-            pinned: list[tuple[str, str]] = [
+            targets = [p for p in installed if PackageStatus.OUTDATED in p.status]
+            failures = [
                 (p.name, "pinned - skipped")
-                for p in outdated
+                for p in targets
                 if PackageStatus.PINNED in p.status
             ]
-            to_upgrade: list[Package] = [
-                p for p in outdated if PackageStatus.PINNED not in p.status
-            ]
-            formula_names: list[str] = [
-                p.name for p in to_upgrade if p.kind == PackageKind.FORMULA
-            ]
-            cask_names: list[str] = [
-                p.name for p in to_upgrade if p.kind == PackageKind.CASK
-            ]
-            failures: list[tuple[str, str]] = pinned
+            targets = [p for p in targets if PackageStatus.PINNED not in p.status]
 
         # Upgrade specified
         else:
-            if kind is None:
-                all_pkgs: list[Package] = await self.get_all_installed()
-                kind_map: dict[str, PackageKind] = {p.name: p.kind for p in all_pkgs}
-                formula_names: list[str] = [
-                    n for n in names if kind_map.get(n) == PackageKind.FORMULA
-                ]
-                cask_names: list[str] = [
-                    n for n in names if kind_map.get(n) == PackageKind.CASK
-                ]
-                failures: list[tuple[str, str]] = [
-                    (n, "not found") for n in names if n not in kind_map
-                ]
-            else:
-                formula_names: list = names if kind == PackageKind.FORMULA else []
-                cask_names: list = names if kind == PackageKind.CASK else []
-                failures: list = []
+            targets = [by_name[n] for n in names if n in by_name]
+            failures = [(n, "not found") for n in names if n not in by_name]
 
-        upgraded_pkgs: list[Package] = []
-        current_pkgs: list[Package] = []
+        if kind is not None:
+            targets = [p for p in targets if p.kind == kind]
+
+        formula_names = [p.name for p in targets if p.kind == PackageKind.FORMULA]
+        cask_names = [p.name for p in targets if p.kind == PackageKind.CASK]
+        pre_versions: dict[str, str | None] = {
+            p.name: (p.versions[0] if p.versions else None) for p in targets
+        }
 
         for pkg_names, provider in [
             (formula_names, self.formula),
             (cask_names, self.cask),
         ]:
-            if not pkg_names:
+            if pkg_names:
+                await provider.upgrade(names=pkg_names)
+
+        self.cache_mgr.invalidate()
+
+        post: dict[str, Package] = {
+            p.name: p for p in await self.cache_mgr.installed_packages()
+        }
+
+        upgraded: list[Package] = []
+        current: list[Package] = []
+        for name in formula_names + cask_names:
+            pkg = post.get(name)
+            if pkg is None:
                 continue
 
-            pre_fetch: list[Package] = await provider.info(names=pkg_names)
-            current_versions: dict[str, str | None] = {
-                p.name: p.versions[0] if p.versions else None for p in pre_fetch
-            }
+            new_version = pkg.versions[0] if pkg.versions else None
+            if new_version != pre_versions.get(name):
+                upgraded.append(pkg)
+            else:
+                current.append(pkg)
 
-            await provider.upgrade(names=pkg_names)
-            pkgs: list[Package] = await provider.info(names=pkg_names)
-
-            for pkg in pkgs:
-                if pkg.versions and pkg.versions[0] != current_versions.get(pkg.name):
-                    upgraded_pkgs.append(pkg)
-                else:
-                    current_pkgs.append(pkg)
-
-        if upgraded_pkgs:
-            await self.cache_mgr.update_packages(
-                packages=upgraded_pkgs, action="update"
-            )
-
-        return upgraded_pkgs, current_pkgs, failures
+        return upgraded, current, failures

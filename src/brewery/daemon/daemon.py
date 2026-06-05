@@ -9,7 +9,7 @@ from pathlib import Path
 from rich.console import Console
 from typer_extensions import ExtendedTyper
 
-PLIST_LABEL = "com.brewery.outdated"
+PLIST_LABEL = "com.brewery.refresh"
 PLIST_NAME = f"{PLIST_LABEL}.plist"
 LAUNCH_AGENTS = Path.home() / "Library" / "LaunchAgents"
 PLIST_DEST = LAUNCH_AGENTS / PLIST_NAME

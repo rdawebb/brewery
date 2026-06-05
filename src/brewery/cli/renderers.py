@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+import orjson
 import shutil
 from typing import Any, Iterable
 
@@ -43,7 +43,7 @@ def _load_width_cache() -> None:
     """Load pre-computed column widths from cache."""
     try:
         if WIDTHS_CACHE.exists():
-            data: Any = json.loads(WIDTHS_CACHE.read_text())
+            data: Any = orjson.loads(WIDTHS_CACHE.read_bytes())
             _width_cache.update({int(k): tuple(v) for k, v in data.items()})
 
     except Exception:
@@ -178,10 +178,8 @@ def _save_width_cache() -> None:
     """Save calculated column widths to file cache"""
     try:
         ensure_cache_dir()
-        WIDTHS_CACHE.write_text(
-            data=json.dumps(
-                obj={str(object=k): list(v) for k, v in _width_cache.items()}
-            )
+        WIDTHS_CACHE.write_bytes(
+            orjson.dumps({str(k): list(v) for k, v in _width_cache.items()})
         )
 
     except Exception:

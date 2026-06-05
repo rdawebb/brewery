@@ -182,6 +182,39 @@ class BrewTimeoutError(TransientError):
         super().__init__(message, context=ctx)
 
 
+class CatalogFetchError(TransientError):
+    """A catalog feed could not be fetched.
+
+    Raised by catalog fetch operations when a network or server error occurs.
+    """
+
+    def __init__(
+        self,
+        message: str | None = None,
+        url: str | None = None,
+        status_code: int | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> None:
+        """Initialise CatalogFetchError with an optional message and context.
+
+        Args:
+            message: Optional error message.
+            url: Optional URL that was being fetched.
+            status_code: Optional HTTP status code.
+            context: Optional context dictionary.
+        """
+        ctx: dict[str, Any] = context or {}
+        if url:
+            ctx["url"] = url
+        if status_code:
+            ctx["status"] = status_code
+
+        if message is None:
+            message = f"Failed to fetch catalog from {url or 'unknown URL'}"
+
+        super().__init__(message, context=ctx)
+
+
 class PackageNotFoundError(UserError):
     """Requested package was not found in the repository.
 
