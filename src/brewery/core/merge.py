@@ -14,6 +14,22 @@ from brewery.core.models import (
 )
 
 
+def merge_one(record: InstalledRecord, catalog: Catalog) -> Package:
+    """Join a single installed record against the catalog into a Package.
+
+    Args:
+        record: The installed record to merge.
+        catalog: The catalog store.
+
+    Returns:
+        The merged Package.
+    """
+    if record.kind == PackageKind.FORMULA:
+        return _merge_formula(record=record, row=catalog.get_formula(record.name))
+
+    return _merge_cask(record=record, row=catalog.get_cask(record.name))
+
+
 def merge(records: list[InstalledRecord], catalog: Catalog) -> list[Package]:
     """Join installed records against the catalog into Package objects.
 

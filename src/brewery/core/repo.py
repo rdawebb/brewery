@@ -77,16 +77,7 @@ class Repository:
         Raises:
             PackageNotFoundError: If the package is not found.
         """
-        installed: list[Package] = await self.cache_mgr.installed_packages()
-        match: Package | None = next(
-            (
-                p
-                for p in installed
-                if p.name == name and (kind is None or p.kind == kind)
-            ),
-            None,
-        )
-
+        match: Package | None = await self.cache_mgr.find_installed(name, kind)
         if match is not None:
             return match
 

@@ -9,16 +9,8 @@ from __future__ import annotations
 import pytest
 
 from brewery.core.models import PackageKind, PackageStatus
-from brewery.core.repo import Repository
 
 pytestmark = pytest.mark.integration
-
-
-@pytest.fixture
-def repo(mock_brew) -> Repository:
-    """Fixture for the Repository, using the mock_brew subprocess boundary."""
-    # mock_brew (and its fake_env) must be active before the repo touches brew.
-    return Repository()
 
 
 class TestGetAllInstalled:
@@ -37,14 +29,15 @@ class TestGetAllInstalled:
         ]
 
     async def test_second_call_is_served_from_cache(self, repo, monkeypatch):
-        """Test that get_all_installed serves from cache on subsequent calls."""
+        """Test that get_all_installed serves from FS cache on subsequent calls."""
         await repo.get_all_installed()
 
-        async def _boom():
-            raise AssertionError("provider should not be called on a cache hit")
+        import brewery.core.cache as cache_mod
 
-        monkeypatch.setattr(repo.formula, "list_installed", _boom)
-        monkeypatch.setattr(repo.cask, "list_installed", _boom)
+        def _boom(env=None):
+            raise AssertionError("scan_installed should not be called on a cache hit")
+
+        monkeypatch.setattr(cache_mod, "scan_installed", _boom)
 
         pkgs = await repo.get_all_installed()
         assert {p.name for p in pkgs} == {"iina", "act", "yazi"}
@@ -56,38 +49,28 @@ class TestGetAllInstalled:
 
 
 class TestLiveOutdatedFlip:
-    """End-to-end on real data: a stale cache (act looks current at 0.2.88) gets
-    reconciled against `brew outdated`, which reports 0.2.89."""
+    """End-to-end outdated detection: act is installed at 0.2.88 but the catalog
+    reports 0.2.89 as the latest.  Outdated status is derived from the catalog
+    comparison on every call; live=True forces an FS re-scan."""
 
-    async def test_cached_path_does_not_yet_flag_act(self, repo):
-        """Test that get_all_installed does not flag act as outdated when cached."""
-        outdated = await repo.get_outdated(live=False)
-        assert outdated == []
-
-    async def test_live_check_flips_act_and_updates_latest(self, repo):
-        """Test that get_outdated with live=True flips act to outdated and updates latest_version."""
-        outdated = await repo.get_outdated(live=False)
-        assert outdated == []
-
+    async def test_act_outdated_against_catalog(self, repo):
+        """Catalog 0.2.89 > installed 0.2.88 → act is OUTDATED immediately."""
         outdated = await repo.get_outdated(live=True)
 
         assert {p.name for p in outdated} == {"act"}
         act = outdated[0]
         assert PackageStatus.OUTDATED in act.status
-
-        # latest_version moved from the stale 0.2.88 to the live 0.2.89.
         assert act.metadata["latest_version"] == "0.2.89"
 
-    async def test_flip_persists_to_cache(self, repo):
-        """Test that get_outdated with live=True persists the reconciled status to cache."""
+    async def test_live_scan_result_cached_for_subsequent_reads(self, repo):
+        """FS records written during live=True are reused by the next live=False call."""
         await repo.get_outdated(live=True)
 
-        # A subsequent cached read now reflects the reconciled status.
         cached_outdated = await repo.get_outdated(live=False)
         assert {p.name for p in cached_outdated} == {"act"}
 
     async def test_non_outdated_packages_keep_clean_status(self, repo):
-        """Test that non-outdated packages keep their clean status after live reconciliation."""
+        """Non-outdated packages stay clean after a live reconciliation."""
         await repo.get_outdated(live=True)
         all_pkgs = await repo.get_all_installed()
         yazi = next(p for p in all_pkgs if p.name == "yazi")

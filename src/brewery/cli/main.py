@@ -211,7 +211,7 @@ def info(
         with _repository() as repo:
             pkg: Package = run_with_task_manager(coro=repo.get_details(name, kind))
 
-        console.print(package_details(pkg))
+            console.print(package_details(pkg))
 
     except Exception as e:
         sys.exit(handle_error(error=e))
@@ -228,7 +228,7 @@ def search(term: str) -> None:
         with _repository() as repo:
             pkgs: List[Package] = run_with_task_manager(coro=repo.search(term))
 
-        console.print(package_table(pkgs))
+            console.print(package_table(pkgs))
 
     except Exception as e:
         sys.exit(handle_error(error=e))
@@ -265,12 +265,12 @@ def install(
                     coro=repo.install_packages(names, kind)
                 )
 
-        for pkg in installed:
-            console.print(
-                f"[green]✓ Installed [bold]{pkg.name}[/bold] {pkg.versions[0] if pkg.versions else ''}[/green]"
-            )
-        for name, reason in failures:
-            console.print(f"[bold red] Failed {name}: {reason}[/bold red]")
+            for pkg in installed:
+                console.print(
+                    f"[green]✓ Installed [bold]{pkg.name}[/bold] {pkg.versions[0] if pkg.versions else ''}[/green]"
+                )
+            for name, reason in failures:
+                console.print(f"[bold red] Failed {name}: {reason}[/bold red]")
 
     except AlreadyInstalledWarning as e:
         console.print(f"\n[bold yellow]⚠ {e.message}[/bold yellow]\n")
@@ -310,9 +310,9 @@ def uninstall(
                     coro=repo.uninstall_packages(names, kind)
                 )
 
-        console.print(f"✓ Uninstalled {count} package(s)")
-        for name, reason in failures:
-            console.print(f"[bold red]✗ Failed {name}: {reason}[/bold red]")
+            console.print(f"✓ Uninstalled {count} package(s)")
+            for name, reason in failures:
+                console.print(f"[bold red]✗ Failed {name}: {reason}[/bold red]")
 
     except Exception as e:
         sys.exit(handle_error(error=e))
@@ -350,16 +350,18 @@ def outdated(
             else:
                 pkgs = run_with_task_manager(coro=repo.get_outdated(live=False))
 
-        if not pkgs:
-            console.print("\n[bold green]✓ All packages are up to date![/bold green]\n")
-            return
+            if not pkgs:
+                console.print(
+                    "\n[bold green]✓ All packages are up to date![/bold green]\n"
+                )
+                return
 
-        console.print(package_table(pkgs))
-        console.print(
-            f"\n[dim] - {len(pkgs)} outdated package(s)"
-            f"\n - Run [bold]brewery upgrade[/bold] to update all outdated packages, "
-            f"\n   or [bold]brewery upgrade <packages>[/bold] to update specific packages\n"
-        )
+            console.print(package_table(pkgs))
+            console.print(
+                f"\n[dim] - {len(pkgs)} outdated package(s)"
+                f"\n - Run [bold]brewery upgrade[/bold] to update all outdated packages, "
+                f"\n   or [bold]brewery upgrade <packages>[/bold] to update specific packages\n"
+            )
 
     except Exception as e:
         sys.exit(handle_error(error=e))
@@ -419,39 +421,43 @@ def upgrade(
                         console.print("Upgrade cancelled.", style="dim")
                         return
 
-        console.print()
-        with console.status(
-            status="[bold yellow]Upgrading...[/bold yellow]", refresh_per_second=6
-        ):
-            upgraded, current, failures = run_with_task_manager(
-                coro=repo.upgrade_packages(names, kind)
-            )
-
-        if not upgraded and not failures and not current:
-            console.print("\n[bold green]✓ All packages are up to date![/bold green]\n")
-            return
-
-        console.print(
-            f"[bold green]✓ Upgraded {len(upgraded)} package(s)[/bold green]\n"
-        )
-        for pkg in upgraded:
-            console.print(
-                f"  [dim]→[/dim] {pkg.name} {pkg.versions[0] if pkg.versions else ''}"
-            )
-
-        if current:
-            console.print(f"\n[dim]{len(current)} already up-to-date:[/dim]\n")
-            for pkg in current:
-                console.print(
-                    f"  [dim]→ {pkg.name} {pkg.versions[0] if pkg.versions else ''}[/dim]"
+            console.print()
+            with console.status(
+                status="[bold yellow]Upgrading...[/bold yellow]", refresh_per_second=6
+            ):
+                upgraded, current, failures = run_with_task_manager(
+                    coro=repo.upgrade_packages(names, kind)
                 )
 
-        if failures:
-            console.print(f"\n[bold red]✗ {len(failures)} skipped/failed:[/bold red]")
-            for pkg_name, reason in failures:
-                console.print(f"  - {pkg_name}: [dim]{reason}[/dim]")
+            if not upgraded and not failures and not current:
+                console.print(
+                    "\n[bold green]✓ All packages are up to date![/bold green]\n"
+                )
+                return
 
-        console.print()
+            console.print(
+                f"[bold green]✓ Upgraded {len(upgraded)} package(s)[/bold green]\n"
+            )
+            for pkg in upgraded:
+                console.print(
+                    f"  [dim]→[/dim] {pkg.name} {pkg.versions[0] if pkg.versions else ''}"
+                )
+
+            if current:
+                console.print(f"\n[dim]{len(current)} already up-to-date:[/dim]\n")
+                for pkg in current:
+                    console.print(
+                        f"  [dim]→ {pkg.name} {pkg.versions[0] if pkg.versions else ''}[/dim]"
+                    )
+
+            if failures:
+                console.print(
+                    f"\n[bold red]✗ {len(failures)} skipped/failed:[/bold red]"
+                )
+                for pkg_name, reason in failures:
+                    console.print(f"  - {pkg_name}: [dim]{reason}[/dim]")
+
+            console.print()
 
     except PinnedPackageWarning as e:
         console.print(f"\n[bold yellow]⚠ {e.message}[/bold yellow]\n")

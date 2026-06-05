@@ -253,6 +253,27 @@ class CacheManager:
 
         return packages
 
+    async def find_installed(
+        self, name: str, kind: Optional[PackageKind] = None
+    ) -> Optional[Package]:
+        """Return one installed package by name, merging only that record.
+
+        Args:
+            name: Package name or cask token.
+            kind: Optional kind constraint.
+
+        Returns:
+            The merged Package, or None if no installed record matches.
+        """
+        from brewery.core.merge import merge_one
+
+        records: list[InstalledRecord] = await self.installed_records()
+        match: InstalledRecord | None = next(
+            (r for r in records if r.name == name and (kind is None or r.kind == kind)),
+            None,
+        )
+        return merge_one(match, self.catalog) if match is not None else None
+
     def invalidate(self) -> None:
         """Invalidate FS cache so it is rebuilt on next access."""
         global _cached_token, _token_timestamp

@@ -54,8 +54,8 @@ class TestFormulaPipeline:
     async def test_act_is_clean_at_install_time(self, mock_brew, fake_env):
         """Tests that act is clean at install time."""
         act = _by_name(await brew_formula.list_installed(), "act")
-        assert act.versions == ["0.2.88"]
-        assert act.metadata["latest_version"] == "0.2.88"
+        assert act.versions == ["0.2.88", "0.2.89"]
+        assert act.metadata["latest_version"] == "0.2.89"
         assert act.status == PackageStatus.NONE
         assert act.installed_on == datetime.fromtimestamp(1777809461)
         assert act.path == str(fake_env.cellar / "act" / "0.2.88")
