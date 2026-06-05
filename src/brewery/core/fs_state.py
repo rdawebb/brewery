@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -20,7 +19,7 @@ _RECEIPT_NAME = "INSTALL_RECEIPT.json"
 _CASK_METADATA_DIR = ".metadata"
 
 _SIZE_CACHE_FILE = "keg_sizes.json"
-_SIZE_CONCURRENCY = 5
+_DU_BATCH = 256
 
 # Directories where linked kegs/casks are stored (current + legacy)
 _LINKED_DIRS: tuple[Path, ...] = (
@@ -452,22 +451,6 @@ def _epoch_dt(value: object) -> datetime | None:
         return None
 
 
-_size_semaphore: asyncio.Semaphore | None = None
-
-
-def _get_size_semaphore() -> asyncio.Semaphore:
-    """Lazily create the size-check semaphore, bound to the running loop.
-
-    Returns:
-        A semaphore bounding concurrent `du` calls.
-    """
-    global _size_semaphore
-    if _size_semaphore is None:
-        _size_semaphore = asyncio.Semaphore(_SIZE_CONCURRENCY)
-
-    return _size_semaphore
-
-
 async def attach_sizes(
     records: list[InstalledRecord], cache_dir: Path | None = None
 ) -> None:
@@ -480,89 +463,96 @@ async def attach_sizes(
     cache_dir = cache_dir or ensure_cache_dir()
     cached: dict[str, list] = _load_size_cache(cache_dir)
 
-    sizes: list[tuple[int | None, int | None]] = await asyncio.gather(
-        *(_resolve_size(record=r, cached=cached) for r in records)
-    )
-
-    fresh: dict[str, list[int]] = {}
+    # Split into cache hits and the paths that still need measuring
+    mtimes: dict[str, int] = {}  # record.name -> current keg mtime_ns
+    misses: dict[str, Path] = {}  # keg path str -> Path, for the batched du
+    miss_owner: dict[str, str] = {}  # keg path str -> record.name
     hits = 0
-    for record, (size_kb, mtime_ns) in zip(records, sizes):
-        record.size_kb = size_kb
 
-        if size_kb is not None and mtime_ns is not None:
-            fresh[record.name] = [mtime_ns, size_kb]
-            entry = cached.get(record.name)
+    for r in records:
+        if r.path is None:
+            continue
 
-            if entry is not None and entry[0] == mtime_ns:
-                hits += 1
+        keg = Path(r.path)
+        mtime_ns = _safe_mtime_ns(keg)
+        if mtime_ns is None:
+            continue
+
+        mtimes[r.name] = mtime_ns
+        entry = cached.get(r.name)
+        if entry is not None and entry[0] == mtime_ns:
+            r.size_kb = entry[1]  # Unchanged: reuse cached size
+            hits += 1
+
+        else:
+            misses[r.path] = keg
+            miss_owner[r.path] = r.name
+
+    measured: dict[str, int] = await _du_many(list(misses.values()))
+    by_name: dict[str, InstalledRecord] = {r.name: r for r in records}
+    for path_str, size_kb in measured.items():
+        by_name[miss_owner[path_str]].size_kb = size_kb
+
+    # Rebuild the cache from current records (drops uninstalled packages)
+    fresh: dict[str, list[int]] = {}
+    for r in records:
+        if r.size_kb is not None and r.name in mtimes:
+            fresh[r.name] = [mtimes[r.name], r.size_kb]
 
     _save_size_cache(cache_dir=cache_dir, data=fresh)
-    log.info(event="sizes_attached", total=len(records), cache_hits=hits)
+    log.info(
+        event="sizes_attached",
+        total=len(records),
+        cache_hits=hits,
+        measured=len(misses),
+    )
 
 
-async def _resolve_size(
-    record: InstalledRecord, cached: dict[str, list]
-) -> tuple[int | None, int | None]:
-    """Return `(size_kb, mtime_ns)` for a record, reusing the cache on a hit.
-
-    Args:
-        record: The record to size.
-        cached: The loaded size cache.
-
-    Returns:
-        A tuple of the size in KB (or None) and the keg mtime in ns (or None).
-    """
-    if record.path is None:
-        return None, None
-
-    keg = Path(record.path)
-    mtime_ns: int | None = _safe_mtime_ns(keg)
-    if mtime_ns is None:
-        return None, None
-
-    entry = cached.get(record.name)
-    if entry is not None and entry[0] == mtime_ns:
-        return entry[1], mtime_ns  # Unchanged keg: reuse cached size
-
-    return await _du_kb(keg), mtime_ns
-
-
-async def _du_kb(path: Path) -> int | None:
-    """Measure a path's disk usage in KB via ``du -sk``, under the semaphore.
+async def _du_many(paths: list[Path]) -> dict[str, int]:
+    """Measure several paths' disk usage in one (chunked) `du -sk` per batch.
 
     Args:
-        path: The path to measure.
+        paths: Keg/caskroom paths to size.
 
     Returns:
-        The disk usage in KB, or `None` if the measurement failed.
+        Mapping of path string -> size in KB. Paths that `du` could not
+        measure are absent from the result.
     """
-    async with _get_size_semaphore():
+    if not paths:
+        return {}
+
+    sizes: dict[str, int] = {}
+    for i in range(0, len(paths), _DU_BATCH):
+        batch: list[Path] = paths[i : i + _DU_BATCH]
+
         try:
-            out, err, code = await run_capture("du", "-sk", str(object=path))
+            out, err, code = await run_capture(
+                "du", "-sk", *(str(object=p) for p in batch)
+            )
 
         except Exception as e:  # Subprocess spawn/timeout failures
-            log.warning(
-                event="keg_size_error", path=str(object=path), error=str(object=e)
-            )
-            return None
+            log.warning(event="keg_size_error", count=len(batch), error=str(object=e))
+            continue
 
-    if code != 0:
-        log.warning(
-            event="keg_size_failed",
-            path=str(object=path),
-            returncode=code,
-            stderr=err,
-        )
-        return None
+        if code != 0:
+            # Parse partial results if du exits non-zero
+            log.warning(event="keg_size_partial", returncode=code, stderr=err[:160])
 
-    try:
-        return int(out.split()[0])
+        for line in out.splitlines():
+            # Each line is "<kb>\t<path>"; path may contain spaces, so
+            # split only on the first run of whitespace.
+            parts = line.split(maxsplit=1)
+            if len(parts) != 2:
+                continue
 
-    except (ValueError, IndexError):
-        log.warning(
-            event="keg_size_parse_error", path=str(object=path), output=out[:80]
-        )
-        return None
+            kb_str, path_str = parts
+            try:
+                sizes[path_str] = int(kb_str)
+
+            except ValueError:
+                log.warning(event="keg_size_parse_error", line=line[:80])
+
+    return sizes
 
 
 def _load_size_cache(cache_dir: Path) -> dict[str, list]:

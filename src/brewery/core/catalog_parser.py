@@ -241,6 +241,7 @@ def _parse_formula(
         *(obj.get("aliases") or []),
         *(obj.get("oldnames") or []),
     ]
+
     obj_aliases: list[dict[str, Any]] = [
         {"alias": alias, "name": name} for alias in alias_names
     ]

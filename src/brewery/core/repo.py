@@ -9,7 +9,6 @@ from brewery.core.catalog import Catalog
 from brewery.core.config import BreweryENV, get_brewery_env
 from brewery.core.decorators import log_operation
 from brewery.core.errors import PackageNotFoundError
-from brewery.core.merge import catalog_info, search_packages
 from brewery.core.models import Package, PackageKind, PackageStatus
 from brewery.providers import base, brew_cask, brew_formula
 
@@ -43,6 +42,10 @@ class Repository:
         )
         self.formula = formula_backend
         self.cask = cask_backend
+
+    def close(self) -> None:
+        """Close the catalog connection."""
+        self.catalog.close()
 
     @log_operation(event_prefix="get_all_installed", log_args=["kind_filter"])
     async def get_all_installed(
@@ -87,6 +90,8 @@ class Repository:
         if match is not None:
             return match
 
+        from brewery.core.merge import catalog_info
+
         catalog_pkg: Package | None = catalog_info(catalog=self.catalog, name=name)
         if catalog_pkg is not None and (kind is None or catalog_pkg.kind == kind):
             return catalog_pkg
@@ -103,6 +108,8 @@ class Repository:
         Returns:
             A list of Package instances matching the search term.
         """
+        from brewery.core.merge import search_packages
+
         installed: dict[str, Package] = {
             p.name: p for p in await self.cache_mgr.installed_packages()
         }
@@ -211,16 +218,23 @@ class Repository:
 
         self.cache_mgr.invalidate()
 
-        still_present: set[str] = {
-            p.name for p in await self.cache_mgr.installed_packages()
-        }
-        attempted: list[str] = formula_names + cask_names
-        failed_removals = [n for n in attempted if n in still_present]
-        failures.extend((n, "uninstall failed") for n in failed_removals)
+        removed: list[str] = []
+        failed: list[str] = []
 
-        succeeded = len(attempted) - len(failed_removals)
+        for pkg_names, k in [
+            (formula_names, PackageKind.FORMULA),
+            (cask_names, PackageKind.CASK),
+        ]:
+            if not pkg_names:
+                continue
 
-        return succeeded, failures
+            r, f = await self._verify_removed(pkg_names, k)
+            removed += r
+            failed += f
+
+        failures.extend((n, "uninstall failed") for n in failed)
+
+        return len(removed), failures
 
     async def _verify_removed(
         self, names: list[str], kind: PackageKind

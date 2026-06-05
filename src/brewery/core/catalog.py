@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import orjson
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import orjson
 
 from brewery.core.config import CACHE_DIR, ensure_cache_dir
 from brewery.core.logging import BreweryLogger, get_logger
@@ -302,7 +303,7 @@ class Catalog:
         return conn
 
     def _ensure_schema(self) -> None:
-        """Create the schema on a fresh database, or note a version mismatch."""
+        """Create the schema on a fresh database, or recreate on a version mismatch."""
         exists = self._conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
         ).fetchone()
@@ -318,6 +319,21 @@ class Catalog:
                 found=found,
                 expected=SCHEMA_VERSION,
             )
+
+            # Drop tables and recreate the schema on version mismatch
+            self._drop_all()
+            self._create_schema()
+
+    def _drop_all(self) -> None:
+        """Drop every catalog object so _create_schema can rebuild from clean."""
+        objects = self._conn.execute(
+            "SELECT type, name FROM sqlite_master "
+            "WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+
+        with self._conn:
+            for obj in objects:
+                self._conn.execute(f'DROP {obj["type"]} IF EXISTS "{obj["name"]}"')
 
     def _create_schema(self) -> None:
         """Build all tables/indexes and stamp the schema version."""
@@ -593,7 +609,13 @@ class Catalog:
             return None
 
     def close(self) -> None:
-        """Close the underlying connection."""
+        """Checkpoint the WAL and close the underlying connection."""
+        try:
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+        except sqlite3.Error as e:
+            log.debug(event="catalog_checkpoint_failed", error=str(object=e))
+
         self._conn.close()
 
     def __enter__(self) -> Catalog:

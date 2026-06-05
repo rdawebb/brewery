@@ -19,7 +19,6 @@ from brewery.core.fs_state import (
     scan_installed,
 )
 from brewery.core.logging import BreweryLogger, get_logger
-from brewery.core.merge import merge
 from brewery.core.models import Package, PackageKind
 
 log: BreweryLogger = get_logger(name=__name__)
@@ -66,14 +65,12 @@ class Cache:
         """
         global _cached_token, _token_timestamp
         now: float = time.time()
-        if _cached_token and (now - _token_timestamp) < 1:
-            return _cached_token
 
         brewery: BreweryENV = get_brewery_env()
 
         def mtime(p: Path) -> int:
             try:
-                return int(p.stat().st_mtime)
+                return p.stat().st_mtime_ns
 
             except FileNotFoundError:
                 return 0
@@ -244,6 +241,8 @@ class CacheManager:
         Returns:
             A list of Package instances, sorted by kind, then name.
         """
+        from brewery.core.merge import merge
+
         records: list[InstalledRecord] = await self.installed_records()
         packages: list[Package] = merge(records, self.catalog)
 
@@ -256,5 +255,9 @@ class CacheManager:
 
     def invalidate(self) -> None:
         """Invalidate FS cache so it is rebuilt on next access."""
+        global _cached_token, _token_timestamp
+        _cached_token = None
+        _token_timestamp = 0
+
         self.cache.delete(self._RECORDS_KEY)
         log.debug(event="installed_records_invalidated")
