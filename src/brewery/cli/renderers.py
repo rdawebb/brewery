@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import orjson
 import shutil
 from typing import Any, Iterable
 
+import orjson
 import readchar
 from rich import box
 from rich.console import Console
@@ -290,7 +290,7 @@ def package_details(pkg: Package) -> Table:
     t.add_row("Size (MB)", f"{(pkg.size_kb or 0) / 1024:.2f}")
 
     if pkg.deps:
-        t.add_row("Depends on", ", ".join(d.name for d in pkg.deps))
+        t.add_row("Depends on", ", ".join(d.name for d in pkg.deps), style="dim")
     if pkg.used_by:
         t.add_row("Used by", ", ".join(pkg.used_by), style="dim")
     if pkg.tap:

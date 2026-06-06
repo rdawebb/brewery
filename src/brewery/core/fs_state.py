@@ -665,8 +665,3 @@ def _record_from_cache_dict(data: dict) -> InstalledRecord:
         used_by=data.get("used_by", []),
         size_kb=data.get("size_kb"),
     )
-
-
-# Public serialisation API for the FS-record cache
-records_to_cache = _record_to_cache_dict
-record_from_cache = _record_from_cache_dict

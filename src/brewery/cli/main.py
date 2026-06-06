@@ -174,7 +174,9 @@ def list_pkgs(
                     refresh_per_second=6,
                 ):
                     repo.cache_mgr.invalidate()
-                    pkgs = run_with_task_manager(coro=repo.get_all_installed(kind=kind))
+                    pkgs = run_with_task_manager(
+                        coro=repo.get_all_installed(kind_filter=kind)
+                    )
             else:
                 pkgs = run_with_task_manager(
                     coro=repo.get_all_installed(kind_filter=kind)

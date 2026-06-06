@@ -167,15 +167,6 @@ class CaskRow:
     disabled: bool
 
 
-def _bool(value: int) -> bool:
-    """Decode a SQLite integer flag (0/1) to a Python bool.
-
-    Returns:
-        True if value is 1, False if value is 0.
-    """
-    return bool(value)
-
-
 def _json_or_none(value: str | None) -> Any | None:
     """Decode a stored JSON TEXT column, tolerating NULL and malformed data.
 
@@ -213,15 +204,15 @@ def _formula_from_row(row: sqlite3.Row) -> FormulaRow:
         version=row["version"],
         revision=row["revision"],
         version_scheme=row["version_scheme"],
-        keg_only=_bool(row["keg_only"]),
-        has_service=_bool(row["has_service"]),
-        post_install=_bool(row["post_install"]),
+        keg_only=bool(row["keg_only"]),
+        has_service=bool(row["has_service"]),
+        post_install=bool(row["post_install"]),
         bottle_url=row["bottle_url"],
         bottle_sha256=row["bottle_sha256"],
         bottle_cellar=row["bottle_cellar"],
         bottle_rebuild=row["bottle_rebuild"],
-        deprecated=_bool(row["deprecated"]),
-        disabled=_bool(row["disabled"]),
+        deprecated=bool(row["deprecated"]),
+        disabled=bool(row["disabled"]),
     )
 
 
@@ -243,11 +234,11 @@ def _cask_from_row(row: sqlite3.Row) -> CaskRow:
         version=row["version"],
         sha256=row["sha256"],
         url=row["url"],
-        auto_updates=_bool(row["auto_updates"]),
+        auto_updates=bool(row["auto_updates"]),
         artifacts=_json_or_none(row["artifacts"]),
         depends_on=_json_or_none(row["depends_on"]),
-        deprecated=_bool(row["deprecated"]),
-        disabled=_bool(row["disabled"]),
+        deprecated=bool(row["deprecated"]),
+        disabled=bool(row["disabled"]),
     )
 
 
