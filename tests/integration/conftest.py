@@ -202,10 +202,8 @@ def mock_brew(monkeypatch, fixture_text, fake_env) -> list[tuple[str, ...]]:
 
     import brewery.core.shell as shell
     import brewery.providers.brew_cask as brew_cask
-    import brewery.providers.package_builder as package_builder
 
     monkeypatch.setattr(shell, "run_capture", fake_run_capture)
-    monkeypatch.setattr(package_builder, "run_capture", fake_run_capture)
     monkeypatch.setattr(brew_cask, "run_capture", fake_run_capture)
 
     return calls

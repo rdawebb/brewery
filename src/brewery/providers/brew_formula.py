@@ -2,52 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
+from types import SimpleNamespace
 
-from brewery.core.decorators import log_operation
 from brewery.core.logging import BreweryLogger, get_logger
-from brewery.core.models import Package, PackageKind
-from brewery.core.shell import run_brew_command, run_json
-from brewery.providers.package_builder import batch_info, build_packages_batch
+from brewery.core.shell import run_brew_command
 
 log: BreweryLogger = get_logger(name=__name__)
-
-
-@log_operation(event_prefix="list_installed_formulae")
-async def list_installed() -> list[Package]:
-    """List installed Homebrew formulae.
-
-    Returns:
-        A list of installed Package instances.
-    """
-    data: dict[str, Any] = await run_json("brew", "info", "--json=v2", "--installed")
-    items: list[dict[str, Any]] = data.get("formulae", [])
-
-    pkgs: list[Package] = await build_packages_batch(
-        items=items, kind=PackageKind.FORMULA
-    )
-
-    return pkgs
-
-
-@log_operation(event_prefix="_formulae_package_info", log_args=["names"])
-async def info(names: list[str]) -> list[Package]:
-    """Get Homebrew formula info by name(s).
-
-    Args:
-        names: Name(s) of the formula.
-
-    Returns:
-        Package instance(s) with detailed information.
-    """
-    if not names:
-        return []
-
-    pkgs: list[Package] = await batch_info(
-        names=names, flags=[], json_key="formulae", kind=PackageKind.FORMULA
-    )
-
-    return pkgs
 
 
 async def install(names: list[str]) -> list[str]:
@@ -102,14 +62,4 @@ async def upgrade(names: list[str]) -> list[str]:
     return names
 
 
-class _Backend:
-    """Backend for Homebrew formulae."""
-
-    list_installed = staticmethod(list_installed)
-    info = staticmethod(info)
-    install = staticmethod(install)
-    uninstall = staticmethod(uninstall)
-    upgrade = staticmethod(upgrade)
-
-
-backend = _Backend()
+backend = SimpleNamespace(install=install, uninstall=uninstall, upgrade=upgrade)
