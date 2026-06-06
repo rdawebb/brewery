@@ -1,6 +1,5 @@
 """Daemon CLI sub app for managing the brewery background daemon."""
 
-import importlib.resources
 import shutil
 import subprocess
 import sys
@@ -20,8 +19,13 @@ console = Console(emoji=False, highlight=False)
 
 
 def _plist_source() -> Path:
-    """Resolve the bundled plist path."""
-    # importlib.resources handles both dev and installed (wheel) layouts
+    """Resolve the bundled plist path.
+
+    Returns:
+        The path to the bundled plist file.
+    """
+    import importlib.resources
+
     ref = importlib.resources.files("brewery.scripts").joinpath(PLIST_NAME)
     with importlib.resources.as_file(ref) as p:
         return Path(p)
@@ -117,9 +121,11 @@ def status() -> None:
         capture_output=True,
         text=True,
     )
+
     if result.returncode == 0:
         console.print("\n✓ Background refresh is active", style="bold green")
         console.print("- Use `brewery daemon stop` to deactivate\n", style="dim")
+
     else:
         console.print("\n✗ Background refresh is not active", style="bold red")
         console.print("- Use `brewery daemon start` to activate\n", style="dim")

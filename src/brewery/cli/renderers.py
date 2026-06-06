@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Iterable
 
 import orjson
 import readchar
@@ -45,7 +45,7 @@ def _load_width_cache() -> None:
     """Load pre-computed column widths from cache."""
     try:
         if WIDTHS_CACHE.exists():
-            data: Any = orjson.loads(WIDTHS_CACHE.read_bytes())
+            data: dict[int, tuple[int, ...]] = orjson.loads(WIDTHS_CACHE.read_bytes())
             _width_cache.update({int(k): tuple(v) for k, v in data.items()})
 
     except Exception:

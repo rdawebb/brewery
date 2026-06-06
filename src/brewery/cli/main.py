@@ -7,12 +7,11 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, Awaitable, List, Optional
+from typing import Any, Coroutine, Optional
 
 from rich.console import Console
 from typer_extensions import ExtendedTyper
 
-from brewery.cli.renderers import package_table
 from brewery.core.errors import (
     EXIT_SYSTEM_ERROR,
     EXIT_TRANSIENT_ERROR,
@@ -30,7 +29,6 @@ from brewery.core.errors import (
 from brewery.core.logging import BreweryLogger, configure_logging, get_logger
 from brewery.core.models import Package, PackageKind
 from brewery.core.repo import Repository
-from brewery.core.task_manager import BackgroundTaskManager, get_task_manager
 from brewery.daemon.daemon import daemon_app
 
 log: BreweryLogger = get_logger(name=__name__)
@@ -153,7 +151,7 @@ def _repository() -> Iterator[Repository]:
         repo.close()
 
 
-def run_with_task_manager(coro: Awaitable) -> Any:
+def _async_run(coro: Coroutine) -> Any:
     """Run a coroutine with the task manager.
 
     Args:
@@ -164,14 +162,7 @@ def run_with_task_manager(coro: Awaitable) -> Any:
     """
     import asyncio
 
-    async def main_with_tasks() -> None:
-        result = await coro
-        task_manager: BackgroundTaskManager = get_task_manager()
-        await task_manager.wait_for_all()
-
-        return result
-
-    return asyncio.run(main=main_with_tasks())
+    return asyncio.run(coro)
 
 
 @app.callback()
@@ -193,7 +184,7 @@ def list_pkgs(
         kind: Filter by package kind.
         refresh: Refresh cache before listing packages.
     """
-    from brewery.cli.renderers import _terminal_size, paginate
+    from brewery.cli.renderers import _terminal_size, package_table, paginate
 
     try:
         with _repository() as repo:
@@ -205,13 +196,9 @@ def list_pkgs(
                     refresh_per_second=6,
                 ):
                     repo.cache_mgr.invalidate()
-                    pkgs = run_with_task_manager(
-                        coro=repo.get_all_installed(kind_filter=kind)
-                    )
+                    pkgs = _async_run(coro=repo.get_all_installed(kind_filter=kind))
             else:
-                pkgs = run_with_task_manager(
-                    coro=repo.get_all_installed(kind_filter=kind)
-                )
+                pkgs = _async_run(coro=repo.get_all_installed(kind_filter=kind))
 
             _, term_height = _terminal_size()
             page_size: int = term_height - 6  # header + footer buffer
@@ -242,7 +229,7 @@ def info(
 
     try:
         with _repository() as repo:
-            pkg: Package = run_with_task_manager(coro=repo.get_details(name, kind))
+            pkg: Package = _async_run(coro=repo.get_details(name, kind))
 
             console.print(package_details(pkg))
 
@@ -259,7 +246,8 @@ def search(term: str) -> None:
     """
     try:
         with _repository() as repo:
-            pkgs: List[Package] = run_with_task_manager(coro=repo.search(term))
+            pkgs: list[Package] = _async_run(coro=repo.search(term))
+            from brewery.cli.renderers import package_table
 
             console.print(package_table(pkgs))
 
@@ -294,7 +282,7 @@ def install(
             with console.status(
                 status="[bold green]Installing...", refresh_per_second=6
             ):
-                installed, failures = run_with_task_manager(
+                installed, failures = _async_run(
                     coro=repo.install_packages(names, kind)
                 )
 
@@ -339,9 +327,7 @@ def uninstall(
             with console.status(
                 status=f"[bold yellow]Uninstalling...{pkg_str}", refresh_per_second=6
             ):
-                count, failures = run_with_task_manager(
-                    coro=repo.uninstall_packages(names, kind)
-                )
+                count, failures = _async_run(coro=repo.uninstall_packages(names, kind))
 
             console.print(f"✓ Uninstalled {count} package(s)")
             for name, reason in failures:
@@ -378,16 +364,18 @@ def outdated(
                     status="[bold yellow]Checking for updates...[/bold yellow]",
                     refresh_per_second=6,
                 ):
-                    pkgs = run_with_task_manager(coro=_live_outdated(repo))
+                    pkgs = _async_run(coro=repo.get_outdated(live=True))
 
             else:
-                pkgs = run_with_task_manager(coro=repo.get_outdated(live=False))
+                pkgs = _async_run(coro=repo.get_outdated(live=False))
 
             if not pkgs:
                 console.print(
                     "\n[bold green]✓ All packages are up to date![/bold green]\n"
                 )
                 return
+
+            from brewery.cli.renderers import package_table
 
             console.print(package_table(pkgs))
             console.print(
@@ -398,15 +386,6 @@ def outdated(
 
     except Exception as e:
         sys.exit(handle_error(error=e))
-
-
-async def _live_outdated(repo: Repository) -> list[Package]:
-    """--check: refresh catalog and get outdated packages."""
-    from brewery.daemon.catalog_refresh import refresh_catalog
-
-    await refresh_catalog(catalog=repo.catalog)
-
-    return await repo.get_outdated(live=True)
 
 
 @app.command_with_aliases(aliases=["u", "up"])
@@ -436,7 +415,7 @@ def upgrade(
                         return
 
                 else:
-                    outdated: list[Package] = run_with_task_manager(
+                    outdated: list[Package] = _async_run(
                         coro=repo.get_outdated(live=False)
                     )
                     if not outdated:
@@ -444,6 +423,8 @@ def upgrade(
                             "\n[bold green]✓ All packages are up to date![/bold green]\n"
                         )
                         return
+
+                    from brewery.cli.renderers import package_table
 
                     console.print(package_table(pkgs=outdated))
 
@@ -458,7 +439,7 @@ def upgrade(
             with console.status(
                 status="[bold yellow]Upgrading...[/bold yellow]", refresh_per_second=6
             ):
-                upgraded, current, failures = run_with_task_manager(
+                upgraded, current, failures = _async_run(
                     coro=repo.upgrade_packages(names, kind)
                 )
 

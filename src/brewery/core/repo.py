@@ -10,7 +10,7 @@ from brewery.core.config import BreweryENV, get_brewery_env
 from brewery.core.decorators import log_operation
 from brewery.core.errors import PackageNotFoundError
 from brewery.core.models import Package, PackageKind, PackageStatus
-from brewery.providers import base, brew_cask, brew_formula
+from brewery.providers import brew_cask, brew_formula
 
 
 class Repository:
@@ -21,8 +21,8 @@ class Repository:
         cache: Cache | None = None,
         catalog: Catalog | None = None,
         cache_mgr: CacheManager | None = None,
-        formula_backend: base.PackageBackend = brew_formula.backend,
-        cask_backend: base.PackageBackend = brew_cask.backend,
+        formula_backend=brew_formula.backend,
+        cask_backend=brew_cask.backend,
         env: BreweryENV | None = None,
     ) -> None:
         """Initialise the repository.
@@ -118,7 +118,9 @@ class Repository:
             Packages flagged OUTDATED.
         """
         if live:
-            self.cache_mgr.invalidate()
+            from brewery.daemon.catalog_refresh import refresh_catalog
+
+            await refresh_catalog(catalog=self.catalog)
 
         packages: list[Package] = await self.cache_mgr.installed_packages()
 

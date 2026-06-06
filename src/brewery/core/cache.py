@@ -174,6 +174,13 @@ class Cache:
                 path=str(object=f),
             ) from e
 
+    def invalidate_token(self) -> None:
+        """Invalidate the current cache token, forcing a refresh on the next read."""
+        global _cached_token, _token_timestamp
+
+        _cached_token = None
+        _token_timestamp = 0
+
     def delete(self, key: str) -> None:
         """Delete a cached value by key, if it exists."""
         try:
@@ -274,9 +281,6 @@ class CacheManager:
 
     def invalidate(self) -> None:
         """Invalidate FS cache so it is rebuilt on next access."""
-        global _cached_token, _token_timestamp
-        _cached_token = None
-        _token_timestamp = 0
-
+        self.cache.invalidate_token()
         self.cache.delete(self._RECORDS_KEY)
         log.debug(event="installed_records_invalidated")

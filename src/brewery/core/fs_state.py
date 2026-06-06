@@ -124,9 +124,7 @@ def _scan_casks(env: BreweryENV) -> list[InstalledRecord]:
     records: list[InstalledRecord] = []
     for token_dir in _children(env.caskroom):
         # `.metadata` is excluded by _children (hidden), so any remaining child is a version directory
-        version_dirs: list[Path] = [
-            d for d in _children(token_dir) if d.name != _CASK_METADATA_DIR
-        ]
+        version_dirs = _children(token_dir)
 
         if not version_dirs:
             log.warning(event="cask_no_version_dir", token=token_dir.name)
