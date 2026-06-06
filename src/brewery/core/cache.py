@@ -11,15 +11,9 @@ import orjson
 from brewery.core.catalog import Catalog
 from brewery.core.config import BreweryENV, ensure_cache_dir, get_brewery_env
 from brewery.core.errors import CacheError
-from brewery.core.fs_state import (
-    InstalledRecord,
-    _record_from_cache_dict,
-    _record_to_cache_dict,
-    attach_sizes,
-    scan_installed,
-)
+from brewery.core.fs_state import attach_sizes, scan_installed
 from brewery.core.logging import BreweryLogger, get_logger
-from brewery.core.models import Package, PackageKind
+from brewery.core.models import InstalledRecord, Package, PackageKind
 
 log: BreweryLogger = get_logger(name=__name__)
 
@@ -226,12 +220,15 @@ class CacheManager:
         """
         cached: Any = self.cache.get(self._RECORDS_KEY)
         if cached is not None:
-            return [_record_from_cache_dict(d) for d in cached]
+            return [InstalledRecord._record_from_cache_dict(d) for d in cached]
 
         records: list[InstalledRecord] = scan_installed(env=self.env)
         await attach_sizes(records=records)
 
-        self.cache.set(self._RECORDS_KEY, [_record_to_cache_dict(r) for r in records])
+        self.cache.set(
+            self._RECORDS_KEY,
+            [InstalledRecord._record_to_cache_dict(r) for r in records],
+        )
 
         return records
 

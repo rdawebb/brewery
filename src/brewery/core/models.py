@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, Flag, auto
 from typing import Any
@@ -65,38 +65,6 @@ class Dependency:
     build: bool = False
     test: bool = False
 
-    @classmethod
-    def from_dict(cls, data: dict) -> "Dependency":
-        return cls(
-            name=data["name"],
-            optional=data.get("optional", False),
-            build=data.get("build", False),
-            test=data.get("test", False),
-        )
-
-
-def to_serializable(obj: Any) -> Any:
-    """Convert an object to a serializable format.
-
-    Args:
-        obj: The object to convert.
-
-    Returns:
-        A serializable representation of the object.
-    """
-    if isinstance(obj, datetime):
-        return obj.isoformat()
-    if isinstance(obj, Enum):
-        return obj.value
-    if isinstance(obj, (list, tuple)):
-        return [to_serializable(obj=item) for item in obj]
-    if isinstance(obj, dict):
-        return {key: to_serializable(obj=value) for key, value in obj.items()}
-    if is_dataclass(obj) and not isinstance(obj, type):
-        return {key: to_serializable(obj=value) for key, value in asdict(obj).items()}
-
-    return obj
-
 
 @dataclass
 class Package:
@@ -115,28 +83,90 @@ class Package:
     path: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    def to_serializable_dict(self) -> dict[str, Any]:
-        """Convert the Package instance to a serializable dictionary."""
-        return to_serializable(obj=self)
+
+@dataclass(slots=True)
+class InstalledRecord:
+    """Filesystem-derived view of a single installed package."""
+
+    name: str
+    kind: PackageKind
+    version: str
+    revision: int = 0
+    version_scheme: int | None = None
+    installed_on: datetime | None = None
+    # Receipt flags, captured now for a future `leaves`/autoremove
+    installed_on_request: bool = False
+    installed_as_dependency: bool = False
+    deps: list[str] = field(default_factory=list)
+    head: bool = False
+    tap: str | None = None
+    path: str | None = None  # Absolute path to the active keg/caskroom version
+    stale_versions: list[str] = field(default_factory=list)
+    linked: bool = False
+    pinned: bool = False
+    used_by: list[str] = field(default_factory=list)  # Installed reverse-deps
+    size_kb: int | None = None  # Filled by attach_sizes()
 
     @staticmethod
-    def package_from_dict(data: dict[str, Any]) -> Package:
-        """Create a Package instance from a dictionary."""
-        return Package(
+    def _record_to_cache_dict(record: InstalledRecord) -> dict:
+        """Serialise an InstalledRecord to a JSON-safe dict for the record cache.
+
+        Args:
+            record: The InstalledRecord to serialise.
+
+        Returns:
+            A JSON-safe dict representing the record.
+        """
+        return {
+            "name": record.name,
+            "kind": record.kind.value,
+            "version": record.version,
+            "revision": record.revision,
+            "version_scheme": record.version_scheme,
+            "installed_on": record.installed_on.isoformat()
+            if record.installed_on
+            else None,
+            "installed_on_request": record.installed_on_request,
+            "installed_as_dependency": record.installed_as_dependency,
+            "deps": record.deps,
+            "head": record.head,
+            "tap": record.tap,
+            "path": record.path,
+            "stale_versions": record.stale_versions,
+            "linked": record.linked,
+            "pinned": record.pinned,
+            "used_by": record.used_by,
+            "size_kb": record.size_kb,
+        }
+
+    @staticmethod
+    def _record_from_cache_dict(data: dict) -> InstalledRecord:
+        """Rebuild an InstalledRecord from its cached dict.
+
+        Args:
+            data: The cached dict representing the record.
+
+        Returns:
+            The rebuilt InstalledRecord.
+        """
+        installed_on = data.get("installed_on")
+
+        return InstalledRecord(
             name=data["name"],
-            kind=PackageKind(value=data["kind"]),
-            versions=data.get("versions", []),
-            desc=data.get("desc"),
-            status=PackageStatus(value=data.get("status", 0)),
-            installed_on=(
-                datetime.fromisoformat(data["installed_on"])
-                if data.get("installed_on")
-                else None
-            ),
-            size_kb=data.get("size_kb"),
-            deps=[Dependency.from_dict(dep) for dep in data.get("deps", [])],
-            used_by=data.get("used_by", []),
+            kind=PackageKind(data["kind"]),
+            version=data["version"],
+            revision=data.get("revision", 0),
+            version_scheme=data.get("version_scheme"),
+            installed_on=datetime.fromisoformat(installed_on) if installed_on else None,
+            installed_on_request=data.get("installed_on_request", False),
+            installed_as_dependency=data.get("installed_as_dependency", False),
+            deps=data.get("deps", []),
+            head=data.get("head", False),
             tap=data.get("tap"),
             path=data.get("path"),
-            metadata=data.get("metadata", {}),
+            stale_versions=data.get("stale_versions", []),
+            linked=data.get("linked", False),
+            pinned=data.get("pinned", False),
+            used_by=data.get("used_by", []),
+            size_kb=data.get("size_kb"),
         )
