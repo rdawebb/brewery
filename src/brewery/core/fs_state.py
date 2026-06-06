@@ -408,7 +408,7 @@ def _mtime_dt(path: Path) -> datetime | None:
         return None
 
 
-def _epoch_dt(value: object) -> datetime | None:
+def _epoch_dt(value: int | float | str | None) -> datetime | None:
     """Convert a receipt epoch value to a datetime, tolerating bad input.
 
     Args:
@@ -418,7 +418,8 @@ def _epoch_dt(value: object) -> datetime | None:
         Datetime corresponding to the receipt epoch value, or None if it cannot be converted.
     """
     try:
-        return datetime.fromtimestamp(float(value))  # ty: ignore[invalid-argument-type]
+        if value is not None:
+            return datetime.fromtimestamp(float(value))
 
     except (TypeError, ValueError, OSError):
         return None

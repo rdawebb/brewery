@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 import subprocess
 import sys
@@ -160,8 +161,6 @@ def _async_run(coro: Coroutine) -> Any:
     Returns:
         The result of the coroutine.
     """
-    import asyncio
-
     return asyncio.run(coro)
 
 

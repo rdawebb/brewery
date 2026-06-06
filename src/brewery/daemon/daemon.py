@@ -1,5 +1,6 @@
 """Daemon CLI sub app for managing the brewery background daemon."""
 
+import os
 import shutil
 import subprocess
 import sys
@@ -16,6 +17,24 @@ PLIST_DEST = LAUNCH_AGENTS / PLIST_NAME
 daemon_app = ExtendedTyper(help="Manage the brewery background refresh daemon.")
 
 console = Console(emoji=False, highlight=False)
+
+
+def _gui_domain() -> str:
+    """Return the launchd GUI domain target for the current user.
+
+    Returns:
+        The GUI domain for the current user.
+    """
+    return f"gui/{os.getuid()}"
+
+
+def _service_target() -> str:
+    """Return the fully-qualified service target for the daemon.
+
+    Returns:
+        The service target for the daemon.
+    """
+    return f"{_gui_domain()}/{PLIST_LABEL}"
 
 
 def _plist_source() -> Path:
@@ -62,31 +81,28 @@ def _patch_executable_paths(plist_path: Path) -> None:
 
 
 @daemon_app.command_with_aliases(aliases=["a", "add"])
-def start(
-    force: bool = daemon_app.Option(
-        False, "--force", "-f", help="Overwrite existing daemon file."
-    ),
-) -> None:
-    """Activate the background refresh daemon.
-
-    Args:
-        force: Whether to overwrite an existing plist file.
-    """
+def start() -> None:
+    """Activate the background refresh daemon."""
     LAUNCH_AGENTS.mkdir(parents=True, exist_ok=True)
 
-    if PLIST_DEST.exists() and not force:
-        console.print(
-            f"\nDaemon already installed at {PLIST_DEST}. Use --force to reinstall.",
-            style="bold yellow",
-        )
-        sys.exit(1)
+    # If already bootstrapped, cycle it out first
+    already_running = (
+        subprocess.run(
+            ["launchctl", "print", _service_target()],
+            capture_output=True,
+        ).returncode
+        == 0
+    )
+
+    if already_running:
+        subprocess.run(["launchctl", "bootout", _service_target()])
 
     shutil.copy2(_plist_source(), PLIST_DEST)
     _patch_executable_paths(PLIST_DEST)
 
-    result = subprocess.run(["launchctl", "load", "-w", str(PLIST_DEST)])
+    result = subprocess.run(["launchctl", "bootstrap", _gui_domain(), str(PLIST_DEST)])
     if result.returncode != 0:
-        console.print("launchctl load failed.", style="bold red")
+        console.print("launchctl bootstrap failed.", style="bold red")
         sys.exit(result.returncode)
 
     console.print(
@@ -101,7 +117,7 @@ def stop() -> None:
         console.print("\nDaemon is not installed\n", style="bold yellow")
         sys.exit(1)
 
-    subprocess.run(["launchctl", "unload", "-w", str(PLIST_DEST)])
+    subprocess.run(["launchctl", "bootout", _service_target()])
     PLIST_DEST.unlink()
     console.print(f"\n✓ Daemon removed ({PLIST_LABEL})\n", style="bold green")
 
@@ -117,7 +133,7 @@ def restart() -> None:
 def status() -> None:
     """Check whether the daemon is currently active."""
     result = subprocess.run(
-        ["launchctl", "list", PLIST_LABEL],
+        ["launchctl", "print", _service_target()],
         capture_output=True,
         text=True,
     )

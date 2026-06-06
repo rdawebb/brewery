@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import orjson
 import os
 import time
-from asyncio.subprocess import Process
-from typing import Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional
+
+import orjson
+
+if TYPE_CHECKING:
+    from asyncio.subprocess import Process
 
 from brewery.core.decorators import retry_on_transient
 from brewery.core.errors import (

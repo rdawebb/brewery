@@ -117,7 +117,7 @@ def retry_on_transient(
 
     def decorator(func: F) -> F:
         """Decorator to apply retry logic to the function."""
-        if not asyncio.iscoroutinefunction(func):
+        if not inspect.iscoroutinefunction(func):
             raise TypeError("retry_on_transient only supports async functions")
 
         @functools.wraps(wrapped=func)
