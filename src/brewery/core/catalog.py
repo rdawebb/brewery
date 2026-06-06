@@ -9,14 +9,14 @@ from typing import Any
 
 import orjson
 
-from brewery.core.config import CACHE_DIR, ensure_cache_dir
+from brewery.core.config import ensure_cache_dir
 from brewery.core.logging import BreweryLogger, get_logger
 
 log: BreweryLogger = get_logger(name=__name__)
 
 SCHEMA_VERSION = 1
 
-_DEFAULT_DB_PATH: Path = CACHE_DIR / "catalog.db"
+_DEFAULT_DB_PATH: Path = ensure_cache_dir() / "catalog.db"
 
 _SCHEMA: str = """
 CREATE TABLE formula (

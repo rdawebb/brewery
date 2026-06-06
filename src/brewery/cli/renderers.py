@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+from pathlib import Path
 from typing import Any, Iterable
 
 import orjson
@@ -11,7 +12,6 @@ from rich import box
 from rich.console import Console
 from rich.table import Table
 
-from brewery.core.cache import WIDTHS_CACHE
 from brewery.core.config import ensure_cache_dir
 from brewery.core.models import Package, PackageStatus
 
@@ -33,6 +33,8 @@ COLUMN_DEFINITIONS: list[dict] = [
     dict(header="Size (MB)", justify="right"),
     dict(header="Installed On", style="dim"),
 ]
+
+WIDTHS_CACHE: Path = ensure_cache_dir() / "column_widths.json"
 
 # Terminal width mapped to column headers
 _width_cache: dict[int, tuple[int, ...]] = {}

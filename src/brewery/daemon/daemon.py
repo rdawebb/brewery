@@ -22,7 +22,8 @@ console = Console(emoji=False, highlight=False)
 def _plist_source() -> Path:
     """Resolve the bundled plist path."""
     # importlib.resources handles both dev and installed (wheel) layouts
-    with importlib.resources.path("brewery.scripts", PLIST_NAME) as p:
+    ref = importlib.resources.files("brewery.scripts").joinpath(PLIST_NAME)
+    with importlib.resources.as_file(ref) as p:
         return Path(p)
 
 

@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any, Self, TypeVar
+from typing import Any, Self
 
 from brewery.core.logging import BreweryLogger, get_logger
 
 log: BreweryLogger = get_logger(name=__name__)
-
-R = TypeVar(name="R")
-AR = TypeVar(name="AR")
 
 # Exit Codes
 EXIT_SUCCESS = 0
@@ -395,10 +392,16 @@ def format_error_message(error: BrewError) -> str:
     Returns:
         A formatted string message for CLI display.
     """
-    template: str = ERROR_TEMPLATES.get(type(error), ERROR_TEMPLATES[BrewError])
+    for cls in type(error).__mro__:
+        if issubclass(cls, BrewError) and cls in ERROR_TEMPLATES:
+            template = ERROR_TEMPLATES[cls]
+            break
+    else:
+        template = ERROR_TEMPLATES[BrewError]
 
     try:
         return template.format(message=error.message, **getattr(error, "context", {}))
+
     except KeyError:
         return f"❌ {error.message}"
 

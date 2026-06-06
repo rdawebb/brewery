@@ -113,7 +113,7 @@ def configure_logging(
             os.environ.get("BREWERY_LOG_DIR", Path.home() / ".brewery" / "logs")
         )
         log_dir.mkdir(parents=True, exist_ok=True)
-        log_file: Path = log_dir / "backend.log"
+        log_file = log_dir / "backend.log"
 
     formatter = logging.Formatter(
         fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",

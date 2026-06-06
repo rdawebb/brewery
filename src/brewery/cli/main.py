@@ -13,7 +13,6 @@ from rich.console import Console
 from typer_extensions import ExtendedTyper
 
 from brewery.cli.renderers import package_table
-from brewery.core.config import KNOWN_COMMANDS
 from brewery.core.errors import (
     EXIT_SYSTEM_ERROR,
     EXIT_TRANSIENT_ERROR,
@@ -44,6 +43,38 @@ app.add_typer(
 )
 
 console = Console(emoji=False, highlight=False)
+
+KNOWN_COMMANDS: set[str] = {
+    # List commands/aliases
+    "list",
+    "ls",
+    "l",
+    # Info commands/aliases
+    "info",
+    "i",
+    "in",
+    # Search commands/aliases
+    "search",
+    "s",
+    "find",
+    # Install commands/aliases
+    "install",
+    "add",
+    # Uninstall commands/aliases
+    "uninstall",
+    "rm",
+    "remove",
+    # Outdated commands/aliases
+    "outdated",
+    "o",
+    "out",
+    # Upgrade commands/aliases
+    "upgrade",
+    "u",
+    "up",
+    # Daemon commands/aliases
+    "daemon",
+}
 
 
 def handle_error(error: Exception) -> int:

@@ -9,13 +9,13 @@ from typing import Any, Optional
 import orjson
 
 from brewery.core.catalog import Catalog
-from brewery.core.config import CACHE_DIR, BreweryENV, get_brewery_env
+from brewery.core.config import BreweryENV, ensure_cache_dir, get_brewery_env
 from brewery.core.errors import CacheError
 from brewery.core.fs_state import (
     InstalledRecord,
+    _record_from_cache_dict,
+    _record_to_cache_dict,
     attach_sizes,
-    record_from_cache,
-    records_to_cache,
     scan_installed,
 )
 from brewery.core.logging import BreweryLogger, get_logger
@@ -25,8 +25,6 @@ log: BreweryLogger = get_logger(name=__name__)
 
 _cached_token = None
 _token_timestamp = 0
-
-WIDTHS_CACHE: Path = CACHE_DIR / "column_widths.json"
 
 
 class Cache:
@@ -38,7 +36,7 @@ class Cache:
         Args:
             namespace: The cache namespace.
         """
-        self.cache_path: Path = CACHE_DIR / namespace
+        self.cache_path: Path = ensure_cache_dir() / namespace
         self.cache_path.mkdir(parents=True, exist_ok=True)
         log.debug(
             event="cache_initialised",
@@ -221,12 +219,12 @@ class CacheManager:
         """
         cached: Any = self.cache.get(self._RECORDS_KEY)
         if cached is not None:
-            return [record_from_cache(d) for d in cached]
+            return [_record_from_cache_dict(d) for d in cached]
 
         records: list[InstalledRecord] = scan_installed(env=self.env)
         await attach_sizes(records=records)
 
-        self.cache.set(self._RECORDS_KEY, [records_to_cache(r) for r in records])
+        self.cache.set(self._RECORDS_KEY, [_record_to_cache_dict(r) for r in records])
 
         return records
 

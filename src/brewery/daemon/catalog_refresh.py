@@ -6,11 +6,10 @@ import asyncio
 
 import httpx
 
-from brewery.core import catalog_parser
+from brewery.core import catalog_api, catalog_parser
 from brewery.core.catalog import Catalog
+from brewery.core.catalog_api import CatalogFetchError
 from brewery.core.logging import BreweryLogger, configure_logging, get_logger
-from brewery.providers import catalog_api
-from brewery.providers.catalog_api import CatalogFetchError
 
 log: BreweryLogger = get_logger(name=__name__)
 

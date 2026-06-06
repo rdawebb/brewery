@@ -25,10 +25,6 @@ class BreweryENV:
 _DEF_CACHE = Path(
     os.environ.get("BREWERY_CACHE_DIR", Path.home() / ".brewery" / "cache")
 )
-_BREW_PREFIX_CACHE = _DEF_CACHE / "brew_prefix.txt"
-_FALLBACK_PREFIX = (
-    Path("/opt/homebrew") if platform.machine() == "arm64" else Path("/usr/local")
-)
 
 _env_cache: BreweryENV | None = None
 
@@ -55,11 +51,18 @@ def get_brewery_env() -> BreweryENV:
     if _env_cache is not None:
         return _env_cache
 
+    # Path constants
+    _BREW_PREFIX_CACHE = _DEF_CACHE / "brew_prefix.txt"
+    _FALLBACK_PREFIX = (
+        Path("/opt/homebrew") if platform.machine() == "arm64" else Path("/usr/local")
+    )
+
     if _BREW_PREFIX_CACHE.exists():
         try:
             prefix = Path(_BREW_PREFIX_CACHE.read_text().strip())
 
         except Exception:
+            log.warning(event="brew_prefix_cache_read_failure")
             prefix = None
 
     else:
@@ -85,48 +88,3 @@ def get_brewery_env() -> BreweryENV:
     )
 
     return _env_cache
-
-
-CACHE_DIR: Path = _DEF_CACHE
-
-KNOWN_COMMANDS: set[str] = {
-    # List commands/aliases
-    "list",
-    "ls",
-    "l",
-    # Info commands/aliases
-    "info",
-    "i",
-    "in",
-    # Search commands/aliases
-    "search",
-    "s",
-    "find",
-    # Install commands/aliases
-    "install",
-    "add",
-    # Uninstall commands/aliases
-    "uninstall",
-    "rm",
-    "remove",
-    # Outdated commands/aliases
-    "outdated",
-    "o",
-    "out",
-    # Upgrade commands/aliases
-    "upgrade",
-    "u",
-    "up",
-    # Daemon commands/aliases
-    "daemon",
-}
-
-DAEMON_SUBCOMMANDS: set[str] = {
-    "start",
-    "a",
-    "stop",
-    "d",
-    "status",
-    "st",
-    "stat",
-}
