@@ -48,7 +48,7 @@ class Repository:
         self.catalog.close()
 
     @log_operation(event_prefix="get_all_installed", log_args=["kind_filter"])
-    async def get_all_installed(
+    def get_all_installed(
         self, kind_filter: Optional[PackageKind] = None
     ) -> list[Package]:
         """Get all installed packages, optionally filtered by kind.
@@ -59,12 +59,10 @@ class Repository:
         Returns:
             A list of installed Package instances.
         """
-        return await self.cache_mgr.installed_packages(kind=kind_filter)
+        return self.cache_mgr.installed_packages(kind=kind_filter)
 
     @log_operation(event_prefix="get_details", log_args=["name", "kind"])
-    async def get_details(
-        self, name: str, kind: Optional[PackageKind] = None
-    ) -> Package:
+    def get_details(self, name: str, kind: Optional[PackageKind] = None) -> Package:
         """Get package details by name and kind.
 
         Args:
@@ -77,7 +75,7 @@ class Repository:
         Raises:
             PackageNotFoundError: If the package is not found.
         """
-        match: Package | None = await self.cache_mgr.find_installed(name, kind)
+        match: Package | None = self.cache_mgr.find_installed(name, kind)
         if match is not None:
             return match
 
@@ -90,7 +88,7 @@ class Repository:
         raise PackageNotFoundError(package=name)
 
     @log_operation(event_prefix="search", log_args=["term"])
-    async def search(self, term: str) -> list[Package]:
+    def search(self, term: str) -> list[Package]:
         """Search the whole catalog, enriching results that are installed.
 
         Args:
@@ -102,13 +100,13 @@ class Repository:
         from brewery.core.merge import search_packages
 
         installed: dict[str, Package] = {
-            p.name: p for p in await self.cache_mgr.installed_packages()
+            p.name: p for p in self.cache_mgr.installed_packages()
         }
 
         return search_packages(catalog=self.catalog, query=term, installed=installed)
 
     @log_operation(event_prefix="get_outdated", log_args=["live"])
-    async def get_outdated(self, live: bool = False) -> list[Package]:
+    def get_outdated(self, live: bool = False) -> list[Package]:
         """Return outdated packages (OUTDATED is derived in the merge).
 
         Args:
@@ -118,11 +116,13 @@ class Repository:
             Packages flagged OUTDATED.
         """
         if live:
+            import asyncio
+
             from brewery.daemon.catalog_refresh import refresh_catalog
 
-            await refresh_catalog(catalog=self.catalog)
+            asyncio.run(refresh_catalog(catalog=self.catalog))
 
-        packages: list[Package] = await self.cache_mgr.installed_packages()
+        packages: list[Package] = self.cache_mgr.installed_packages()
 
         return [p for p in packages if PackageStatus.OUTDATED in p.status]
 
@@ -148,7 +148,7 @@ class Repository:
 
         self.cache_mgr.invalidate()
         installed_by_name: dict[str, Package] = {
-            p.name: p for p in await self.cache_mgr.installed_packages(kind=kind)
+            p.name: p for p in self.cache_mgr.installed_packages(kind=kind)
         }
 
         installed: list[Package] = [
@@ -181,7 +181,7 @@ class Repository:
         """
         if kind is None:
             # Resolve kinds and split into two lists
-            all_pkgs: list[Package] = await self.get_all_installed()
+            all_pkgs: list[Package] = self.get_all_installed()
             kind_map: dict[str, PackageKind] = {p.name: p.kind for p in all_pkgs}
             formula_names: list[str] = [
                 n for n in names if kind_map.get(n) == PackageKind.FORMULA
@@ -221,7 +221,7 @@ class Repository:
             if not pkg_names:
                 continue
 
-            r, f = await self._verify_removed(pkg_names, k)
+            r, f = self._verify_removed(pkg_names, k)
             removed += r
             failed += f
 
@@ -229,7 +229,7 @@ class Repository:
 
         return len(removed), failures
 
-    async def _verify_removed(
+    def _verify_removed(
         self, names: list[str], kind: PackageKind
     ) -> tuple[list[str], list[str]]:
         """Return (removed, failed) based on filesystem presence.
@@ -268,7 +268,7 @@ class Repository:
             BrewCommandError: Propagated from provider.
             PackagePinnedWarning: If any packages are pinned.
         """
-        installed: list[Package] = await self.cache_mgr.installed_packages()
+        installed: list[Package] = self.cache_mgr.installed_packages()
         by_name: dict[str, Package] = {p.name: p for p in installed}
 
         # Resolve the target set and any pinned skips
@@ -305,7 +305,7 @@ class Repository:
         self.cache_mgr.invalidate()
 
         post: dict[str, Package] = {
-            p.name: p for p in await self.cache_mgr.installed_packages()
+            p.name: p for p in self.cache_mgr.installed_packages()
         }
 
         upgraded: list[Package] = []

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 import time
 from typing import TYPE_CHECKING, Any, Literal, Optional
@@ -99,6 +98,8 @@ async def run_capture(*cmd: str, timeout: Optional[int] = None) -> tuple[str, st
     Raises:
         BrewTimeoutError: If the command times out.
     """
+    import asyncio
+
     start: float = time.perf_counter()
     log.debug(event="command_start", command=" ".join(cmd), timeout=timeout)
 

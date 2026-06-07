@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import functools
 import inspect
 import time
@@ -34,8 +33,10 @@ def log_operation(
         log_args: list[str] = []
 
     def decorator(func: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
+        is_async = inspect.iscoroutinefunction(func)
+
         @functools.wraps(wrapped=func)
-        async def wrapper(*args: Any, **kwargs: Any) -> T:
+        async def async_wrapper(*args: Any, **kwargs: Any) -> T:
             start: float = time.perf_counter()
 
             sig = inspect.signature(func)
@@ -85,7 +86,53 @@ def log_operation(
                 )
                 raise
 
-        return wrapper
+        @functools.wraps(wrapped=func)
+        def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+            start: float = time.perf_counter()
+            sig = inspect.signature(func)
+            try:
+                bound_args = sig.bind(*args, **kwargs)
+                bound_args.apply_defaults()
+                log_context = {
+                    k: bound_args.arguments[k]
+                    for k in (log_args or [])
+                    if k in bound_args.arguments
+                }
+            except TypeError:
+                log_context = {}
+
+            log.info(event=f"{event_prefix}_start", **log_context)
+
+            try:
+                result = func(*args, **kwargs)  # no await
+
+                duration_ms = int((time.perf_counter() - start) * 1000)
+                log_event_data: dict = {
+                    "event": f"{event_prefix}_complete",
+                    "duration_ms": duration_ms,
+                    **log_context,
+                }
+                if log_result and result is not None:
+                    if isinstance(result, (str, int)):
+                        log_event_data["result"] = result
+                    elif isinstance(result, Sized):
+                        log_event_data["count"] = len(result)
+
+                log.info(**log_event_data)
+                return result
+
+            except Exception as e:
+                duration_ms = int((time.perf_counter() - start) * 1000)
+                log.error(
+                    event=f"{event_prefix}_failed",
+                    error=str(object=e),
+                    duration_ms=duration_ms,
+                    exc_info=True,
+                    **log_context,
+                )
+                raise
+
+        return async_wrapper if is_async else sync_wrapper
 
     return decorator
 
@@ -114,6 +161,7 @@ def retry_on_transient(
         - Works only with async functions.
         - Delays: 1s, 2s, 4s with default settings.
     """
+    import asyncio
 
     def decorator(func: F) -> F:
         """Decorator to apply retry logic to the function."""

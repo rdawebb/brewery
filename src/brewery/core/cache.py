@@ -212,7 +212,7 @@ class CacheManager:
 
         log.debug(event="cache_manager_initialised")
 
-    async def installed_records(self) -> list[InstalledRecord]:
+    def installed_records(self) -> list[InstalledRecord]:
         """Return installed records from cache, or scan if not cached.
 
         Returns:
@@ -223,7 +223,7 @@ class CacheManager:
             return [InstalledRecord._record_from_cache_dict(d) for d in cached]
 
         records: list[InstalledRecord] = scan_installed(env=self.env)
-        await attach_sizes(records=records)
+        attach_sizes(records=records)
 
         self.cache.set(
             self._RECORDS_KEY,
@@ -232,9 +232,7 @@ class CacheManager:
 
         return records
 
-    async def installed_packages(
-        self, kind: Optional[PackageKind] = None
-    ) -> list[Package]:
+    def installed_packages(self, kind: Optional[PackageKind] = None) -> list[Package]:
         """Return merged installed packages, optionally filtered by kind.
 
         Args:
@@ -245,7 +243,7 @@ class CacheManager:
         """
         from brewery.core.merge import merge
 
-        records: list[InstalledRecord] = await self.installed_records()
+        records: list[InstalledRecord] = self.installed_records()
         packages: list[Package] = merge(records, self.catalog)
 
         if kind is not None:
@@ -255,7 +253,7 @@ class CacheManager:
 
         return packages
 
-    async def find_installed(
+    def find_installed(
         self, name: str, kind: Optional[PackageKind] = None
     ) -> Optional[Package]:
         """Return one installed package by name, merging only that record.
@@ -269,7 +267,7 @@ class CacheManager:
         """
         from brewery.core.merge import merge_one
 
-        records: list[InstalledRecord] = await self.installed_records()
+        records: list[InstalledRecord] = self.installed_records()
         match: InstalledRecord | None = next(
             (r for r in records if r.name == name and (kind is None or r.kind == kind)),
             None,

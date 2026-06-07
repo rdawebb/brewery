@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -10,7 +11,6 @@ import orjson
 from brewery.core.config import BreweryENV, ensure_cache_dir, get_brewery_env
 from brewery.core.logging import BreweryLogger, get_logger
 from brewery.core.models import InstalledRecord, PackageKind, split_keg_version
-from brewery.core.shell import run_capture
 
 log: BreweryLogger = get_logger(name=__name__)
 
@@ -19,6 +19,7 @@ _CASK_METADATA_DIR = ".metadata"
 
 _SIZE_CACHE_FILE = "keg_sizes.json"
 _DU_BATCH = 256
+_DU_TIMEOUT = 30
 
 # Directories where linked kegs/casks are stored (current + legacy)
 _LINKED_DIRS: tuple[Path, ...] = (
@@ -425,9 +426,7 @@ def _epoch_dt(value: int | float | str | None) -> datetime | None:
         return None
 
 
-async def attach_sizes(
-    records: list[InstalledRecord], cache_dir: Path | None = None
-) -> None:
+def attach_sizes(records: list[InstalledRecord], cache_dir: Path | None = None) -> None:
     """Fill `size_kb` on each record, reusing cached sizes by keg mtime.
 
     Args:
@@ -462,7 +461,7 @@ async def attach_sizes(
             misses[r.path] = keg
             miss_owner[r.path] = r.name
 
-    measured: dict[str, int] = await _du_many(list(misses.values()))
+    measured: dict[str, int] = _du_many(list(misses.values()))
     by_name: dict[str, InstalledRecord] = {r.name: r for r in records}
     for path_str, size_kb in measured.items():
         by_name[miss_owner[path_str]].size_kb = size_kb
@@ -482,7 +481,7 @@ async def attach_sizes(
     )
 
 
-async def _du_many(paths: list[Path]) -> dict[str, int]:
+def _du_many(paths: list[Path]) -> dict[str, int]:
     """Measure several paths' disk usage in one (chunked) `du -sk` per batch.
 
     Args:
@@ -500,13 +499,23 @@ async def _du_many(paths: list[Path]) -> dict[str, int]:
         batch: list[Path] = paths[i : i + _DU_BATCH]
 
         try:
-            out, err, code = await run_capture(
-                "du", "-sk", *(str(object=p) for p in batch)
+            proc = subprocess.run(
+                ["du", "-sk", *(str(object=p) for p in batch)],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=_DU_TIMEOUT,
             )
 
-        except Exception as e:  # Subprocess spawn/timeout failures
+        except subprocess.TimeoutExpired:
+            log.warning(event="keg_size_timeout", count=len(batch), timeout=_DU_TIMEOUT)
+            continue
+
+        except Exception as e:  # Subprocess spawn failures
             log.warning(event="keg_size_error", count=len(batch), error=str(object=e))
             continue
+
+        out, err, code = proc.stdout, proc.stderr, proc.returncode
 
         if code != 0:
             # Parse partial results if du exits non-zero

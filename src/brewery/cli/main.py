@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import shutil
 import subprocess
 import sys
@@ -161,6 +160,8 @@ def _async_run(coro: Coroutine) -> Any:
     Returns:
         The result of the coroutine.
     """
+    import asyncio
+
     return asyncio.run(coro)
 
 
@@ -195,9 +196,9 @@ def list_pkgs(
                     refresh_per_second=6,
                 ):
                     repo.cache_mgr.invalidate()
-                    pkgs = _async_run(coro=repo.get_all_installed(kind_filter=kind))
+                    pkgs = repo.get_all_installed(kind_filter=kind)
             else:
-                pkgs = _async_run(coro=repo.get_all_installed(kind_filter=kind))
+                pkgs = repo.get_all_installed(kind_filter=kind)
 
             _, term_height = _terminal_size()
             page_size: int = term_height - 6  # header + footer buffer
@@ -228,7 +229,7 @@ def info(
 
     try:
         with _repository() as repo:
-            pkg: Package = _async_run(coro=repo.get_details(name, kind))
+            pkg: Package = repo.get_details(name, kind)
 
             console.print(package_details(pkg))
 
@@ -245,7 +246,7 @@ def search(term: str) -> None:
     """
     try:
         with _repository() as repo:
-            pkgs: list[Package] = _async_run(coro=repo.search(term))
+            pkgs: list[Package] = repo.search(term)
             from brewery.cli.renderers import package_table
 
             console.print(package_table(pkgs))
@@ -363,10 +364,10 @@ def outdated(
                     status="[bold yellow]Checking for updates...[/bold yellow]",
                     refresh_per_second=6,
                 ):
-                    pkgs = _async_run(coro=repo.get_outdated(live=True))
+                    pkgs = repo.get_outdated(live=True)
 
             else:
-                pkgs = _async_run(coro=repo.get_outdated(live=False))
+                pkgs = repo.get_outdated(live=False)
 
             if not pkgs:
                 console.print(
@@ -414,9 +415,7 @@ def upgrade(
                         return
 
                 else:
-                    outdated: list[Package] = _async_run(
-                        coro=repo.get_outdated(live=False)
-                    )
+                    outdated: list[Package] = repo.get_outdated(live=False)
                     if not outdated:
                         console.print(
                             "\n[bold green]✓ All packages are up to date![/bold green]\n"
