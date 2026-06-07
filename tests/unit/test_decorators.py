@@ -9,9 +9,11 @@ import pytest
 from brewery.core.decorators import log_operation, retry_on_transient
 from brewery.core.errors import TransientError, UserError
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture
-def no_sleep(monkeypatch):
+def no_sleep(monkeypatch) -> None:
     """Make asyncio.sleep a no-op so backoff delays don't slow the suite."""
 
     async def _instant(*_args, **_kwargs):
@@ -23,7 +25,7 @@ def no_sleep(monkeypatch):
 class TestRetryOnTransient:
     """Test the retry_on_transient decorator."""
 
-    async def test_returns_result_on_first_success(self):
+    async def test_returns_result_on_first_success(self) -> None:
         """Test that retry_on_transient returns the result on the first success."""
         calls = []
 
@@ -35,7 +37,7 @@ class TestRetryOnTransient:
         assert await op() == "ok"
         assert len(calls) == 1
 
-    async def test_retries_then_succeeds(self, no_sleep):
+    async def test_retries_then_succeeds(self, no_sleep) -> None:
         """Test that retry_on_transient retries and succeeds after transient errors."""
         attempts = {"n": 0}
 
@@ -49,7 +51,7 @@ class TestRetryOnTransient:
         assert await op() == "recovered"
         assert attempts["n"] == 3
 
-    async def test_exhausts_and_reraises(self, no_sleep):
+    async def test_exhausts_and_reraises(self, no_sleep) -> None:
         """Test that retry_on_transient exhausts retries and reraises on non-transient errors."""
         attempts = {"n": 0}
 
@@ -62,7 +64,7 @@ class TestRetryOnTransient:
             await op()
         assert attempts["n"] == 3  # Should be exactly max_retries attempts
 
-    async def test_does_not_retry_non_transient(self, no_sleep):
+    async def test_does_not_retry_non_transient(self, no_sleep) -> None:
         """Test that retry_on_transient does not retry on non-transient errors."""
         attempts = {"n": 0}
 
@@ -75,7 +77,7 @@ class TestRetryOnTransient:
             await op()
         assert attempts["n"] == 1  # Not retried
 
-    async def test_backoff_delays_follow_schedule(self, monkeypatch):
+    async def test_backoff_delays_follow_schedule(self, monkeypatch) -> None:
         """Test that retry_on_transient backoff delays follow the specified schedule."""
         delays: list[float] = []
 
@@ -93,7 +95,7 @@ class TestRetryOnTransient:
         # Delays applied after attempts 1 and 2 (none after the final attempt)
         assert delays == [1.0, 2.0]
 
-    def test_rejects_sync_function(self):
+    def test_rejects_sync_function(self) -> None:
         """Test that retry_on_transient rejects sync functions."""
         with pytest.raises(TypeError):
 
@@ -105,7 +107,7 @@ class TestRetryOnTransient:
 class TestLogOperation:
     """Test the log_operation decorator."""
 
-    async def test_returns_underlying_result(self):
+    async def test_returns_underlying_result(self) -> None:
         """Test that log_operation returns the underlying result."""
 
         @log_operation(event_prefix="thing")
@@ -114,7 +116,7 @@ class TestLogOperation:
 
         assert await op(21) == 42
 
-    async def test_reraises_exceptions(self):
+    async def test_reraises_exceptions(self) -> None:
         """Test that log_operation reraises exceptions."""
 
         @log_operation(event_prefix="thing")
@@ -124,7 +126,7 @@ class TestLogOperation:
         with pytest.raises(ValueError):
             await op()
 
-    async def test_logs_start_and_complete(self, caplog):
+    async def test_logs_start_and_complete(self, caplog) -> None:
         """Test that log_operation logs start and complete events."""
 
         import logging
@@ -142,7 +144,7 @@ class TestLogOperation:
         # The named arg should appear in the start context
         assert any("name=foo" in m for m in messages)
 
-    async def test_logs_failure_event(self, caplog):
+    async def test_logs_failure_event(self, caplog) -> None:
         """Test that log_operation logs failure events."""
 
         import logging
@@ -157,7 +159,7 @@ class TestLogOperation:
 
         assert any("myop_failed" in r.getMessage() for r in caplog.records)
 
-    async def test_log_result_counts_sized_results(self, caplog):
+    async def test_log_result_counts_sized_results(self, caplog) -> None:
         """Test that log_operation logs result counts for sized results."""
 
         import logging
