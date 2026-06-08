@@ -364,10 +364,14 @@ def outdated(
                     status="[bold yellow]Checking for updates...[/bold yellow]",
                     refresh_per_second=6,
                 ):
-                    pkgs = repo.get_outdated(live=True)
+                    from brewery.daemon.catalog_refresh import refresh_catalog
+
+                    _async_run(coro=refresh_catalog(catalog=repo.catalog))
+                    repo.cache_mgr.invalidate()
+                    pkgs = repo.get_outdated()
 
             else:
-                pkgs = repo.get_outdated(live=False)
+                pkgs = repo.get_outdated()
 
             if not pkgs:
                 console.print(

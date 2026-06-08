@@ -105,23 +105,13 @@ class Repository:
 
         return search_packages(catalog=self.catalog, query=term, installed=installed)
 
-    @log_operation(event_prefix="get_outdated", log_args=["live"])
-    def get_outdated(self, live: bool = False) -> list[Package]:
+    @log_operation(event_prefix="get_outdated")
+    def get_outdated(self) -> list[Package]:
         """Return outdated packages (OUTDATED is derived in the merge).
-
-        Args:
-            live: Force a fresh filesystem re-scan before deriving.
 
         Returns:
             Packages flagged OUTDATED.
         """
-        if live:
-            import asyncio
-
-            from brewery.daemon.catalog_refresh import refresh_catalog
-
-            asyncio.run(refresh_catalog(catalog=self.catalog))
-
         packages: list[Package] = self.cache_mgr.installed_packages()
 
         return [p for p in packages if PackageStatus.OUTDATED in p.status]
