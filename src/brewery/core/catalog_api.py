@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Protocol
 from urllib.parse import quote
 
 import httpx
@@ -20,6 +21,17 @@ _HTTP_NOT_MODIFIED = 304
 _HTTP_NOT_FOUND = 404
 
 _SINGLE_FORMULA_URL = "https://formulae.brew.sh/api/formula/{name}.json"
+
+
+class _HttpClient(Protocol):
+    async def get(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = ...,
+        timeout: float = ...,
+        follow_redirects: bool = ...,
+    ) -> httpx.Response: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,7 +90,7 @@ async def fetch_feed(
     etag: str | None = None,
     last_modified: str | None = None,
     *,
-    client: httpx.AsyncClient | None = None,
+    client: _HttpClient | None = None,
     timeout: float = _DEFAULT_TIMEOUT,
 ) -> FetchResult:
     """Conditionally fetch a catalog feed.
@@ -159,7 +171,7 @@ async def fetch_feed(
 async def fetch_single_formula(
     name: str,
     *,
-    client: httpx.AsyncClient | None = None,
+    client: _HttpClient | None = None,
     timeout: float = _DEFAULT_TIMEOUT,
 ) -> bytes | None:
     """Fetch one formula's JSON from the per-name endpoint (fallback for info lookups)
@@ -242,7 +254,7 @@ def store_validators(catalog: object, result: FetchResult) -> None:
 async def _get(
     url: str,
     headers: dict[str, str],
-    client: httpx.AsyncClient | None,
+    client: _HttpClient | None,
     timeout: float,
 ) -> httpx.Response:
     """GET a URL via the supplied client, or an ephemeral one if none given.

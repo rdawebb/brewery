@@ -26,8 +26,6 @@ _RESETTABLE: list[tuple[str, str, object]] = [
     ("brewery.core.cache", "_cached_token", None),
     ("brewery.core.cache", "_token_timestamp", 0),
     ("brewery.providers.brew_cask", "_caskroom_path", None),
-    ("brewery.core.task_manager", "_bg_task_manager", None),
-    ("brewery.core.batch_runner", "_batch_op_manager", None),
     # Lazily-created, event-loop-bound, cleared so it re-binds to each test's own loop
     ("brewery.providers.package_builder", "_SEMAPHORE", None),
     # Renderer width-cache load flag + dict.
@@ -53,6 +51,13 @@ def _reset_module_state():
         renderers = sys.modules.get("brewery.cli.renderers")
         if renderers is not None and hasattr(renderers, "_width_cache"):
             renderers._width_cache.clear()
+
+        # Clear the on-disk file cache so persisted records cannot leak between tests
+        import shutil
+
+        cache_root = Path(os.environ["BREWERY_CACHE_DIR"])
+        if cache_root.exists():
+            shutil.rmtree(cache_root, ignore_errors=True)
 
     _apply()
     yield

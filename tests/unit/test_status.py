@@ -1,121 +1,101 @@
-"""Unit tests for Brewery package and cask status derivation."""
+"""Unit tests for the filesystem-knowable half of package status derivation."""
 
 from __future__ import annotations
 
-from brewery.analysis.status import derive_status
+import pytest
+
+from brewery.analysis.status import derive_local_status
 from brewery.core.models import PackageKind, PackageStatus
 
+pytestmark = pytest.mark.unit
 
-class TestFormulaStatus:
-    """Tests for formula status derivation."""
 
-    def test_empty_info_is_none(self):
-        """Test that an empty info dict returns PackageStatus.NONE."""
-        assert derive_status({}, kind=PackageKind.FORMULA) == PackageStatus.NONE
+class TestFormulaLocalStatus:
+    """Tests for locally-derived formula status."""
 
-    def test_outdated_top_level(self):
-        """Test that outdated at the top level sets the OUTDATED flag."""
-        status = derive_status({"outdated": True}, kind=PackageKind.FORMULA)
-        assert PackageStatus.OUTDATED in status
+    def test_clean_linked_formula_is_none(self) -> None:
+        """Test that a linked, unpinned, non-HEAD formula has no flags."""
+        status = derive_local_status(kind=PackageKind.FORMULA)
+        assert status == PackageStatus.NONE
 
-    def test_outdated_nested_under_version(self):
-        """Test that outdated inside the "version" sub-object sets the OUTDATED flag."""
-        status = derive_status(
-            {"version": {"outdated": True}}, kind=PackageKind.FORMULA
-        )
-        assert PackageStatus.OUTDATED in status
+    def test_pinned_sets_flag(self) -> None:
+        """Test that a pinned formula sets PINNED."""
+        status = derive_local_status(kind=PackageKind.FORMULA, pinned=True)
+        assert status == PackageStatus.PINNED
 
-    def test_pinned_only_when_true(self):
-        """Test that pinned only sets the PINNED flag when the value is True."""
-        assert PackageStatus.PINNED in derive_status({"pinned": True})
+    def test_head_sets_flag(self) -> None:
+        """Test that a HEAD build sets HEAD."""
+        status = derive_local_status(kind=PackageKind.FORMULA, head=True)
+        assert status == PackageStatus.HEAD
 
-        # A falsy-but-not-True value must not set the flag
-        assert PackageStatus.PINNED not in derive_status({"pinned": False})
-        assert PackageStatus.PINNED not in derive_status({"pinned": None})
+    def test_not_linked_sets_flag(self) -> None:
+        """Test that an unlinked formula sets NOT_LINKED."""
+        status = derive_local_status(kind=PackageKind.FORMULA, linked=False)
+        assert status == PackageStatus.NOT_LINKED
 
-    def test_keg_only(self):
-        """Test that keg_only sets the KEG_ONLY flag when the value is True."""
-        assert PackageStatus.KEG_ONLY in derive_status({"keg_only": True})
-
-    def test_not_linked_when_installed_and_no_linked_keg(self):
-        """Test that not linked when installed and no linked keg sets the NOT_LINKED flag."""
-        status = derive_status({"installed": [{"version": "1.0"}], "linked_keg": None})
-        assert PackageStatus.NOT_LINKED in status
-
-    def test_linked_keg_present_means_linked(self):
-        """Test that linked keg present means linked."""
-        status = derive_status({"installed": [{"version": "1.0"}], "linked_keg": "1.0"})
+    def test_linked_does_not_set_not_linked(self) -> None:
+        """Test that a linked formula does not set NOT_LINKED."""
+        status = derive_local_status(kind=PackageKind.FORMULA, linked=True)
         assert PackageStatus.NOT_LINKED not in status
 
-    def test_not_linked_requires_installed(self):
-        """Test that not linked requires installed."""
-        # No installed payload => nothing to be unlinked
-        status = derive_status({"linked_keg": None})
+    def test_linked_defaults_true(self) -> None:
+        """Test that linked defaults to True so a formula is not falsely unlinked.
+
+        Omitting the linked argument must not produce NOT_LINKED.
+        """
+        status = derive_local_status(kind=PackageKind.FORMULA)
         assert PackageStatus.NOT_LINKED not in status
 
-    def test_service_dict_sets_has_service(self):
-        """Test that service dict sets HAS_SERVICE flag."""
-        assert PackageStatus.HAS_SERVICE in derive_status({"service": {"run": "x"}})
-
-    def test_empty_service_dict_does_not_set_flag(self):
-        """Test that empty service dict does not set HAS_SERVICE flag."""
-        assert PackageStatus.HAS_SERVICE not in derive_status({"service": {}})
-
-    def test_combined_flags(self):
-        """Test that combined flags set the correct status."""
-        status = derive_status(
-            {
-                "outdated": True,
-                "pinned": True,
-                "keg_only": True,
-                "installed": [{"version": "1.0"}],
-                "linked_keg": None,
-            }
+    def test_all_flags_combine(self) -> None:
+        """Test that pinned, HEAD, and unlinked combine into one status."""
+        status = derive_local_status(
+            kind=PackageKind.FORMULA, head=True, linked=False, pinned=True
         )
-        for flag in (
-            PackageStatus.OUTDATED,
-            PackageStatus.PINNED,
-            PackageStatus.KEG_ONLY,
-            PackageStatus.NOT_LINKED,
-        ):
-            assert flag in status
-
-    def test_default_kind_is_formula(self):
-        """Test that default kind is formula."""
-
-        # Calling without kind should behave as a formula (applies linked_keg rule)
-        status = derive_status({"installed": [{"version": "1.0"}], "linked_keg": None})
-        assert PackageStatus.NOT_LINKED in status
-
-
-class TestCaskStatus:
-    """Tests for cask status derivation."""
-
-    def test_installed_cask_is_not_flagged_not_linked(self):
-        """Test that installed cask is not flagged as NOT_LINKED."""
-        status = derive_status(
-            {"installed": "1.2.3", "linked_keg": None}, kind=PackageKind.CASK
-        )
-        assert PackageStatus.NOT_LINKED not in status
-
-    def test_cask_keg_only_field_ignored(self):
-        """Test that keg_only field is ignored for casks."""
-        status = derive_status({"keg_only": True}, kind=PackageKind.CASK)
-        assert PackageStatus.KEG_ONLY not in status
-
-    def test_cask_outdated(self):
-        """Test that outdated field works for casks."""
-        status = derive_status({"outdated": True}, kind=PackageKind.CASK)
-        assert PackageStatus.OUTDATED in status
-
-    def test_cask_pinned(self):
-        """Test that pinned field works for casks."""
-        status = derive_status({"pinned": True}, kind=PackageKind.CASK)
         assert PackageStatus.PINNED in status
+        assert PackageStatus.HEAD in status
+        assert PackageStatus.NOT_LINKED in status
 
-    def test_clean_installed_cask_is_none(self):
-        """Test that clean installed cask is treated as NONE."""
-        status = derive_status(
-            {"installed": "1.2.3", "linked_keg": None}, kind=PackageKind.CASK
+    def test_no_unexpected_flags(self) -> None:
+        """Test that only local flags are ever set, never OUTDATED/KEG_ONLY/etc.
+
+        Those are catalog-derived and must not appear in the local half.
+        """
+        status = derive_local_status(
+            kind=PackageKind.FORMULA, head=True, linked=False, pinned=True
+        )
+        assert PackageStatus.OUTDATED not in status
+        assert PackageStatus.KEG_ONLY not in status
+        assert PackageStatus.HAS_SERVICE not in status
+
+
+class TestCaskLocalStatus:
+    """Tests that casks carry no locally-derived flags."""
+
+    def test_clean_cask_is_none(self) -> None:
+        """Test that a default cask has no flags."""
+        assert derive_local_status(kind=PackageKind.CASK) == PackageStatus.NONE
+
+    def test_cask_ignores_pinned(self) -> None:
+        """Test that pinned does not apply to casks."""
+        status = derive_local_status(kind=PackageKind.CASK, pinned=True)
+        assert status == PackageStatus.NONE
+
+    def test_cask_ignores_head(self) -> None:
+        """Test that HEAD does not apply to casks."""
+        status = derive_local_status(kind=PackageKind.CASK, head=True)
+        assert status == PackageStatus.NONE
+
+    def test_cask_ignores_not_linked(self) -> None:
+        """Test that an unlinked cask is not flagged NOT_LINKED.
+
+        Linking is a formula concept; casks must never carry NOT_LINKED.
+        """
+        status = derive_local_status(kind=PackageKind.CASK, linked=False)
+        assert status == PackageStatus.NONE
+
+    def test_cask_ignores_all_flags_together(self) -> None:
+        """Test that no combination of local flags affects a cask."""
+        status = derive_local_status(
+            kind=PackageKind.CASK, head=True, linked=False, pinned=True
         )
         assert status == PackageStatus.NONE

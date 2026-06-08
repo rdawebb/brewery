@@ -201,10 +201,8 @@ def mock_brew(monkeypatch, fixture_text, fake_env) -> list[tuple[str, ...]]:
         return ("", "", 0)
 
     import brewery.core.shell as shell
-    import brewery.providers.brew_cask as brew_cask
 
     monkeypatch.setattr(shell, "run_capture", fake_run_capture)
-    monkeypatch.setattr(brew_cask, "run_capture", fake_run_capture)
 
     return calls
 

@@ -13,8 +13,8 @@ from brewery.core.logging import BreweryLogger, get_logger
 
 log: BreweryLogger = get_logger(name=__name__)
 
-T = TypeVar(name="T")
-F = TypeVar(name="F", bound=Callable[..., Any])
+T = TypeVar("T")
+F = TypeVar("F", bound=Callable[..., Any])
 
 
 def log_operation(
