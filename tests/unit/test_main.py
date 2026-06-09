@@ -25,42 +25,42 @@ pytestmark = pytest.mark.unit
 class TestHandleError:
     """Tests for handle_error exit-code mapping."""
 
-    def test_transient_error_returns_transient_code(self) -> None:
-        """Test that a transient error maps to the transient exit code."""
-        assert handle_error(TransientError("boom")) == EXIT_TRANSIENT_ERROR
-
-    def test_brew_command_error_is_transient(self) -> None:
-        """Test that a BrewCommandError (TransientError subclass) is transient."""
-        assert handle_error(BrewCommandError(returncode=1)) == EXIT_TRANSIENT_ERROR
-
-    def test_user_error_returns_user_code(self) -> None:
-        """Test that a user error maps to the user exit code."""
-        assert handle_error(UserError("bad input")) == EXIT_USER_ERROR
-
-    def test_package_not_found_is_user_error(self) -> None:
-        """Test that PackageNotFoundError maps to the user exit code."""
-        err = PackageNotFoundError(package="nope")
-        assert handle_error(err) == EXIT_USER_ERROR
-
-    def test_pinned_warning_is_user_error(self) -> None:
-        """Test that a PinnedPackageWarning maps to the user exit code."""
-        assert handle_error(PinnedPackageWarning("pinned")) == EXIT_USER_ERROR
-
-    def test_sys_error_returns_system_code(self) -> None:
-        """Test that a system error maps to the system exit code."""
-        assert handle_error(SysError("disk")) == EXIT_SYSTEM_ERROR
-
-    def test_cache_error_is_system_error(self) -> None:
-        """Test that a CacheError (SysError subclass) maps to the system code."""
-        assert handle_error(CacheError("cache")) == EXIT_SYSTEM_ERROR
-
-    def test_unknown_brewerror_subclass_defaults_to_user(self) -> None:
-        """Test that a BrewError that is none of the three branches defaults to user.
-
-        The base BrewError is not Transient/User/Sys, exercising the else branch.
-        """
-        assert handle_error(BrewError("generic")) == EXIT_USER_ERROR
-
-    def test_non_brewerror_returns_system_code(self) -> None:
-        """Test that an arbitrary non-BrewError exception maps to the system code."""
-        assert handle_error(ValueError("unexpected")) == EXIT_SYSTEM_ERROR
+    @pytest.mark.parametrize(
+        ("error", "expected"),
+        [
+            pytest.param(TransientError("boom"), EXIT_TRANSIENT_ERROR, id="transient"),
+            pytest.param(
+                BrewCommandError(returncode=1),
+                EXIT_TRANSIENT_ERROR,
+                id="brew_command_is_transient",
+            ),
+            pytest.param(UserError("bad input"), EXIT_USER_ERROR, id="user"),
+            pytest.param(
+                PackageNotFoundError(package="nope"),
+                EXIT_USER_ERROR,
+                id="package_not_found_is_user",
+            ),
+            pytest.param(
+                PinnedPackageWarning("pinned"),
+                EXIT_USER_ERROR,
+                id="pinned_warning_is_user",
+            ),
+            pytest.param(SysError("disk"), EXIT_SYSTEM_ERROR, id="system"),
+            pytest.param(CacheError("cache"), EXIT_SYSTEM_ERROR, id="cache_is_system"),
+            # Base BrewError is none of Transient/User/Sys -> exercises the else branch.
+            pytest.param(
+                BrewError("generic"),
+                EXIT_USER_ERROR,
+                id="unknown_brewerror_defaults_to_user",
+            ),
+            # Arbitrary non-BrewError exceptions map to the system code.
+            pytest.param(
+                ValueError("unexpected"),
+                EXIT_SYSTEM_ERROR,
+                id="non_brewerror_is_system",
+            ),
+        ],
+    )
+    def test_handle_error(self, error, expected) -> None:
+        """Test the handle_error function."""
+        assert handle_error(error) == expected

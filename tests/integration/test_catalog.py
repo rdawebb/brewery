@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Generator
+from typing import Any
 
 import pytest
 
@@ -17,7 +17,15 @@ pytestmark = pytest.mark.integration
 
 
 def formula_dict(name: str, **overrides: Any) -> dict[str, Any]:
-    """Build a full-column formula row dict, overridable per field."""
+    """Build a full-column formula row dict, overridable per field.
+
+    Args:
+        name: The name of the formula.
+        **overrides: Additional fields to override in the formula row.
+
+    Returns:
+        A dictionary representing the full formula row.
+    """
     base = {
         "name": name,
         "desc": f"{name} description",
@@ -37,11 +45,20 @@ def formula_dict(name: str, **overrides: Any) -> dict[str, Any]:
         "disabled": 0,
     }
     base.update(overrides)
+
     return base
 
 
 def cask_dict(token: str, **overrides: Any) -> dict[str, Any]:
-    """Build a full-column cask row dict, overridable per field."""
+    """Build a full-column cask row dict, overridable per field.
+
+    Args:
+        token: The token of the cask.
+        **overrides: Additional fields to override in the cask row.
+
+    Returns:
+        A dictionary representing the full cask row.
+    """
     base = {
         "token": token,
         "name": token.title(),
@@ -58,15 +75,8 @@ def cask_dict(token: str, **overrides: Any) -> dict[str, Any]:
         "disabled": 0,
     }
     base.update(overrides)
+
     return base
-
-
-@pytest.fixture
-def empty_catalog(tmp_path) -> Generator[Catalog, None, None]:
-    """A fresh Catalog backed by an isolated temp database file."""
-    cat = Catalog(db_path=tmp_path / "catalog.db")
-    yield cat
-    cat.close()
 
 
 class TestSchema:
@@ -98,6 +108,7 @@ class TestSchema:
         path = tmp_path / "catalog.db"
         cat = Catalog(db_path=path)
         cat.write_formulae([formula_dict("wget")], [], [])
+
         # Simulate an older schema by rewriting the stored version
         cat.set_meta("schema_version", str(SCHEMA_VERSION + 1))
         cat.close()
@@ -236,6 +247,11 @@ class TestDepsAndAliases:
     """Tests for dependency edges and alias resolution."""
 
     def _write_graph(self, cat: Catalog) -> None:
+        """Write a small graph of three formulae with two deps and one alias.
+
+        Args:
+            cat: The catalog to write the graph to.
+        """
         cat.write_formulae(
             [formula_dict("curl"), formula_dict("openssl"), formula_dict("ca-certs")],
             [
@@ -397,6 +413,7 @@ class TestMetaAndLifecycle:
         with Catalog(db_path=tmp_path / "c.db") as cat:
             cat.write_formulae([formula_dict("wget")], [], [])
             assert cat.get_formula("wget") is not None
+
         # After exit the connection is closed, so further use raises
         with pytest.raises(Exception):
             cat.get_formula("wget")

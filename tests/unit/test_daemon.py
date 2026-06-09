@@ -21,12 +21,12 @@ pytestmark = pytest.mark.unit
 class TestTargets:
     """Tests for the launchd domain/target string builders."""
 
-    def test_gui_domain(self, monkeypatch):
+    def test_gui_domain(self, monkeypatch) -> None:
         """Test that the GUI domain is gui/<uid>."""
         monkeypatch.setattr(daemon_mod.os, "getuid", lambda: 501)
         assert _gui_domain() == "gui/501"
 
-    def test_service_target(self, monkeypatch):
+    def test_service_target(self, monkeypatch) -> None:
         """Test that the service target is <gui-domain>/<label>."""
         monkeypatch.setattr(daemon_mod.os, "getuid", lambda: 501)
         assert _service_target() == f"gui/501/{PLIST_LABEL}"
@@ -36,6 +36,11 @@ class TestPatchExecutablePaths:
     """Tests for _patch_executable_paths plist rewriting."""
 
     def _write_plist(self, path: Path) -> None:
+        """Write a sample plist file for testing.
+
+        Args:
+            path: The path to the plist file to create.
+        """
         path.write_bytes(
             plistlib.dumps(
                 {
@@ -45,7 +50,7 @@ class TestPatchExecutablePaths:
             )
         )
 
-    def test_rewrites_interpreter_and_path(self, tmp_path, monkeypatch):
+    def test_rewrites_interpreter_and_path(self, tmp_path, monkeypatch) -> None:
         """Test that arg[0] becomes the resolved python and PATH includes brew dir."""
         plist = tmp_path / "d.plist"
         self._write_plist(plist)
@@ -62,7 +67,7 @@ class TestPatchExecutablePaths:
         assert data["ProgramArguments"][0] == "/new/python3"
         assert data["EnvironmentVariables"]["PATH"].startswith("/opt/homebrew/bin")
 
-    def test_no_brew_leaves_plist_unchanged(self, tmp_path, monkeypatch):
+    def test_no_brew_leaves_plist_unchanged(self, tmp_path, monkeypatch) -> None:
         """Test that a missing brew aborts patching without modifying the plist."""
         plist = tmp_path / "d.plist"
         self._write_plist(plist)
@@ -75,7 +80,7 @@ class TestPatchExecutablePaths:
         _patch_executable_paths(plist)
         assert plist.read_bytes() == before
 
-    def test_falls_back_to_sys_executable(self, tmp_path, monkeypatch):
+    def test_falls_back_to_sys_executable(self, tmp_path, monkeypatch) -> None:
         """Test that arg[0] uses sys.executable when python3 is not on PATH."""
         plist = tmp_path / "d.plist"
         self._write_plist(plist)

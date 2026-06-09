@@ -19,6 +19,13 @@ def cache_dir(tmp_path, monkeypatch) -> Path:
 
     _DEF_CACHE is frozen at import time, so the env var cannot move it mid-run;
     patching the module attribute is the supported seam.
+
+    Args:
+        tmp_path: The temporary path fixture.
+        monkeypatch: The monkeypatch fixture.
+
+    Returns:
+        The path to the cache directory.
     """
     target = tmp_path / "cache"
     monkeypatch.setattr(config, "_DEF_CACHE", target)
@@ -62,7 +69,7 @@ class TestGetBreweryEnv:
         def _fail(*args, **kwargs):
             raise AssertionError("brew should not be called when cache exists")
 
-        # Any subprocess use here would be a regression.
+        # Any subprocess use here would be a regression
         env = get_brewery_env()
         assert env.prefix == Path("/opt/homebrew")
         assert env.cellar == Path("/opt/homebrew/Cellar")
@@ -82,7 +89,8 @@ class TestGetBreweryEnv:
         )
         env = get_brewery_env()
         assert env.prefix == Path("/opt/homebrew")
-        # The discovered prefix is cached to disk for next time.
+
+        # The discovered prefix is cached to disk for next time
         assert (cache_dir / "brew_prefix.txt").read_text() == "/opt/homebrew"
 
     def test_brew_not_found_uses_arm_fallback(self, cache_dir, monkeypatch) -> None:

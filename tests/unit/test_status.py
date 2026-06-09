@@ -11,54 +11,36 @@ pytestmark = pytest.mark.unit
 
 
 class TestFormulaLocalStatus:
-    """Tests for locally-derived formula status."""
+    """Tests for locally-derived formula status.
 
-    def test_clean_linked_formula_is_none(self) -> None:
-        """Test that a linked, unpinned, non-HEAD formula has no flags."""
-        status = derive_local_status(kind=PackageKind.FORMULA)
-        assert status == PackageStatus.NONE
+    Only local flags (PINNED, HEAD, NOT_LINKED) are ever derivable here; linked
+    defaults True so an omitted argument never reads as unlinked.
+    """
 
-    def test_pinned_sets_flag(self) -> None:
-        """Test that a pinned formula sets PINNED."""
-        status = derive_local_status(kind=PackageKind.FORMULA, pinned=True)
-        assert status == PackageStatus.PINNED
+    @pytest.mark.parametrize(
+        ("kwargs", "expected"),
+        [
+            pytest.param({}, PackageStatus.NONE, id="clean_defaults"),
+            pytest.param({"linked": True}, PackageStatus.NONE, id="linked_clean"),
+            pytest.param({"pinned": True}, PackageStatus.PINNED, id="pinned"),
+            pytest.param({"head": True}, PackageStatus.HEAD, id="head"),
+            pytest.param({"linked": False}, PackageStatus.NOT_LINKED, id="not_linked"),
+            pytest.param(
+                {"head": True, "linked": False, "pinned": True},
+                PackageStatus.PINNED | PackageStatus.HEAD | PackageStatus.NOT_LINKED,
+                id="all_local_flags_combine",
+            ),
+        ],
+    )
+    def test_local_status(self, kwargs, expected) -> None:
+        """Test local status derivation."""
+        assert derive_local_status(kind=PackageKind.FORMULA, **kwargs) == expected
 
-    def test_head_sets_flag(self) -> None:
-        """Test that a HEAD build sets HEAD."""
-        status = derive_local_status(kind=PackageKind.FORMULA, head=True)
-        assert status == PackageStatus.HEAD
+    def test_no_catalog_flags_ever_set(self) -> None:
+        """Test that catalog-derived flags never appear in the local half.
 
-    def test_not_linked_sets_flag(self) -> None:
-        """Test that an unlinked formula sets NOT_LINKED."""
-        status = derive_local_status(kind=PackageKind.FORMULA, linked=False)
-        assert status == PackageStatus.NOT_LINKED
-
-    def test_linked_does_not_set_not_linked(self) -> None:
-        """Test that a linked formula does not set NOT_LINKED."""
-        status = derive_local_status(kind=PackageKind.FORMULA, linked=True)
-        assert PackageStatus.NOT_LINKED not in status
-
-    def test_linked_defaults_true(self) -> None:
-        """Test that linked defaults to True so a formula is not falsely unlinked.
-
-        Omitting the linked argument must not produce NOT_LINKED.
-        """
-        status = derive_local_status(kind=PackageKind.FORMULA)
-        assert PackageStatus.NOT_LINKED not in status
-
-    def test_all_flags_combine(self) -> None:
-        """Test that pinned, HEAD, and unlinked combine into one status."""
-        status = derive_local_status(
-            kind=PackageKind.FORMULA, head=True, linked=False, pinned=True
-        )
-        assert PackageStatus.PINNED in status
-        assert PackageStatus.HEAD in status
-        assert PackageStatus.NOT_LINKED in status
-
-    def test_no_unexpected_flags(self) -> None:
-        """Test that only local flags are ever set, never OUTDATED/KEG_ONLY/etc.
-
-        Those are catalog-derived and must not appear in the local half.
+        OUTDATED/KEG_ONLY/HAS_SERVICE are catalog-derived and must not leak into
+        derive_local_status regardless of the local inputs.
         """
         status = derive_local_status(
             kind=PackageKind.FORMULA, head=True, linked=False, pinned=True
@@ -69,33 +51,27 @@ class TestFormulaLocalStatus:
 
 
 class TestCaskLocalStatus:
-    """Tests that casks carry no locally-derived flags."""
+    """Tests that casks carry no locally-derived flags.
 
-    def test_clean_cask_is_none(self) -> None:
-        """Test that a default cask has no flags."""
-        assert derive_local_status(kind=PackageKind.CASK) == PackageStatus.NONE
+    Linking/pinning/HEAD are formula concepts; no combination of local inputs
+    may flag a cask.
+    """
 
-    def test_cask_ignores_pinned(self) -> None:
-        """Test that pinned does not apply to casks."""
-        status = derive_local_status(kind=PackageKind.CASK, pinned=True)
-        assert status == PackageStatus.NONE
-
-    def test_cask_ignores_head(self) -> None:
-        """Test that HEAD does not apply to casks."""
-        status = derive_local_status(kind=PackageKind.CASK, head=True)
-        assert status == PackageStatus.NONE
-
-    def test_cask_ignores_not_linked(self) -> None:
-        """Test that an unlinked cask is not flagged NOT_LINKED.
-
-        Linking is a formula concept; casks must never carry NOT_LINKED.
-        """
-        status = derive_local_status(kind=PackageKind.CASK, linked=False)
-        assert status == PackageStatus.NONE
-
-    def test_cask_ignores_all_flags_together(self) -> None:
-        """Test that no combination of local flags affects a cask."""
-        status = derive_local_status(
-            kind=PackageKind.CASK, head=True, linked=False, pinned=True
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            pytest.param({}, id="clean_defaults"),
+            pytest.param({"pinned": True}, id="ignores_pinned"),
+            pytest.param({"head": True}, id="ignores_head"),
+            pytest.param({"linked": False}, id="ignores_not_linked"),
+            pytest.param(
+                {"head": True, "linked": False, "pinned": True},
+                id="ignores_all_flags",
+            ),
+        ],
+    )
+    def test_cask_status_is_always_none(self, kwargs) -> None:
+        """Test that cask status is always none."""
+        assert (
+            derive_local_status(kind=PackageKind.CASK, **kwargs) == PackageStatus.NONE
         )
-        assert status == PackageStatus.NONE

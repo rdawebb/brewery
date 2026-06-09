@@ -25,71 +25,97 @@ pytestmark = pytest.mark.unit
 class TestMacosTag:
     """Tests for _macos_tag."""
 
-    def test_arm64_prefixes_codename(self) -> None:
-        """Test that Apple Silicon prefixes the codename with arm64_."""
-        assert _macos_tag(arch="arm64", codename="sonoma") == "arm64_sonoma"
-
-    def test_intel_uses_bare_codename(self) -> None:
-        """Test that Intel uses the bare codename."""
-        assert _macos_tag(arch="x86_64", codename="sonoma") == "sonoma"
-
-    def test_unknown_arch_treated_as_intel(self) -> None:
-        """Test that any non-arm64 arch falls into the bare-codename branch."""
-        assert _macos_tag(arch="ppc", codename="sonoma") == "sonoma"
+    @pytest.mark.parametrize(
+        ("arch", "codename", "expected"),
+        [
+            pytest.param("arm64", "sonoma", "arm64_sonoma", id="arm64_prefixed"),
+            pytest.param("x86_64", "sonoma", "sonoma", id="intel_bare"),
+            pytest.param("ppc", "sonoma", "sonoma", id="unknown_arch_as_intel"),
+        ],
+    )
+    def test_macos_tag(self, arch, codename, expected) -> None:
+        """Test macOS tag generation."""
+        assert _macos_tag(arch=arch, codename=codename) == expected
 
 
 class TestCandidateTags:
-    """Tests for candidate_tags."""
+    """Tests for candidate_tags.
 
-    def test_descending_order_and_any_fallback(self) -> None:
-        """Test that tags descend from the current major and end with the any tag."""
-        tags = candidate_tags(Platform(arch="arm64", macos_major=15))
-        assert tags == [
-            "arm64_sequoia",
-            "arm64_sonoma",
-            "arm64_ventura",
-            "arm64_monterey",
-            "arm64_big_sur",
-            "all",
-        ]
+    Tags descend from the running major's codename and always end with the
+    arch-independent ``all`` tag; codenames newer than the running major are
+    excluded. Exact-list equality below subsumes ordering and exclusion.
+    """
 
-    def test_excludes_majors_newer_than_current(self) -> None:
-        """Test that codenames newer than the running major are excluded."""
-        tags = candidate_tags(Platform(arch="x86_64", macos_major=13))
-        assert tags == ["ventura", "monterey", "big_sur", "all"]
-        assert "sonoma" not in tags
-        assert "tahoe" not in tags
-
-    def test_current_major_included(self) -> None:
-        """Test that the running major's own codename is the first tag."""
-        tags = candidate_tags(Platform(arch="arm64", macos_major=14))
-        assert tags[0] == "arm64_sonoma"
-
-    def test_any_tag_always_last(self) -> None:
-        """Test that the arch-independent tag is always appended last."""
-        tags = candidate_tags(Platform(arch="arm64", macos_major=11))
-        assert tags[-1] == "all"
-
-    def test_major_below_known_range_yields_only_any(self) -> None:
-        """Test that a major below every known codename yields only the any tag."""
-        tags = candidate_tags(Platform(arch="arm64", macos_major=10))
-        assert tags == ["all"]
+    @pytest.mark.parametrize(
+        ("platform", "expected"),
+        [
+            pytest.param(
+                Platform(arch="arm64", macos_major=15),
+                [
+                    "arm64_sequoia",
+                    "arm64_sonoma",
+                    "arm64_ventura",
+                    "arm64_monterey",
+                    "arm64_big_sur",
+                    "all",
+                ],
+                id="arm64_sequoia_full_descent",
+            ),
+            pytest.param(
+                Platform(arch="arm64", macos_major=14),
+                [
+                    "arm64_sonoma",
+                    "arm64_ventura",
+                    "arm64_monterey",
+                    "arm64_big_sur",
+                    "all",
+                ],
+                id="current_major_first_excludes_newer",
+            ),
+            pytest.param(
+                Platform(arch="x86_64", macos_major=13),
+                ["ventura", "monterey", "big_sur", "all"],
+                id="intel_excludes_newer",
+            ),
+            pytest.param(
+                Platform(arch="arm64", macos_major=11),
+                ["arm64_big_sur", "all"],
+                id="oldest_known_then_any",
+            ),
+            pytest.param(
+                Platform(arch="arm64", macos_major=10),
+                ["all"],
+                id="below_known_range_only_any",
+            ),
+        ],
+    )
+    def test_candidate_tags(self, platform, expected) -> None:
+        """Test candidate tag generation."""
+        assert candidate_tags(platform) == expected
 
 
 class TestPlatformTag:
     """Tests for platform_tag."""
 
-    def test_known_major(self) -> None:
-        """Test that a known major maps to its codename tag."""
-        assert platform_tag(Platform(arch="arm64", macos_major=14)) == "arm64_sonoma"
-
-    def test_unknown_major_stringifies_number(self) -> None:
-        """Test that an unknown major falls back to the stringified number."""
-        assert platform_tag(Platform(arch="arm64", macos_major=99)) == "arm64_99"
-
-    def test_intel_known_major(self) -> None:
-        """Test that an Intel known major uses the bare codename."""
-        assert platform_tag(Platform(arch="x86_64", macos_major=13)) == "ventura"
+    @pytest.mark.parametrize(
+        ("platform", "expected"),
+        [
+            pytest.param(
+                Platform(arch="arm64", macos_major=14), "arm64_sonoma", id="known_major"
+            ),
+            pytest.param(
+                Platform(arch="arm64", macos_major=99),
+                "arm64_99",
+                id="unknown_major_stringified",
+            ),
+            pytest.param(
+                Platform(arch="x86_64", macos_major=13), "ventura", id="intel_known"
+            ),
+        ],
+    )
+    def test_platform_tag(self, platform, expected) -> None:
+        """Test platform tag generation."""
+        assert platform_tag(platform) == expected
 
 
 class TestCurrentPlatform:
@@ -131,6 +157,11 @@ class TestResolveBottle:
     """Tests for resolve_bottle."""
 
     def _files(self) -> dict:
+        """Get the files map for bottle resolution.
+
+        Returns:
+            A dictionary mapping bottle tags to their metadata.
+        """
         return {
             "arm64_sonoma": {
                 "url": "https://example/arm64_sonoma",
@@ -200,6 +231,14 @@ class TestParseFormula:
     """Tests for _parse_formula."""
 
     def _obj(self, **overrides) -> dict:
+        """Get the base object for formula parsing tests.
+
+        Args:
+            **overrides: Optional keyword arguments to override default values.
+
+        Returns:
+            A dictionary representing the formula object.
+        """
         obj = {
             "name": "wget",
             "desc": "retrieves files",
@@ -224,6 +263,7 @@ class TestParseFormula:
             },
         }
         obj.update(overrides)
+
         return obj
 
     def test_row_field_mapping(self) -> None:
@@ -239,7 +279,7 @@ class TestParseFormula:
         """Test that truthy source values are coerced to real bools."""
         row, _, _ = _parse_formula(self._obj(), platform=Platform("arm64", 14))
         assert row["keg_only"] is True
-        assert row["has_service"] is True  # derived from non-empty service dict
+        assert row["has_service"] is True  # Derived from non-empty service dict
         assert row["post_install"] is True
         assert row["deprecated"] is True
         assert row["disabled"] is False
@@ -303,6 +343,14 @@ class TestParseCask:
     """Tests for _parse_cask."""
 
     def _obj(self, **overrides) -> dict:
+        """Get the base object for formula parsing tests.
+
+        Args:
+            **overrides: Optional keyword arguments to override default values.
+
+        Returns:
+            A dictionary representing the formula object.
+        """
         obj = {
             "token": "firefox",
             "name": ["Firefox", "Firefox Browser"],
@@ -319,6 +367,7 @@ class TestParseCask:
             "disabled": False,
         }
         obj.update(overrides)
+
         return obj
 
     def test_display_name_is_first_of_list(self) -> None:

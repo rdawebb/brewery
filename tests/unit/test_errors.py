@@ -54,20 +54,22 @@ class TestBrewError:
 class TestExceptionHierarchy:
     """Test the exception hierarchy."""
 
-    def test_command_and_timeout_are_transient(self) -> None:
-        """Test that BrewCommandError and BrewTimeoutError are transient."""
-        assert isinstance(BrewCommandError(), TransientError)
-        assert isinstance(BrewTimeoutError(), TransientError)
-
-    def test_package_warnings_are_user_errors(self) -> None:
-        """Test that PackageNotFoundError, AlreadyInstalledWarning, and PinnedPackageWarning are UserErrors."""
-        assert isinstance(PackageNotFoundError(), UserError)
-        assert isinstance(AlreadyInstalledWarning(), UserError)
-        assert isinstance(PinnedPackageWarning(), UserError)
-
-    def test_cache_error_is_sys_error(self) -> None:
-        """Test that CacheError is a SysError."""
-        assert isinstance(CacheError(), SysError)
+    @pytest.mark.parametrize(
+        ("exc", "base"),
+        [
+            pytest.param(BrewCommandError(), TransientError, id="command_is_transient"),
+            pytest.param(BrewTimeoutError(), TransientError, id="timeout_is_transient"),
+            pytest.param(PackageNotFoundError(), UserError, id="not_found_is_user"),
+            pytest.param(
+                AlreadyInstalledWarning(), UserError, id="already_installed_is_user"
+            ),
+            pytest.param(PinnedPackageWarning(), UserError, id="pinned_is_user"),
+            pytest.param(CacheError(), SysError, id="cache_is_sys"),
+        ],
+    )
+    def test_exception_base_class(self, exc, base) -> None:
+        """Test that the exception is an instance of the base class."""
+        assert isinstance(exc, base)
 
 
 class TestDefaultMessages:
@@ -150,7 +152,6 @@ class TestFormatErrorMessage:
 
     def test_missing_template_key_falls_back_gracefully(self) -> None:
         """Test that missing template keys fall back gracefully."""
-        # Neither {error} nor {path} are in context, so format() raises KeyError
         # Should fall back to the bare message
         msg = format_error_message(CacheError(message="cache boom"))
         assert "cache boom" in msg

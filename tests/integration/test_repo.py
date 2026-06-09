@@ -15,7 +15,15 @@ pytestmark = pytest.mark.integration
 
 
 def _provider_calls(mock_brew, subcommand: str) -> list[tuple[str, ...]]:
-    """Filter the mock_brew call log to brew invocations of a given subcommand."""
+    """Filter the mock_brew call log to brew invocations of a given subcommand.
+
+    Args:
+        mock_brew: The mock brew call log.
+        subcommand: The subcommand to filter by.
+
+    Returns:
+        A list of tuples representing the filtered brew calls.
+    """
     return [
         c for c in mock_brew if len(c) >= 2 and c[0] == "brew" and c[1] == subcommand
     ]
@@ -27,13 +35,29 @@ def _repo_with_providers(catalog, *, formula=None, cask=None) -> Repository:
     The default brew_formula/brew_cask backends are shared module singletons, so
     a test must never mutate repo.formula/repo.cask in place. Injecting fresh
     backends via the constructor keeps stateful fakes isolated to one test.
+
+    Args:
+        catalog: The catalog to use for the repository.
+        formula: An optional formula backend to use.
+        cask: An optional cask backend to use.
+
+    Returns:
+        A Repository instance with the specified backends.
     """
     from types import SimpleNamespace
 
     from brewery.core.repo import Repository
     from brewery.providers import brew_cask, brew_formula
 
-    async def _noop(names) -> None:
+    async def _noop(names) -> list[str]:
+        """Simulate a no-op operation.
+
+        Args:
+            names: The names to operate on.
+
+        Returns:
+            The names unchanged.
+        """
         return names
 
     formula_backend = SimpleNamespace(
@@ -44,6 +68,7 @@ def _repo_with_providers(catalog, *, formula=None, cask=None) -> Repository:
     cask_backend = SimpleNamespace(
         install=_noop, uninstall=cask or _noop, upgrade=cask or _noop
     )
+
     return Repository(
         catalog=catalog,
         formula_backend=formula_backend if formula else brew_formula.backend,
@@ -58,7 +83,7 @@ class TestGetAllInstalled:
         """Test that get_all_installed returns all kinds sorted by (kind.value, name)."""
         pkgs = repo.get_all_installed()
 
-        # Sorted by (kind.value, name) -> None: casks before formulae, then by name.
+        # Sorted by (kind.value, name) -> None: casks before formulae, then by name
         assert [p.name for p in pkgs] == ["iina", "act", "yazi"]
         assert [p.kind for p in pkgs] == [
             PackageKind.CASK,
@@ -121,8 +146,8 @@ class TestOutdatedDerivation:
     def test_get_outdated_does_not_refresh(self, repo, monkeypatch):
         """Test that get_outdated never touches the network/refresh path.
 
-        The refresh is the caller's responsibility now, so a read alone must not
-        invoke refresh_catalog. Patching it to raise proves the read is pure.
+        The refresh is the caller's responsibility, so a read alone must not
+        invoke refresh_catalog, and patching it to raise proves the read is pure.
         """
         import brewery.daemon.catalog_refresh as refresh_mod
 
@@ -136,7 +161,7 @@ class TestOutdatedDerivation:
     async def test_caller_refresh_then_read(self, repo, monkeypatch):
         """Test the caller-side sequence: refresh first, then a pure read.
 
-        This mirrors what the CLI's `outdated --check` does — await the refresh
+        This mirrors what the CLI's `outdated --check` does: await the refresh
         in the caller's async context, then call the sync get_outdated().
         """
         called = {"n": 0}
@@ -287,12 +312,32 @@ class TestUninstall:
         """
         import shutil
 
-        async def fake_formula_uninstall(names) -> None:
-            shutil.rmtree(fake_env.cellar / "yazi", ignore_errors=True)
+        async def fake_formula_uninstall(names) -> list[str]:
+            """Simulate brew uninstall removing the keg during the operation.
+
+            Args:
+                names: The names to operate on.
+
+            Returns:
+                The names unchanged.
+            """
+            for name in names:
+                shutil.rmtree(fake_env.cellar / name, ignore_errors=True)
+
             return names
 
-        async def fake_cask_uninstall(names) -> None:
-            shutil.rmtree(fake_env.caskroom / "iina", ignore_errors=True)
+        async def fake_cask_uninstall(names) -> list[str]:
+            """Simulate brew uninstall removing the keg during the operation.
+
+            Args:
+                names: The names to operate on.
+
+            Returns:
+                The names unchanged.
+            """
+            for name in names:
+                shutil.rmtree(fake_env.caskroom / name, ignore_errors=True)
+
             return names
 
         repo = _repo_with_providers(
@@ -373,7 +418,15 @@ class TestUpgrade:
 
         import orjson
 
-        async def fake_formula_upgrade(names) -> None:
+        async def fake_formula_upgrade(names) -> list[str]:
+            """Simulate brew upgrade replacing the keg with a new version.
+
+            Args:
+                names: The names to operate on.
+
+            Returns:
+                The names unchanged.
+            """
             act_dir = fake_env.cellar / "act"
             shutil.rmtree(act_dir)
             new_keg = act_dir / "0.2.89"
@@ -381,6 +434,7 @@ class TestUpgrade:
             (new_keg / "INSTALL_RECEIPT.json").write_bytes(
                 orjson.dumps({"source": {"tap": "homebrew/core"}})
             )
+
             return names
 
         repo = _repo_with_providers(catalog, formula=fake_formula_upgrade)

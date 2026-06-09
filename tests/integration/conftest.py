@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 import orjson
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
+    from _layout import Brew
     from brewery.core.catalog import Catalog
     from brewery.core.config import BreweryENV
     from brewery.core.repo import Repository
@@ -58,8 +60,11 @@ def fixture_json(fixture_text) -> dict[str, dict]:
 
 @pytest.fixture
 def fake_env(tmp_path, monkeypatch) -> BreweryENV:
-    """Build a hermetic Homebrew prefix in a temp directory and populate
-    Cellar/Caskroom with the directory structure scan_installed needs.
+    """Build a hermetic Homebrew prefix and populate the fixed yazi/act/iina
+    layout that scan_installed needs, using the shared Brew builder.
+
+    link_opt=False keeps the layout to bare kegs (no opt symlinks, no receipts,
+    no link/pin bookkeeping), matching what these cache/repo tests expect.
 
     Args:
         tmp_path: The pytest tmp_path fixture.
@@ -68,21 +73,54 @@ def fake_env(tmp_path, monkeypatch) -> BreweryENV:
     Returns:
         The fake environment.
     """
-    prefix = tmp_path / "homebrew"
-    cellar = prefix / "Cellar"
-    caskroom = prefix / "Caskroom"
-
-    (cellar / "yazi" / "26.5.6").mkdir(parents=True)
-    (cellar / "act" / "0.2.88").mkdir(parents=True)
-    (caskroom / "iina" / "1.4.1,160").mkdir(parents=True)
+    from _layout import Brew
 
     from brewery.core import config
-    from brewery.core.config import BreweryENV
 
-    env = BreweryENV(prefix=prefix, cellar=cellar, caskroom=caskroom)
+    brew = Brew(tmp_path)
+    brew.formula("yazi", "26.5.6", link_opt=False)
+    brew.formula("act", "0.2.88", link_opt=False)
+    brew.cask("iina", ["1.4.1,160"])
+
+    env = brew.env
     monkeypatch.setattr(config, "_env_cache", env)
 
     return env
+
+
+@pytest.fixture
+def brew(tmp_path) -> Brew:
+    """A fresh hermetic Homebrew layout built by the shared Brew helper.
+
+    Args:
+        tmp_path: The pytest tmp_path fixture.
+
+    Returns:
+        The fresh Brew layout.
+    """
+    from _layout import Brew
+
+    return Brew(tmp_path)
+
+
+@pytest.fixture
+def empty_catalog(tmp_path) -> Generator[Catalog, None, None]:
+    """A fresh Catalog backed by an isolated temp database file.
+
+    Yields the open catalog and closes it on teardown, so tests need no manual
+    try/finally close.
+
+    Args:
+        tmp_path: The pytest tmp_path fixture.
+
+    Yields:
+        The fresh Catalog.
+    """
+    from brewery.core.catalog import Catalog
+
+    cat = Catalog(db_path=tmp_path / "catalog.db")
+    yield cat
+    cat.close()
 
 
 @pytest.fixture

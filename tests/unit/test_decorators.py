@@ -31,6 +31,7 @@ class TestRetryOnTransient:
 
         @retry_on_transient(max_retries=3, base_delay=0)
         async def op():
+            """Simulate an operation that may fail."""
             calls.append(1)
             return "ok"
 
@@ -43,6 +44,7 @@ class TestRetryOnTransient:
 
         @retry_on_transient(max_retries=3, base_delay=0)
         async def op():
+            """Simulate an operation that may fail."""
             attempts["n"] += 1
             if attempts["n"] < 3:
                 raise TransientError("temporary")
@@ -57,6 +59,7 @@ class TestRetryOnTransient:
 
         @retry_on_transient(max_retries=3, base_delay=0)
         async def op():
+            """Simulate an operation that may fail."""
             attempts["n"] += 1
             raise TransientError("always fails")
 
@@ -70,6 +73,7 @@ class TestRetryOnTransient:
 
         @retry_on_transient(max_retries=3, base_delay=0)
         async def op():
+            """Simulate an operation that may fail."""
             attempts["n"] += 1
             raise UserError("bad input")
 
@@ -82,6 +86,7 @@ class TestRetryOnTransient:
         delays: list[float] = []
 
         async def _record(d):
+            """Record the delay."""
             delays.append(d)
 
         monkeypatch.setattr(asyncio, "sleep", _record)
@@ -92,6 +97,7 @@ class TestRetryOnTransient:
 
         with pytest.raises(TransientError):
             await op()
+
         # Delays applied after attempts 1 and 2 (none after the final attempt)
         assert delays == [1.0, 2.0]
 
@@ -101,6 +107,7 @@ class TestRetryOnTransient:
 
             @retry_on_transient()
             def sync_op():
+                """Simulate a synchronous operation that may fail."""
                 return 1
 
 
@@ -112,6 +119,7 @@ class TestLogOperation:
 
         @log_operation(event_prefix="thing")
         async def op(x):
+            """Simulate an operation that may fail."""
             return x * 2
 
         assert await op(21) == 42
@@ -121,6 +129,7 @@ class TestLogOperation:
 
         @log_operation(event_prefix="thing")
         async def op():
+            """Simulate an operation that may fail."""
             raise ValueError("nope")
 
         with pytest.raises(ValueError):
@@ -133,6 +142,7 @@ class TestLogOperation:
 
         @log_operation(event_prefix="myop", log_args=["name"])
         async def op(name):
+            """Simulate an operation that may fail."""
             return "done"
 
         with caplog.at_level(logging.INFO, logger="brewery.core.decorators"):
@@ -141,6 +151,7 @@ class TestLogOperation:
         messages = [r.getMessage() for r in caplog.records]
         assert any("myop_start" in m for m in messages)
         assert any("myop_complete" in m for m in messages)
+
         # The named arg should appear in the start context
         assert any("name=foo" in m for m in messages)
 
@@ -151,6 +162,7 @@ class TestLogOperation:
 
         @log_operation(event_prefix="myop")
         async def op():
+            """Simulate an operation that may fail."""
             raise RuntimeError("kaboom")
 
         with caplog.at_level(logging.ERROR, logger="brewery.core.decorators"):
@@ -166,6 +178,7 @@ class TestLogOperation:
 
         @log_operation(event_prefix="listop", log_result=True)
         async def op():
+            """Simulate an operation that may fail."""
             return [1, 2, 3]
 
         with caplog.at_level(logging.INFO, logger="brewery.core.decorators"):

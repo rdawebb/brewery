@@ -28,7 +28,21 @@ def make_formula_row(
     keg_only: bool = False,
     has_service: bool = False,
 ) -> FormulaRow:
-    """Build a FormulaRow with sensible defaults for the fields merge reads."""
+    """Build a FormulaRow with sensible defaults for the fields merge reads.
+
+    Args:
+        name: The name of the formula.
+        desc: A description of the formula.
+        tap: The tap the formula belongs to.
+        version: The version of the formula.
+        revision: The revision of the formula.
+        version_scheme: The version scheme of the formula.
+        keg_only: Whether the formula is keg-only.
+        has_service: Whether the formula has a service.
+
+    Returns:
+        A FormulaRow with the specified fields.
+    """
     return FormulaRow(
         name=name,
         desc=desc,
@@ -57,7 +71,18 @@ def make_cask_row(
     tap: str | None = "homebrew/cask",
     version: str | None = "120.0",
 ) -> CaskRow:
-    """Build a CaskRow with sensible defaults for the fields merge reads."""
+    """Build a CaskRow with sensible defaults for the fields merge reads.
+
+    Args:
+        token: The token for the cask.
+        name: The name of the cask.
+        desc: A description of the cask.
+        tap: The tap the cask belongs to.
+        version: The version of the cask.
+
+    Returns:
+        A CaskRow with the specified fields.
+    """
     return CaskRow(
         token=token,
         name=name,
@@ -88,7 +113,23 @@ def make_record(
     tap: str | None = None,
     deps: list[str] | None = None,
 ) -> InstalledRecord:
-    """Build an InstalledRecord with defaults for the fields merge reads."""
+    """Build an InstalledRecord with defaults for the fields merge reads.
+
+    Args:
+        name: The name of the package.
+        kind: The kind of the package (formula or cask).
+        version: The version of the package.
+        revision: The revision of the package.
+        version_scheme: The version scheme of the package.
+        head: Whether the package is a head version.
+        linked: Whether the package is linked.
+        pinned: Whether the package is pinned.
+        tap: The tap the package belongs to.
+        deps: The dependencies of the package.
+
+    Returns:
+        An InstalledRecord with the specified fields.
+    """
     return InstalledRecord(
         name=name,
         kind=kind,
@@ -115,6 +156,15 @@ class FakeCatalog(Catalog):
         deps: dict[str, list[str]] | None = None,
         search_results: list[FormulaRow | CaskRow] | None = None,
     ) -> None:
+        """Initialise a FakeCatalog with the specified fields.
+
+        Args:
+            formulae: A mapping of formula names to their rows.
+            casks: A mapping of cask tokens to their rows.
+            aliases: A mapping of alias names to their real names.
+            deps: A mapping of formula names to their dependencies.
+            search_results: A list of search result rows.
+        """
         self._formulae = formulae or {}
         self._casks = casks or {}
         self._aliases = aliases or {}
@@ -122,24 +172,81 @@ class FakeCatalog(Catalog):
         self._search_results = search_results or []
 
     def get_formula(self, name: str) -> FormulaRow | None:
+        """Get a formula by name.
+
+        Args:
+            name: The name of the formula.
+
+        Returns:
+            The formula row, or None if not found.
+        """
         return self._formulae.get(name)
 
     def get_formulae(self, names: list[str]) -> dict[str, FormulaRow]:
+        """Get multiple formulae by their names.
+
+        Args:
+            names: The names of the formulae.
+
+        Returns:
+            A mapping of formula names to their rows.
+        """
         return {n: self._formulae[n] for n in names if n in self._formulae}
 
     def get_cask(self, token: str) -> CaskRow | None:
+        """Get a cask by its token.
+
+        Args:
+            token: The token of the cask.
+
+        Returns:
+            The cask row, or None if not found.
+        """
         return self._casks.get(token)
 
     def get_casks(self, tokens: list[str]) -> dict[str, CaskRow]:
+        """Get multiple casks by their tokens.
+
+        Args:
+            tokens: The tokens of the casks.
+
+        Returns:
+            A mapping of cask tokens to their rows.
+        """
         return {t: self._casks[t] for t in tokens if t in self._casks}
 
     def resolve_alias(self, name: str) -> str:
+        """Resolve an alias to its real name.
+
+        Args:
+            name: The name of the alias.
+
+        Returns:
+            The real name of the formula or cask.
+        """
         return self._aliases.get(name, name)
 
     def deps_of(self, name: str) -> list[str]:
+        """Get the dependencies of a formula.
+
+        Args:
+            name: The name of the formula.
+
+        Returns:
+            A list of dependency names.
+        """
         return self._deps.get(name, [])
 
     def search(self, query: str, limit: int = 50) -> list[FormulaRow | CaskRow]:
+        """Search for formulae and casks matching a query.
+
+        Args:
+            query: The search query.
+            limit: The maximum number of results to return.
+
+        Returns:
+            A list of matching formulae and casks.
+        """
         return self._search_results
 
 
@@ -289,48 +396,52 @@ class TestMergeFormula:
 
 
 class TestFormulaOutdated:
-    """Tests for the outdated decision, exercised via merge_one."""
+    """Tests for the outdated decision, exercised via merge_one.
 
-    def _outdated(self, record: InstalledRecord, row: FormulaRow) -> bool:
+    A HEAD install is never outdated; otherwise a higher catalog version,
+    version_scheme, or revision marks the installed package outdated, while
+    equal effective versions (and a lower catalog scheme) do not.
+    """
+
+    @pytest.mark.parametrize(
+        ("record", "row", "expected"),
+        [
+            pytest.param(
+                make_record("wget", version="1.21.4", head=True),
+                make_formula_row("wget", version="9.9.9"),
+                False,
+                id="head_install_never_outdated",
+            ),
+            pytest.param(
+                make_record("wget", version="1.21.4", version_scheme=0),
+                make_formula_row("wget", version="1.21.4", version_scheme=1),
+                True,
+                id="higher_version_scheme_forces_outdated",
+            ),
+            pytest.param(
+                make_record("wget", version="1.21.4", revision=0),
+                make_formula_row("wget", version="1.21.4", revision=1),
+                True,
+                id="revision_bump_is_outdated",
+            ),
+            pytest.param(
+                make_record("wget", version="1.21.4", revision=1),
+                make_formula_row("wget", version="1.21.4", revision=1),
+                False,
+                id="equal_effective_versions_not_outdated",
+            ),
+            pytest.param(
+                make_record("wget", version="1.21.4", version_scheme=2),
+                make_formula_row("wget", version="1.21.4", version_scheme=1),
+                False,
+                id="lower_catalog_scheme_not_outdated",
+            ),
+        ],
+    )
+    def test_outdated_decision(self, record, row, expected) -> None:
+        """Test the outdated decision logic."""
         catalog = FakeCatalog(formulae={record.name: row})
-        return PackageStatus.OUTDATED in merge_one(record, catalog).status
-
-    def test_head_install_never_outdated(self) -> None:
-        """Test that a HEAD install is never reported outdated."""
-        record = make_record("wget", version="1.21.4", head=True)
-        row = make_formula_row("wget", version="9.9.9")
-        assert self._outdated(record, row) is False
-
-    def test_higher_version_scheme_is_outdated(self) -> None:
-        """Test that a higher catalog version_scheme forces outdated.
-
-        Even when version strings would otherwise compare equal, a scheme
-        bump means the installed package is outdated.
-        """
-        record = make_record("wget", version="1.21.4", version_scheme=0)
-        row = make_formula_row("wget", version="1.21.4", version_scheme=1)
-        assert self._outdated(record, row) is True
-
-    def test_revision_bump_is_outdated(self) -> None:
-        """Test that a revision-only difference is detected as outdated."""
-        record = make_record("wget", version="1.21.4", revision=0)
-        row = make_formula_row("wget", version="1.21.4", revision=1)
-        assert self._outdated(record, row) is True
-
-    def test_equal_effective_versions_not_outdated(self) -> None:
-        """Test that equal effective versions are not outdated."""
-        record = make_record("wget", version="1.21.4", revision=1)
-        row = make_formula_row("wget", version="1.21.4", revision=1)
-        assert self._outdated(record, row) is False
-
-    def test_lower_version_scheme_does_not_force_outdated(self) -> None:
-        """Test that a lower catalog scheme does not by itself force outdated.
-
-        With matching versions and no scheme increase, the package is current.
-        """
-        record = make_record("wget", version="1.21.4", version_scheme=2)
-        row = make_formula_row("wget", version="1.21.4", version_scheme=1)
-        assert self._outdated(record, row) is False
+        assert (PackageStatus.OUTDATED in merge_one(record, catalog).status) is expected
 
 
 class TestMergeCask:

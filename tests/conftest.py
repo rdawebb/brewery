@@ -6,6 +6,7 @@ between tests so that test order cannot leak state.
 """
 
 from __future__ import annotations
+from typing import Generator
 
 import os
 import sys
@@ -34,31 +35,109 @@ _RESETTABLE: list[tuple[str, str, object]] = [
 
 
 @pytest.fixture(autouse=True)
-def _reset_module_state():
-    """Reset known singletons/caches before and after each test.
+def _reset_module_state() -> Generator[None, None, None]:
+    """Reset known singletons/caches before each test."""
+    for modname, attr, value in _RESETTABLE:
+        mod = sys.modules.get(modname)
+        if mod is not None and hasattr(mod, attr):
+            setattr(mod, attr, value)
 
-    Yields to allow test execution, then resets state after.
+    # Clear renderer width cache in place if present
+    renderers = sys.modules.get("brewery.cli.renderers")
+    if renderers is not None and hasattr(renderers, "_width_cache"):
+        renderers._width_cache.clear()
+
+    # Clear the on-disk file cache so persisted records cannot leak between tests
+    import shutil
+
+    cache_root = Path(os.environ["BREWERY_CACHE_DIR"])
+    if cache_root.exists():
+        shutil.rmtree(cache_root, ignore_errors=True)
+
+    yield
+
+
+class FakeHTTPClient:
+    """Async httpx-like stub shared by the catalog fetch/refresh tests.
+
+    Construct with either a single canned response/exception, or a mapping of
+    ``url -> response``. Every GET is recorded (url + request headers) so tests
+    can assert that conditional validators were sent, and ``aclose()`` flips
+    ``closed`` so client-ownership tests can check the caller did not close an
+    injected client.
+
+    Args:
+        response: One of an ``httpx.Response``, an ``Exception`` to raise, a
+            ``dict[str, httpx.Response]`` keyed by URL, or ``None``.
+        raise_on_get: If set, every GET raises this exception (used for
+            transport-error paths), regardless of ``response``.
     """
 
-    def _apply() -> None:
-        """Applies the reset by setting attributes to their initial values."""
-        for modname, attr, value in _RESETTABLE:
-            mod = sys.modules.get(modname)
-            if mod is not None and hasattr(mod, attr):
-                setattr(mod, attr, value)
+    def __init__(self, response=None, *, raise_on_get=None) -> None:
+        """Initialise a FakeHTTPClient.
 
-        # Clear renderer width cache in place if present
-        renderers = sys.modules.get("brewery.cli.renderers")
-        if renderers is not None and hasattr(renderers, "_width_cache"):
-            renderers._width_cache.clear()
+        Args:
+            response: One of an `httpx.Response`, an `Exception` to raise, a
+                `dict[str, httpx.Response]` keyed by URL, or `None`.
+            raise_on_get: If set, every GET raises this exception (used for
+                transport-error paths), regardless of `response`.
+        """
+        self._map = response if isinstance(response, dict) else None
+        self._single = None if isinstance(response, dict) else response
+        self._raise_on_get = raise_on_get
+        self.last_url: str | None = None
+        self.last_headers: dict[str, str] | None = None
+        self.requests: list[tuple[str, dict[str, str]]] = []
+        self.closed = False
 
-        # Clear the on-disk file cache so persisted records cannot leak between tests
-        import shutil
+    async def get(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        timeout: float = 30.0,
+        follow_redirects: bool = False,
+    ) -> None:
+        """
+        Simulate an HTTP GET request.
 
-        cache_root = Path(os.environ["BREWERY_CACHE_DIR"])
-        if cache_root.exists():
-            shutil.rmtree(cache_root, ignore_errors=True)
+        Args:
+            url: The URL to fetch.
+            headers: Headers to include in the request.
+            timeout: Request timeout.
+            follow_redirects: Whether to follow redirects.
+        """
+        self.last_url = url
+        self.last_headers = dict(headers or {})
+        self.requests.append((url, dict(headers or {})))
 
-    _apply()
-    yield
-    _apply()
+        if self._raise_on_get is not None:
+            raise self._raise_on_get
+
+        if self._map is not None:
+            if url not in self._map:
+                raise AssertionError(f"unexpected URL fetched: {url}")
+
+            return self._map[url]
+
+        if isinstance(self._single, Exception):
+            raise self._single
+
+        return self._single
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+@pytest.fixture
+def http_client():
+    """Factory for a FakeHTTPClient.
+
+    Returns a callable so each test builds its own client with the response
+    shape it needs.
+    """
+
+    def _make(response=None, *, raise_on_get=None) -> FakeHTTPClient:
+        return FakeHTTPClient(response, raise_on_get=raise_on_get)
+
+    return _make
