@@ -16,9 +16,7 @@ log: BreweryLogger = get_logger(name=__name__)
 _TIMEOUT = 60.0
 
 
-async def refresh_catalog(
-    catalog: Catalog, client: _HttpClient | None = None
-) -> None:
+async def refresh_catalog(catalog: Catalog, client: _HttpClient | None = None) -> None:
     """Conditionally fetch each catalog feed and load any that changed.
 
     Validators are persisted only after a changed feed's body is written, so a
@@ -40,9 +38,7 @@ async def _refresh(catalog: Catalog, client: _HttpClient) -> None:
     for feed in catalog_api.FEEDS:
         etag, last_modified = catalog_api.read_validators(catalog=catalog, feed=feed)
 
-        result = await catalog_api.fetch_feed(
-            feed, etag, last_modified, client=client
-        )
+        result = await catalog_api.fetch_feed(feed, etag, last_modified, client=client)
 
         if result.modified and result.body is not None:
             if feed.name == "formula":

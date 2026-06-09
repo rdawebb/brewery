@@ -1,10 +1,10 @@
 # Install project & fix entry point
 install:
-  uv sync && uv run src/brewery/scripts/fix_entry_point.py
+  uv sync
 
 # Install development dependencies
 install-dev:
-  uv sync --all-extras && uv run src/brewery/scripts/fix_entry_point.py
+  uv sync --all-extras
 
 # Run all tests
 test:
