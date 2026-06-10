@@ -130,6 +130,7 @@ async def run_capture(*cmd: str, timeout: Optional[int] = None) -> tuple[str, st
         )
         try:
             process.kill()
+
         finally:
             raise BrewTimeoutError(command=" ".join(cmd), timeout=timeout) from e
 
