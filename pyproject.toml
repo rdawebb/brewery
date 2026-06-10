@@ -28,8 +28,8 @@ dev = [
   "pytest-asyncio>=1.4.0,<2.0.0",
   "pytest-cov>=7.1.0,<8.0.0",
   "ruff>=0.15.16,<0.16.0",
-  "rust-just>=1.51.0,<2.0.0",
-  "ty>=0.0.45,<1.0.0"
+  "rust-just>=1.52.0,<2.0.0",
+  "ty>=0.0.46,<1.0.0"
 ]
 
 [tool.uv.build-backend]
