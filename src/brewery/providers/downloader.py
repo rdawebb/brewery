@@ -1,26 +1,4 @@
-"""Download Homebrew bottle tarballs from ghcr.io into a content-addressed cache.
-
-Bottle URLs and their expected SHA256 are already resolved and stored in SQLite
-(OS-matched), so this module's job is narrow: given a (url, sha256), stream the
-blob to a cache keyed by its digest, verifying integrity as it goes.
-
-ghcr.io specifics:
-  * Anonymous pulls use Homebrew's hardcoded bearer token `QQ==`. It is sent
-    only to ghcr.io — the registry answers a blob GET with a 307 to a presigned
-    CDN URL, and forwarding the bearer to that host is both unnecessary and, for
-    some object stores, an error. httpx strips `Authorization` on cross-host
-    redirects, which is exactly the behaviour we want.
-
-Integrity & atomicity:
-  * The cache is content-addressed (`<cache>/<sha256>`). We only ever rename a
-    fully-downloaded, hash-verified file into place, so a present cache entry is
-    a trusted one and a hit costs no I/O. A failed download leaves no artifact.
-
-Concurrency:
-  * `fetch` is the unit of work; `fetch_all` runs a closure of bottles with
-    bounded parallelism. The install pipeline can instead call `fetch` per
-    formula inside its own try/except to get per-formula fallback to brew.
-"""
+"""Download Homebrew bottle tarballs from ghcr.io into a content-addressed cache."""
 
 from __future__ import annotations
 
