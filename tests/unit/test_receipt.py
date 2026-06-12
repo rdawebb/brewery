@@ -179,8 +179,17 @@ OPENSSL_TAB_DEPS = [
 
 def _rebuild(o: dict, tab_deps: list[dict]) -> dict:
     """Rebuild from a parsed receipt, deps supplied in tab shape (with
-    compatibility_version) to exercise from_tab stripping."""
+    compatibility_version) to exercise from_tab stripping.
+
+    Args:
+        o: The parsed receipt.
+        tab_deps: The tab-shaped dependencies.
+
+    Returns:
+        dict: The rebuilt receipt.
+    """
     src, ver = o["source"], o["source"]["versions"]
+
     return build_receipt(
         homebrew_version=o["homebrew_version"],
         changed_files=o["changed_files"],
@@ -210,11 +219,13 @@ def _rebuild(o: dict, tab_deps: list[dict]) -> dict:
     ],
     ids=["sqlite", "openssl", "ca-certificates"],
 )
-def test_round_trip_is_byte_exact(original, tab_deps):
+def test_round_trip_is_byte_exact(original, tab_deps) -> None:
+    """Test that round-tripping a receipt preserves byte-for-byte equality."""
     assert dumps(_rebuild(json.loads(original), tab_deps)) == original
 
 
-def test_all_bottle_fills_arch_from_host_and_nulls_built_on():
+def test_all_bottle_fills_arch_from_host_and_nulls_built_on() -> None:
+    """Test that an all-bottle tab fills arch from host and nulls built_on."""
     # Simulate an all-bottle tab: arch=None, built_on=None
     parsed = json.loads(CA_CERTIFICATES)
     with mock.patch.object(r.platform, "machine", lambda: "x86_64"):
@@ -236,7 +247,8 @@ def test_all_bottle_fills_arch_from_host_and_nulls_built_on():
     assert dumps(built) == CA_CERTIFICATES
 
 
-def test_from_tab_drops_compatibility_version():
+def test_from_tab_drops_compatibility_version() -> None:
+    """Test that from_tab drops compatibility_version."""
     d = RuntimeDependency.from_tab(OPENSSL_TAB_DEPS[0]).to_dict()
     assert "compatibility_version" not in d
     assert list(d) == [
@@ -250,11 +262,13 @@ def test_from_tab_drops_compatibility_version():
     assert d["full_name"] == "ca-certificates" and d["declared_directly"] is True
 
 
-def test_pkg_version_defaults_to_version():
+def test_pkg_version_defaults_to_version() -> None:
+    """Test that pkg_version defaults to version."""
     assert RuntimeDependency("readline", "8.3.3").to_dict()["pkg_version"] == "8.3.3"
 
 
-def test_top_level_field_order():
+def test_top_level_field_order() -> None:
+    """Test that the top-level fields are in the expected order."""
     receipt = _rebuild(json.loads(SQLITE), SQLITE_TAB_DEPS)
     assert list(receipt) == [
         "homebrew_version",
@@ -277,13 +291,14 @@ def test_top_level_field_order():
     ]
 
 
-def test_compiler_is_tab_sourced_not_constant():
-    # ca-certificates proves compiler isn't always clang.
+def test_compiler_is_tab_sourced_not_constant() -> None:
+    """Test that the compiler is sourced from the tab, not a constant."""
     receipt = _rebuild(json.loads(CA_CERTIFICATES), [])
     assert receipt["compiler"] == "gcc-12"
 
 
-def test_changed_files_sorted_in_output():
+def test_changed_files_sorted_in_output() -> None:
+    """Test that changed_files are sorted in the output."""
     receipt = build_receipt(
         homebrew_version="x",
         changed_files=["lib/z.pc", "bin/a", "lib/a.pc"],
@@ -300,13 +315,15 @@ def test_changed_files_sorted_in_output():
     assert receipt["changed_files"] == ["bin/a", "lib/a.pc", "lib/z.pc"]
 
 
-def test_dumps_no_trailing_newline_and_null_built_on():
+def test_dumps_no_trailing_newline_and_null_built_on() -> None:
+    """Test that dumps does not add a trailing newline and sets built_on to null."""
     text = dumps(_rebuild(json.loads(CA_CERTIFICATES), []))
     assert not text.endswith("\n")
     assert text.endswith('"built_on": null\n}')
 
 
-def test_write_receipt_atomic_mode_and_content(tmp_path):
+def test_write_receipt_atomic_mode_and_content(tmp_path) -> None:
+    """Test that write_receipt uses atomic mode and writes the correct content."""
     keg = tmp_path / "keg"
     keg.mkdir()
     receipt = _rebuild(json.loads(SQLITE), SQLITE_TAB_DEPS)
@@ -317,6 +334,7 @@ def test_write_receipt_atomic_mode_and_content(tmp_path):
     assert list(keg.glob("*.tmp")) == []
 
 
-def test_current_arch_maps_machine(monkeypatch):
+def test_current_arch_maps_machine(monkeypatch) -> None:
+    """Test that current_arch maps to the machine architecture."""
     monkeypatch.setattr(r.platform, "machine", lambda: "arm64")
     assert r.current_arch() == "arm64"

@@ -1,11 +1,4 @@
-"""Integration tests for the bottle downloader.
-
-All network I/O is mocked with `httpx.MockTransport`; no real requests are
-made. Coverage spans the ghcr redirect/auth-scoping, hash verification and
-atomic-write cleanup, cache hits, retry/backoff on transient failures, a
-mid-stream transport error (so a partial write can't corrupt the cache or the
-next attempt), the progress callback, and `fetch_all` concurrency bounding.
-"""
+"""Integration tests for the bottle downloader."""
 
 from __future__ import annotations
 

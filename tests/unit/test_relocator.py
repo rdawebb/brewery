@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import os
 import struct
-from pathlib import Path
+import subprocess
 
 import pytest
 
-from brewery.core import shell as shell_mod
 from brewery.providers import relocator as r
 from brewery.providers.relocator import InstallName, NameKind, RelocationError
 
@@ -113,17 +112,13 @@ def _fat_macho(slices: list[bytes]) -> bytes:
 
 
 @pytest.fixture
-def subs() -> dict[bytes, bytes]:
+def subs(brew_paths) -> dict[bytes, bytes]:
     """Fixture for building substitution mappings.
 
     Returns:
         A dictionary mapping placeholder bytes to their resolved values.
     """
-    return r.build_substitutions(
-        prefix=Path("/opt/homebrew"),
-        cellar=Path("/opt/homebrew/Cellar"),
-        repository=Path("/opt/homebrew/Library/Homebrew"),
-    )
+    return r.build_substitutions(**brew_paths)
 
 
 class TestSubstitution:
@@ -235,8 +230,8 @@ class TestMachOParsing:
 
 
 @pytest.fixture
-def fake_run_capture(monkeypatch):
-    """Patch shell.run_capture with a recording stub and return its call log.
+def fake_run(monkeypatch):
+    """Patch the relocator's subprocess boundary with a recording stub.
 
     Call with no args for a success stub, or pass stderr/returncode to simulate
     a tool failure. The returned list records each argv as it is run.
@@ -253,11 +248,11 @@ def fake_run_capture(monkeypatch):
     ) -> list[list[str]]:
         runs: list[list[str]] = []
 
-        async def stub(*cmd, timeout=None):
+        def stub(cmd, *args, **kwargs):
             runs.append(list(cmd))
-            return (stdout, stderr, returncode)
+            return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
 
-        monkeypatch.setattr(shell_mod, "run_capture", stub)
+        monkeypatch.setattr(r.subprocess, "run", stub)
         return runs
 
     return install
@@ -266,11 +261,9 @@ def fake_run_capture(monkeypatch):
 class TestMachORewrite:
     """Tests for Mach-O file relocation."""
 
-    def test_relocate_macho_builds_correct_argv(
-        self, tmp_path, subs, fake_run_capture
-    ) -> None:
+    def test_relocate_macho_builds_correct_argv(self, tmp_path, subs, fake_run) -> None:
         """Tests that the correct arguments are passed to the relocation commands."""
-        runs = fake_run_capture()
+        runs = fake_run()
         p = tmp_path / "libfoo.dylib"
         p.write_bytes(
             _thin_macho(
@@ -327,10 +320,10 @@ class TestMachORewrite:
         return argv[i : i + 3]
 
     def test_relocate_macho_noop_when_no_placeholders(
-        self, tmp_path, subs, fake_run_capture
+        self, tmp_path, subs, fake_run
     ) -> None:
         """Tests that no changes are made when there are no placeholders."""
-        runs = fake_run_capture()
+        runs = fake_run()
         p = tmp_path / "clean.dylib"
         p.write_bytes(
             _thin_macho(
@@ -345,7 +338,7 @@ class TestMachORewrite:
         assert runs == []
 
     def test_install_name_tool_failure_raises_relocation_error(
-        self, tmp_path, subs, fake_run_capture
+        self, tmp_path, subs, fake_run
     ) -> None:
         """Tests that the installation name tool is called with the correct arguments."""
         p = tmp_path / "lib.dylib"
@@ -357,7 +350,7 @@ class TestMachORewrite:
             )
         )
 
-        fake_run_capture(stderr="load command too large", returncode=1)
+        fake_run(stderr="load command too large", returncode=1)
         with pytest.raises(RelocationError) as exc:
             r.relocate_macho(p, subs)
         assert exc.value.path == p
@@ -453,7 +446,7 @@ class TestOrchestration:
     """Tests for orchestration of file relocations."""
 
     def test_relocate_keg_walks_all_file_kinds(
-        self, tmp_path, fake_run_capture
+        self, tmp_path, fake_run, brew_paths
     ) -> None:
         """Tests that all file kinds are processed during keg relocation."""
         keg = tmp_path / "keg"
@@ -478,45 +471,83 @@ class TestOrchestration:
         # Untouched file
         (keg / "lib" / "data.txt").write_text("no tokens\n")
 
-        fake_run_capture()
+        fake_run()
 
-        modified = r.relocate_keg(
-            keg,
-            prefix=Path("/opt/homebrew"),
-            cellar=Path("/opt/homebrew/Cellar"),
-            repository=Path("/opt/homebrew/Library/Homebrew"),
-        )
+        result = r.relocate_keg(keg, **brew_paths)
 
-        # Text + mach-o + symlink modified; data.txt not counted
-        assert modified == 3
+        # Fallback scan: text file + macho + symlink modified, data.txt untouched
+        assert result.changed_files == ["bin/foo-config"]
+        assert result.macho_relocated == 1
+        assert result.symlinks_relocated == 1
         assert "@@HOMEBREW" not in (keg / "bin" / "foo-config").read_text()
         assert os.readlink(keg / "bin" / "foo") == "/opt/homebrew/bin/foo"
 
+    def test_relocate_keg_uses_manifest_text_files_and_skips_scan(
+        self, tmp_path, monkeypatch, brew_paths
+    ) -> None:
+        """Tests that listed text files are processed and unlisted ones are skipped."""
+        keg = tmp_path / "keg"
+        (keg / "bin").mkdir(parents=True)
+        (keg / "lib" / "pkgconfig").mkdir(parents=True)
+        # listed text file (the manifest changed_files entry)
+        (keg / "lib" / "pkgconfig" / "foo.pc").write_text(
+            "prefix=@@HOMEBREW_PREFIX@@\n"
+        )
+        # a text file with a placeholder that is NOT listed -> must be left untouched
+        (keg / "bin" / "stray").write_text("p=@@HOMEBREW_PREFIX@@\n")
+        # macho + symlink still handled by the walk
+        (keg / "lib" / "libfoo.dylib").write_bytes(
+            _thin_macho(
+                [
+                    _lc_dylib(r._LC_ID_DYLIB, "@@HOMEBREW_PREFIX@@/lib/libfoo.dylib"),
+                ]
+            )
+        )
+        os.symlink("@@HOMEBREW_PREFIX@@/bin/foo", keg / "bin" / "foo")
+
+        monkeypatch.setattr(r, "_run", lambda cmd: None)
+
+        result = r.relocate_keg(keg, **brew_paths, text_files=["lib/pkgconfig/foo.pc"])
+        assert result.changed_files == ["lib/pkgconfig/foo.pc"]
+        assert result.macho_relocated == 1 and result.symlinks_relocated == 1
+        assert "@@HOMEBREW" not in (keg / "lib" / "pkgconfig" / "foo.pc").read_text()
+
+        # The unlisted text file was never read/substituted
+        assert (keg / "bin" / "stray").read_text() == "p=@@HOMEBREW_PREFIX@@\n"
+
+    def test_relocate_keg_raises_when_listed_text_file_missing(
+        self, tmp_path, monkeypatch, brew_paths
+    ) -> None:
+        """Tests that a missing listed text file raises an error."""
+        keg = tmp_path / "keg"
+        keg.mkdir()
+        monkeypatch.setattr(r, "_run", lambda cmd: None)
+        with pytest.raises(RelocationError, match="missing from keg"):
+            r.relocate_keg(keg, **brew_paths, text_files=["lib/pkgconfig/gone.pc"])
+
     def test_relocate_keg_skip_relocation_is_noop(
-        self, tmp_path, fake_run_capture
+        self, tmp_path, fake_run, brew_paths
     ) -> None:
         """Tests that skipping relocation is a no-op."""
         keg = tmp_path / "keg"
         keg.mkdir()
         (keg / "config").write_text("p=@@HOMEBREW_PREFIX@@\n")
 
-        called = fake_run_capture()
+        called = fake_run()
 
-        n = r.relocate_keg(
-            keg,
-            prefix=Path("/opt/homebrew"),
-            cellar=Path("/opt/homebrew/Cellar"),
-            repository=Path("/opt/homebrew/Library/Homebrew"),
-            skip_relocation=True,
+        n = r.relocate_keg(keg, **brew_paths, skip_relocation=True)
+        assert (
+            n.changed_files == []
+            and n.macho_relocated == 0
+            and n.symlinks_relocated == 0
         )
-        assert n == 0
         assert called == []
 
         # File left untouched because :any_skip_relocation bottles need no work
         assert "@@HOMEBREW_PREFIX@@" in (keg / "config").read_text()
 
     def test_relocate_keg_propagates_macho_failure(
-        self, tmp_path, fake_run_capture
+        self, tmp_path, fake_run, brew_paths
     ) -> None:
         """Tests that Mach-O relocation failures are propagated."""
         keg = tmp_path / "keg"
@@ -529,11 +560,6 @@ class TestOrchestration:
             )
         )
 
-        fake_run_capture(stderr="load command too large", returncode=1)
+        fake_run(stderr="load command too large", returncode=1)
         with pytest.raises(RelocationError):
-            r.relocate_keg(
-                keg,
-                prefix=Path("/opt/homebrew"),
-                cellar=Path("/opt/homebrew/Cellar"),
-                repository=Path("/opt/homebrew/Library/Homebrew"),
-            )
+            r.relocate_keg(keg, **brew_paths)

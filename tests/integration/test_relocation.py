@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from brewery.core.config import get_brewery_env
 from brewery.providers import relocator as r
 from brewery.providers.extractor import extract_bottle
 
@@ -50,49 +51,17 @@ def _brew(*args: str) -> str:
     ).stdout.strip()
 
 
-def _prefix() -> Path:
-    """Get the Homebrew prefix path.
-
-    Returns:
-        The Homebrew prefix path.
-    """
-    return Path(_brew("--prefix"))
-
-
-def _cached_bottle(formula: str) -> Path | None:
-    """Path to the cached bottle tarball for the current platform, or None.
-
-    ``brew --cache <formula>`` resolves to the current platform's bottle, so no
-    explicit tag handling is needed. With BREWERY_FETCH=1, fetch it first.
-
-    Args:
-        formula: The formula to fetch.
-
-    Returns:
-        The path to the cached bottle tarball, or None if not found.
-    """
-    if _FETCH:
-        subprocess.run(["brew", "fetch", formula], capture_output=True, text=True)
-
-    try:
-        path = Path(_brew("--cache", formula))
-
-    except subprocess.CalledProcessError:
-        return None
-
-    return path if path.exists() else None
-
-
-def _installed_keg(formula: str) -> Path | None:
+def _installed_keg(formula: str, prefix: Path) -> Path | None:
     """Get the installed keg path for a formula.
 
     Args:
         formula: The formula to check.
+        prefix: The Homebrew prefix path.
 
     Returns:
         The path to the installed keg, or None if not found.
     """
-    cellar = _prefix() / "Cellar" / formula
+    cellar = prefix / "Cellar" / formula
     if not cellar.is_dir():
         return None
 
@@ -169,34 +138,69 @@ def real_dylib(tmp_path) -> Path:
     return lib
 
 
-@pytest.fixture(params=REAL_FORMULAE)
-def relocated_real_keg(request, tmp_path) -> tuple[Path, Path]:
+@pytest.fixture(scope="module")
+def brew_env() -> dict:
+    """Run all brew introspection once for the module.
+
+    Returns:
+        Dict with keys `prefix`, `repository`, and `bottles`
+        (mapping formula name → Path or None).
+    """
+    env = get_brewery_env()
+    prefix = env.prefix
+    repository = env.repository
+
+    if _FETCH:
+        subprocess.run(
+            ["brew", "fetch", *REAL_FORMULAE], capture_output=True, text=True
+        )
+
+    try:
+        lines = _brew("--cache", *REAL_FORMULAE).splitlines()
+    except subprocess.CalledProcessError:
+        lines = []
+
+    bottles: dict[str, Path | None] = {f: None for f in REAL_FORMULAE}
+    for formula, line in zip(REAL_FORMULAE, lines):
+        p = Path(line)
+        bottles[formula] = p if p.exists() else None
+
+    return {"prefix": prefix, "repository": repository, "bottles": bottles}
+
+
+@pytest.fixture(scope="module", params=REAL_FORMULAE)
+def relocated_real_keg(request, tmp_path_factory, brew_env) -> tuple[Path, Path]:
     """Yield (relocated_copy_keg, installed_keg) for a real formula, or skip.
+
+    Module-scoped so each keg is extracted and relocated once and shared across
+    the three read-only assertions below, rather than redone per test.
 
     Args:
         request: The pytest request object.
-        tmp_path: The temporary directory to use for the relocated keg.
+        tmp_path_factory: The session temp-dir factory.
+        brew_env: Pre-computed brew prefix, repository, and bottle paths.
 
     Returns:
         A tuple containing the paths to the relocated copy keg and the installed keg.
     """
     formula = request.param
-    installed = _installed_keg(formula)
+    prefix = brew_env["prefix"]
+
+    installed = _installed_keg(formula, prefix)
     if installed is None:
         pytest.skip(f"{formula} not installed")
-    bottle = _cached_bottle(formula)
+
+    bottle = brew_env["bottles"].get(formula)
     if bottle is None:
         pytest.skip(f"{formula} bottle not cached (set BREWERY_FETCH=1 to fetch)")
 
-    keg = extract_bottle(bottle, tmp_path)
-    prefix = _prefix()
+    keg = extract_bottle(bottle, tmp_path_factory.mktemp(formula.replace("@", "_")))
 
-    # Bottles simply contain no placeholders, so relocation is a natural no-op
     r.relocate_keg(
         keg,
         prefix=prefix,
         cellar=prefix / "Cellar",
-        repository=Path(_brew("--repository")),
+        repository=brew_env["repository"],
         skip_relocation=False,
     )
 

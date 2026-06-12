@@ -65,6 +65,7 @@ class TestGetBreweryEnv:
         """Test that a cached brew_prefix.txt is used without invoking brew."""
         cache_dir.mkdir(parents=True)
         (cache_dir / "brew_prefix.txt").write_text("/opt/homebrew\n")
+        (cache_dir / "brew_repository.txt").write_text("/opt/homebrew\n")
 
         def _fail(*args, **kwargs):
             raise AssertionError("brew should not be called when cache exists")
@@ -79,6 +80,7 @@ class TestGetBreweryEnv:
         """Test that surrounding whitespace in the cache file is stripped."""
         cache_dir.mkdir(parents=True)
         (cache_dir / "brew_prefix.txt").write_text("  /usr/local  \n")
+        (cache_dir / "brew_repository.txt").write_text("/usr/local/Homebrew\n")
         env = get_brewery_env()
         assert env.prefix == Path("/usr/local")
 
@@ -177,15 +179,17 @@ class TestGetBreweryEnv:
         first = get_brewery_env()
         second = get_brewery_env()
         assert first is second
-        assert calls["n"] == 1
+        assert calls["n"] == 2
 
     def test_derived_paths_track_prefix(self, cache_dir) -> None:
         """Test that cellar and caskroom are derived from the resolved prefix."""
         cache_dir.mkdir(parents=True)
         (cache_dir / "brew_prefix.txt").write_text("/custom/brew")
+        (cache_dir / "brew_repository.txt").write_text("/custom/brew/Homebrew")
         env = get_brewery_env()
         assert env == BreweryENV(
             prefix=Path("/custom/brew"),
             cellar=Path("/custom/brew/Cellar"),
             caskroom=Path("/custom/brew/Caskroom"),
+            repository=Path("/custom/brew/Homebrew"),
         )
