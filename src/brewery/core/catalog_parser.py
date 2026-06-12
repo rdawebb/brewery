@@ -15,6 +15,7 @@ log: BreweryLogger = get_logger(name=__name__)
 
 # macOS major version -> Homebrew bottle codename
 _MACOS_CODENAMES: dict[int, str] = {
+    27: "golden_gate",
     26: "tahoe",
     15: "sequoia",
     14: "sonoma",

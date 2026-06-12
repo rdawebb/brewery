@@ -1,12 +1,4 @@
-"""Unit tests for the Cellar installer.
-
-The copytree path runs everywhere and covers clone fidelity, the opt symlink,
-reinstall/upgrade behaviour, the clonefile->copytree fallback (simulated by
-monkeypatching the syscall wrapper), and partial-keg cleanup on failure. The
-native clonefile branch can only be exercised on macOS, so it lives in an
-`integration` test that asserts clonefile and copytree produce identical
-trees.
-"""
+"""Unit tests for the Cellar installer."""
 
 from __future__ import annotations
 
@@ -21,46 +13,6 @@ import brewery.providers.cellar as _cellar
 from brewery.providers.cellar import CellarError, clone_tree, install_to_cellar
 
 pytestmark = pytest.mark.unit
-
-
-def _build_keg(version_dir: Path) -> Path:
-    """Build a keg directory structure for the specified version.
-
-    Args:
-        version_dir (Path): The path to the version directory.
-
-    Returns:
-        Path: The path to the created keg directory.
-    """
-    (version_dir / "bin").mkdir(parents=True)
-    (version_dir / "lib").mkdir()
-
-    exe = version_dir / "bin" / "openssl"
-    exe.write_bytes(b"MACHO-binary")
-    os.chmod(exe, 0o555)
-
-    lib = version_dir / "lib" / "libssl.dylib"
-    lib.write_bytes(b"lib")
-    os.chmod(lib, 0o444)
-
-    os.symlink("libssl.dylib", version_dir / "lib" / "libssl.3.dylib")
-    (version_dir / ".brew").mkdir()
-    (version_dir / ".brew" / "openssl@3.rb").write_bytes(b"class Openssl3\nend\n")
-
-    return version_dir
-
-
-@pytest.fixture
-def staged_keg(tmp_path) -> Path:
-    """Create a staged keg directory structure for testing.
-
-    Args:
-        tmp_path (Path): The temporary path fixture.
-
-    Returns:
-        Path: The path to the created staged keg directory.
-    """
-    return _build_keg(tmp_path / "stage" / "openssl@3" / "3.0")
 
 
 @pytest.fixture
@@ -167,10 +119,12 @@ def test_reinstall_replaces_readonly_keg(staged_keg, prefix) -> None:
     assert (dest / "bin" / "openssl").read_bytes() == b"REBUILT"
 
 
-def test_upgrade_repoints_opt_and_keeps_old_keg(staged_keg, prefix, tmp_path) -> None:
+def test_upgrade_repoints_opt_and_keeps_old_keg(
+    staged_keg, prefix, tmp_path, build_keg
+) -> None:
     """Test that upgrading a keg repoints the opt symlink and keeps the old keg."""
     _install(staged_keg, prefix, version="3.0")
-    new = _build_keg(tmp_path / "stage2" / "openssl@3" / "3.1")
+    new = build_keg(tmp_path / "stage2" / "openssl@3" / "3.1")
     (new / "bin" / "openssl").chmod(0o755)
     (new / "bin" / "openssl").write_bytes(b"v3.1")
     (new / "bin" / "openssl").chmod(0o555)
