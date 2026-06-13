@@ -37,7 +37,7 @@ app = ExtendedTyper(help="Brewery: A package management CLI tool")
 app.add_typer(
     daemon_app,
     name="daemon",
-    help="Daemon: Manage the Brewery background refresh daemon.",
+    help="Manage the Brewery background refresh daemon.",
 )
 
 console = Console(emoji=False, highlight=False)
@@ -447,7 +447,7 @@ def upgrade(
 
             if not upgraded and not failures and not current:
                 console.print(
-                    "\n[bold green]✓ All packages are up to date![/bold green]\n"
+                    "[bold green]✓ All packages are up to date![/bold green]\n"
                 )
                 return
 
