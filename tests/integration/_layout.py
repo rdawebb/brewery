@@ -39,6 +39,8 @@ class Brew:
             cellar=self.cellar,
             caskroom=self.caskroom,
             repository=self.repository,
+            api_path=self.prefix / "api" / "formula.jws.json",
+            bottle_cache=self.prefix / "Cache",
         )
 
     def formula(

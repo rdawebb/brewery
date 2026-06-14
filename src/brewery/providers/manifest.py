@@ -51,12 +51,26 @@ def image_formula_name(name: str) -> str:
     """brew's GitHubPackages.image_formula_name: '@' -> '/', lowercased.
 
     e.g. 'openssl@3' -> 'openssl/3', 'node' -> 'node'.
+
+    Args:
+        name: The formula name as it appears in the catalog.
+
+    Returns:
+        The GHCR image path segment for the formula.
     """
     return name.lower().replace("@", "/")
 
 
 def manifest_tag(version: str, revision: int = 0) -> str:
-    """OCI tag for the image index: pkg_version, with '_<revision>' when revision > 0."""
+    """OCI tag for the image index: pkg_version, with '_<revision>' when revision > 0.
+
+    Args:
+        version: The stable version string from the catalog.
+        revision: The formula revision; omit or pass 0 for the base version.
+
+    Returns:
+        The OCI tag string to use when fetching the image index from GHCR.
+    """
     return f"{version}_{revision}" if revision else version
 
 

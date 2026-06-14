@@ -8,7 +8,13 @@ from pathlib import Path
 import pytest
 
 from brewery.core import config
-from brewery.core.config import BreweryENV, ensure_cache_dir, get_brewery_env
+from brewery.core.config import (
+    FORMULA_API_PATH,
+    HOMEBREW_CACHE,
+    BreweryENV,
+    ensure_cache_dir,
+    get_brewery_env,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -192,4 +198,6 @@ class TestGetBreweryEnv:
             cellar=Path("/custom/brew/Cellar"),
             caskroom=Path("/custom/brew/Caskroom"),
             repository=Path("/custom/brew/Homebrew"),
+            api_path=FORMULA_API_PATH,
+            bottle_cache=HOMEBREW_CACHE,
         )

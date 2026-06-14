@@ -35,6 +35,12 @@ async def refresh_catalog(catalog: Catalog, client: _HttpClient | None = None) -
 
 
 async def _refresh(catalog: Catalog, client: _HttpClient) -> None:
+    """Iterate over all catalog feeds, loading any that have changed since the last run.
+
+    Args:
+        catalog: The catalog store to refresh.
+        client: The HTTP client to use for fetching feeds.
+    """
     for feed in catalog_api.FEEDS:
         etag, last_modified = catalog_api.read_validators(catalog=catalog, feed=feed)
 

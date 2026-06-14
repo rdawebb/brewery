@@ -230,7 +230,7 @@ class TestMachOParsing:
 
 
 @pytest.fixture
-def fake_run(monkeypatch):
+def mock_run(monkeypatch):
     """Patch the relocator's subprocess boundary with a recording stub.
 
     Call with no args for a success stub, or pass stderr/returncode to simulate
@@ -246,6 +246,16 @@ def fake_run(monkeypatch):
     def install(
         stdout: str = "", stderr: str = "", returncode: int = 0
     ) -> list[list[str]]:
+        """Install the stub and return the call-log list.
+
+        Args:
+            stdout: stdout text the stub returns in CompletedProcess.
+            stderr: stderr text the stub returns in CompletedProcess.
+            returncode: The return code the stub reports.
+
+        Returns:
+            A list that accumulates one argv list per subprocess.run call.
+        """
         runs: list[list[str]] = []
 
         def stub(cmd, *args, **kwargs):
@@ -261,9 +271,9 @@ def fake_run(monkeypatch):
 class TestMachORewrite:
     """Tests for Mach-O file relocation."""
 
-    def test_relocate_macho_builds_correct_argv(self, tmp_path, subs, fake_run) -> None:
+    def test_relocate_macho_builds_correct_argv(self, tmp_path, subs, mock_run) -> None:
         """Tests that the correct arguments are passed to the relocation commands."""
-        runs = fake_run()
+        runs = mock_run()
         p = tmp_path / "libfoo.dylib"
         p.write_bytes(
             _thin_macho(
@@ -320,10 +330,10 @@ class TestMachORewrite:
         return argv[i : i + 3]
 
     def test_relocate_macho_noop_when_no_placeholders(
-        self, tmp_path, subs, fake_run
+        self, tmp_path, subs, mock_run
     ) -> None:
         """Tests that no changes are made when there are no placeholders."""
-        runs = fake_run()
+        runs = mock_run()
         p = tmp_path / "clean.dylib"
         p.write_bytes(
             _thin_macho(
@@ -338,7 +348,7 @@ class TestMachORewrite:
         assert runs == []
 
     def test_install_name_tool_failure_raises_relocation_error(
-        self, tmp_path, subs, fake_run
+        self, tmp_path, subs, mock_run
     ) -> None:
         """Tests that the installation name tool is called with the correct arguments."""
         p = tmp_path / "lib.dylib"
@@ -350,7 +360,7 @@ class TestMachORewrite:
             )
         )
 
-        fake_run(stderr="load command too large", returncode=1)
+        mock_run(stderr="load command too large", returncode=1)
         with pytest.raises(RelocationError) as exc:
             r.relocate_macho(p, subs)
         assert exc.value.path == p
@@ -446,7 +456,7 @@ class TestOrchestration:
     """Tests for orchestration of file relocations."""
 
     def test_relocate_keg_walks_all_file_kinds(
-        self, tmp_path, fake_run, brew_paths
+        self, tmp_path, mock_run, brew_paths
     ) -> None:
         """Tests that all file kinds are processed during keg relocation."""
         keg = tmp_path / "keg"
@@ -471,7 +481,7 @@ class TestOrchestration:
         # Untouched file
         (keg / "lib" / "data.txt").write_text("no tokens\n")
 
-        fake_run()
+        mock_run()
 
         result = r.relocate_keg(keg, **brew_paths)
 
@@ -526,14 +536,14 @@ class TestOrchestration:
             r.relocate_keg(keg, **brew_paths, text_files=["lib/pkgconfig/gone.pc"])
 
     def test_relocate_keg_skip_relocation_is_noop(
-        self, tmp_path, fake_run, brew_paths
+        self, tmp_path, mock_run, brew_paths
     ) -> None:
         """Tests that skipping relocation is a no-op."""
         keg = tmp_path / "keg"
         keg.mkdir()
         (keg / "config").write_text("p=@@HOMEBREW_PREFIX@@\n")
 
-        called = fake_run()
+        called = mock_run()
 
         n = r.relocate_keg(keg, **brew_paths, skip_relocation=True)
         assert (
@@ -547,7 +557,7 @@ class TestOrchestration:
         assert "@@HOMEBREW_PREFIX@@" in (keg / "config").read_text()
 
     def test_relocate_keg_propagates_macho_failure(
-        self, tmp_path, fake_run, brew_paths
+        self, tmp_path, mock_run, brew_paths
     ) -> None:
         """Tests that Mach-O relocation failures are propagated."""
         keg = tmp_path / "keg"
@@ -560,6 +570,6 @@ class TestOrchestration:
             )
         )
 
-        fake_run(stderr="load command too large", returncode=1)
+        mock_run(stderr="load command too large", returncode=1)
         with pytest.raises(RelocationError):
             r.relocate_keg(keg, **brew_paths)

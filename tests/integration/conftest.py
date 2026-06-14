@@ -59,36 +59,6 @@ def fixture_json(fixture_text) -> dict[str, dict]:
 
 
 @pytest.fixture
-def fake_env(tmp_path, monkeypatch) -> BreweryENV:
-    """Build a hermetic Homebrew prefix and populate the fixed yazi/act/iina
-    layout that scan_installed needs, using the shared Brew builder.
-
-    link_opt=False keeps the layout to bare kegs (no opt symlinks, no receipts,
-    no link/pin bookkeeping), matching what these cache/repo tests expect.
-
-    Args:
-        tmp_path: The pytest tmp_path fixture.
-        monkeypatch: The pytest monkeypatch fixture.
-
-    Returns:
-        The fake environment.
-    """
-    from _layout import Brew
-
-    from brewery.core import config
-
-    brew = Brew(tmp_path)
-    brew.formula("yazi", "26.5.6", link_opt=False)
-    brew.formula("act", "0.2.88", link_opt=False)
-    brew.cask("iina", ["1.4.1,160"])
-
-    env = brew.env
-    monkeypatch.setattr(config, "_env_cache", env)
-
-    return env
-
-
-@pytest.fixture
 def brew(tmp_path) -> Brew:
     """A fresh hermetic Homebrew layout built by the shared Brew helper.
 
@@ -101,6 +71,32 @@ def brew(tmp_path) -> Brew:
     from _layout import Brew
 
     return Brew(tmp_path)
+
+
+@pytest.fixture
+def mock_env(brew, monkeypatch) -> BreweryENV:
+    """Override the base mock_env with the fixed yazi/act/iina layout that
+    scan_installed and repo tests need.
+
+    link_opt=False keeps the layout to bare kegs (no opt symlinks, no receipts,
+    no link/pin bookkeeping), matching what these cache/repo tests expect.
+
+    Args:
+        brew: The fresh Brew layout fixture.
+        monkeypatch: The pytest monkeypatch fixture.
+
+    Returns:
+        The mock environment.
+    """
+    from brewery.core import config
+
+    brew.formula("yazi", "26.5.6", link_opt=False)
+    brew.formula("act", "0.2.88", link_opt=False)
+    brew.cask("iina", ["1.4.1,160"])
+
+    monkeypatch.setattr(config, "_env_cache", brew.env)
+
+    return brew.env
 
 
 @pytest.fixture
@@ -208,39 +204,29 @@ def catalog(fixture_json) -> Catalog:
 
 
 @pytest.fixture
-def mock_brew(monkeypatch, fixture_text, fake_env) -> list[tuple[str, ...]]:
-    """Patch run_capture everywhere it is imported so subprocess boundaries
-    never reach the real brew binary.  Returns the call log.
+def mock_brew(monkeypatch, fixture_text, mock_env) -> list[tuple[str, ...]]:
+    """Patch run_brew in the brew provider so subprocess boundaries never reach
+    the real brew binary.  Returns the call log as (\"brew\", *args) tuples.
 
     Args:
         monkeypatch: The pytest monkeypatch fixture.
         fixture_text: The fixture text fixture.
-        fake_env: The fake environment fixture.
+        mock_env: The mock environment fixture.
 
     Returns:
         The call log.
     """
     calls: list[tuple[str, ...]] = []
 
-    async def fake_run_capture(*cmd: str, timeout=None):
-        cmd_t = tuple(cmd)
-        calls.append(cmd_t)
+    from brewery.core.shell import BrewResult
 
-        if cmd_t[:1] == ("du",):
-            return (f"4096\t{cmd_t[-1]}", "", 0)
-        if "--caskroom" in cmd_t:
-            return ("/opt/homebrew/Caskroom", "", 0)
-        if cmd_t[:2] == ("brew", "outdated"):
-            return (fixture_text["outdated"], "", 0)
-        if "info" in cmd_t:
-            if "--cask" in cmd_t:
-                return (fixture_text["cask"], "", 0)
-            return (fixture_text["formula"], "", 0)
-        return ("", "", 0)
+    async def mock_run_brew(args: list[str], *, output, check):
+        calls.append(("brew", *args))
+        return BrewResult(stdout="", stderr="", returncode=0)
 
-    import brewery.core.shell as shell
+    import brewery.providers.brew as brew_mod
 
-    monkeypatch.setattr(shell, "run_capture", fake_run_capture)
+    monkeypatch.setattr(brew_mod, "run_brew", mock_run_brew)
 
     return calls
 

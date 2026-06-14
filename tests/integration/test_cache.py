@@ -19,23 +19,23 @@ pytestmark = pytest.mark.integration
 class TestCacheTokenRoundTrip:
     """Tests for token-validated get/set on the file cache."""
 
-    def test_set_then_get_hits(self, fake_env) -> None:
+    def test_set_then_get_hits(self, mock_env) -> None:
         """Test that a value set and read under a stable env is a cache hit."""
         c = Cache(namespace="t1")
         c.set("k", {"a": 1})
         assert c.get("k") == {"a": 1}
 
-    def test_missing_key_returns_none(self, fake_env) -> None:
+    def test_missing_key_returns_none(self, mock_env) -> None:
         """Test that an unknown key returns None."""
         assert Cache(namespace="t2").get("absent") is None
 
-    def test_corrupt_file_returns_none(self, fake_env) -> None:
+    def test_corrupt_file_returns_none(self, mock_env) -> None:
         """Test that an unparseable cache file reads back as None, not an error."""
         c = Cache(namespace="t3")
         c._file("k").write_text("{not json")
         assert c.get("k") is None
 
-    def test_token_change_invalidates(self, fake_env) -> None:
+    def test_token_change_invalidates(self, mock_env) -> None:
         """Test that a changed filesystem token misses the cached value.
 
         The token is derived from Cellar/Caskroom/Taps mtimes; touching the
@@ -45,18 +45,18 @@ class TestCacheTokenRoundTrip:
         c.set("k", "v")
 
         # Force a new mtime on the cellar, then drop to force recompute
-        (fake_env.cellar / "newpkg").mkdir()
+        (mock_env.cellar / "newpkg").mkdir()
         c.invalidate_token()
         assert c.get("k") is None
 
-    def test_delete_removes_value(self, fake_env) -> None:
+    def test_delete_removes_value(self, mock_env) -> None:
         """Test that delete removes a cached entry."""
         c = Cache(namespace="t5")
         c.set("k", "v")
         c.delete("k")
         assert c.get("k") is None
 
-    def test_delete_missing_is_silent(self, fake_env) -> None:
+    def test_delete_missing_is_silent(self, mock_env) -> None:
         """Test that deleting an absent key does not raise."""
         Cache(namespace="t6").delete("absent")  # No exception
 
@@ -64,27 +64,27 @@ class TestCacheTokenRoundTrip:
 class TestCacheManagerRecords:
     """Tests for installed-record caching and invalidation."""
 
-    def _manager(self, catalog, fake_env) -> CacheManager:
+    def _manager(self, catalog, mock_env) -> CacheManager:
         """Create a CacheManager for testing.
 
         Args:
             catalog: The catalog to use.
-            fake_env: The fake environment to use.
+            mock_env: The mock environment to use.
 
         Returns:
             A CacheManager instance.
         """
-        return CacheManager(Cache(namespace="repository"), catalog, env=fake_env)
+        return CacheManager(Cache(namespace="repository"), catalog, env=mock_env)
 
     def test_records_scanned_then_cached(
-        self, catalog, fake_env, mock_brew, monkeypatch
+        self, catalog, mock_env, mock_brew, monkeypatch
     ) -> None:
         """Test that a second read is served from cache without rescanning.
 
         After the first scan caches records, monkeypatching the scanner to raise
         proves the second read never touches the filesystem.
         """
-        mgr = self._manager(catalog, fake_env)
+        mgr = self._manager(catalog, mock_env)
         first = mgr.installed_records()
         assert {r.name for r in first} == {"yazi", "act", "iina"}
 
@@ -95,42 +95,42 @@ class TestCacheManagerRecords:
         second = mgr.installed_records()
         assert {r.name for r in second} == {"yazi", "act", "iina"}
 
-    def test_invalidate_forces_rescan(self, catalog, fake_env, mock_brew) -> None:
+    def test_invalidate_forces_rescan(self, catalog, mock_env, mock_brew) -> None:
         """Test that invalidate drops the records key so the next read rescans."""
-        mgr = self._manager(catalog, fake_env)
+        mgr = self._manager(catalog, mock_env)
         mgr.installed_records()
         mgr.invalidate()
 
         # A new keg appears, so after invalidation the rescan should see it
-        keg = fake_env.cellar / "ripgrep" / "14.1.0"
+        keg = mock_env.cellar / "ripgrep" / "14.1.0"
         keg.mkdir(parents=True)
         names = {r.name for r in mgr.installed_records()}
         assert "ripgrep" in names
 
     def test_installed_packages_sorted_by_kind_then_name(
-        self, catalog, fake_env, mock_brew
+        self, catalog, mock_env, mock_brew
     ) -> None:
         """Test that merged packages are ordered by kind value, then name."""
-        mgr = self._manager(catalog, fake_env)
+        mgr = self._manager(catalog, mock_env)
         pkgs = mgr.installed_packages()
         ordered = [(p.kind.value, p.name) for p in pkgs]
         assert ordered == sorted(ordered)
 
-    def test_kind_filter(self, catalog, fake_env, mock_brew) -> None:
+    def test_kind_filter(self, catalog, mock_env, mock_brew) -> None:
         """Test that a kind filter returns only matching packages."""
-        mgr = self._manager(catalog, fake_env)
+        mgr = self._manager(catalog, mock_env)
         casks = mgr.installed_packages(kind=PackageKind.CASK)
         assert {p.name for p in casks} == {"iina"}
 
-    def test_find_installed_hit(self, catalog, fake_env, mock_brew) -> None:
+    def test_find_installed_hit(self, catalog, mock_env, mock_brew) -> None:
         """Test that find_installed returns the single merged package."""
-        mgr = self._manager(catalog, fake_env)
+        mgr = self._manager(catalog, mock_env)
         pkg = mgr.find_installed("yazi")
         assert pkg is not None and pkg.name == "yazi"
 
-    def test_find_installed_miss(self, catalog, fake_env, mock_brew) -> None:
+    def test_find_installed_miss(self, catalog, mock_env, mock_brew) -> None:
         """Test that find_installed returns None for a non-installed name."""
-        mgr = self._manager(catalog, fake_env)
+        mgr = self._manager(catalog, mock_env)
         assert mgr.find_installed("ripgrep") is None
 
 

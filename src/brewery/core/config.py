@@ -21,11 +21,21 @@ class BreweryENV:
     cellar: Path
     caskroom: Path
     repository: Path
+    api_path: Path
+    bottle_cache: Path
 
 
 _DEF_CACHE = Path(
     os.environ.get(key="BREWERY_CACHE_DIR", default=Path.home() / ".brewery" / "cache")
 )
+
+DEFAULT_CACHE = (
+    Path.home() / "Library" / "Caches" / "Homebrew"
+    if platform.system() == "Darwin"
+    else Path.home() / ".cache" / "Homebrew"
+)
+HOMEBREW_CACHE = Path(os.environ.get("HOMEBREW_CACHE", str(DEFAULT_CACHE)))
+FORMULA_API_PATH = HOMEBREW_CACHE / "api" / "formula.jws.json"
 
 _env_cache: BreweryENV | None = None
 
@@ -97,11 +107,16 @@ def get_brewery_env() -> BreweryENV:
         fallback=prefix if _is_arm else prefix / "Homebrew",
     )
 
+    bottle_cache: Path = HOMEBREW_CACHE
+    api_path: Path = FORMULA_API_PATH
+
     _env_cache = BreweryENV(
         prefix=prefix,
         cellar=prefix / "Cellar",
         caskroom=prefix / "Caskroom",
         repository=repository,
+        api_path=api_path,
+        bottle_cache=bottle_cache,
     )
 
     return _env_cache

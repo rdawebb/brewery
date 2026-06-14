@@ -26,8 +26,17 @@ import brewery.providers.linker as linker
 from brewery.providers.linker import LinkError, link_keg
 
 
-def build_keg(prefix: Path, name: str = "openssl@3", version: str = "3.0") -> Path:
-    """Create a synthetic Cellar keg with a representative layout."""
+def _make_keg(prefix: Path, name: str = "openssl@3", version: str = "3.0") -> Path:
+    """Create a synthetic Cellar keg with a representative layout.
+
+    Args:
+        prefix: The Homebrew prefix directory under which the keg is placed.
+        name: The formula name (becomes the Cellar subdirectory name).
+        version: The version string (becomes the keg version directory name).
+
+    Returns:
+        The path to the populated keg version directory.
+    """
     keg = prefix / "Cellar" / name / version
     for d in [
         "bin",
@@ -54,17 +63,34 @@ def build_keg(prefix: Path, name: str = "openssl@3", version: str = "3.0") -> Pa
 
 @pytest.fixture
 def keg_and_prefix(tmp_path):
+    """A pre-built openssl@3 keg and its containing prefix directory.
+
+    Args:
+        tmp_path: The pytest-provided temporary directory.
+
+    Returns:
+        A tuple of (keg path, prefix path).
+    """
     prefix = tmp_path / "prefix"
-    keg = build_keg(prefix)
+    keg = _make_keg(prefix)
 
     return keg, prefix
 
 
 def _readlink(p: Path) -> str | None:
+    """Return the symlink target of *p*, or None if *p* is not a symlink.
+
+    Args:
+        p: The path to inspect.
+
+    Returns:
+        The symlink target string, or None.
+    """
     return os.readlink(p) if p.is_symlink() else None
 
 
 def test_bin_skips_absolute_target_symlinks(tmp_path):
+    """Test that absolute-target symlinks in bin are not linked into the prefix."""
     prefix = tmp_path / "prefix"
     keg = prefix / "Cellar" / "node" / "26.0"
     (keg / "bin").mkdir(parents=True)
@@ -84,6 +110,7 @@ def test_bin_skips_absolute_target_symlinks(tmp_path):
 
 
 def test_bin_files_are_relative_symlinks(keg_and_prefix):
+    """Test that bin files are linked as relative symlinks pointing into the Cellar."""
     keg, prefix = keg_and_prefix
     link_keg(keg, prefix=prefix, name="openssl@3")
     link = prefix / "bin" / "openssl"
@@ -93,6 +120,7 @@ def test_bin_files_are_relative_symlinks(keg_and_prefix):
 
 
 def test_lib_dylib_symlinked_whole(keg_and_prefix):
+    """Test that top-level dylibs in lib are symlinked whole into the prefix."""
     keg, prefix = keg_and_prefix
     link_keg(keg, prefix=prefix, name="openssl@3")
     assert (
@@ -102,6 +130,7 @@ def test_lib_dylib_symlinked_whole(keg_and_prefix):
 
 
 def test_lib_pkgconfig_is_mkpath_with_files_linked_inside(keg_and_prefix):
+    """Test that lib/pkgconfig is created as a real directory with files linked inside."""
     keg, prefix = keg_and_prefix
     link_keg(keg, prefix=prefix, name="openssl@3")
     pc_dir = prefix / "lib" / "pkgconfig"
@@ -113,6 +142,7 @@ def test_lib_pkgconfig_is_mkpath_with_files_linked_inside(keg_and_prefix):
 
 
 def test_non_mkpath_lib_subdir_linked_whole(keg_and_prefix):
+    """Test that lib subdirs not in the mkpath set are linked whole, not descended."""
     keg, prefix = keg_and_prefix
     link_keg(keg, prefix=prefix, name="openssl@3")
 
@@ -123,6 +153,7 @@ def test_non_mkpath_lib_subdir_linked_whole(keg_and_prefix):
 
 
 def test_include_dir_linked_whole(keg_and_prefix):
+    """Test that include subdirectories are linked whole into the prefix."""
     keg, prefix = keg_and_prefix
     link_keg(keg, prefix=prefix, name="openssl@3")
     inc = prefix / "include" / "openssl"
@@ -131,6 +162,7 @@ def test_include_dir_linked_whole(keg_and_prefix):
 
 
 def test_share_man_is_mkpath(keg_and_prefix):
+    """Test that share/man is expanded as a real directory tree with man pages linked."""
     keg, prefix = keg_and_prefix
     link_keg(keg, prefix=prefix, name="openssl@3")
     assert (prefix / "share" / "man").is_dir() and not (
@@ -144,6 +176,7 @@ def test_share_man_is_mkpath(keg_and_prefix):
 
 
 def test_receipt_and_dotbrew_not_linked(keg_and_prefix):
+    """Test that INSTALL_RECEIPT.json and .brew are excluded from linking."""
     keg, prefix = keg_and_prefix
     link_keg(keg, prefix=prefix, name="openssl@3")
     assert not (prefix / "INSTALL_RECEIPT.json").exists()
@@ -151,6 +184,7 @@ def test_receipt_and_dotbrew_not_linked(keg_and_prefix):
 
 
 def test_linked_record_created_and_relative(keg_and_prefix):
+    """Test that the linked record symlink is created with a relative target."""
     keg, prefix = keg_and_prefix
     link_keg(keg, prefix=prefix, name="openssl@3")
     rec = prefix / "var" / "homebrew" / "linked" / "openssl@3"
@@ -160,6 +194,7 @@ def test_linked_record_created_and_relative(keg_and_prefix):
 
 
 def test_link_result_contents(keg_and_prefix):
+    """Test that the LinkResult lists the expected linked files and created directories."""
     keg, prefix = keg_and_prefix
     res = link_keg(keg, prefix=prefix, name="openssl@3")
     assert "bin/openssl" in res.linked
@@ -169,6 +204,7 @@ def test_link_result_contents(keg_and_prefix):
 
 
 def test_relink_is_idempotent(keg_and_prefix):
+    """Test that linking an already-linked keg reports already_linked without error."""
     keg, prefix = keg_and_prefix
     link_keg(keg, prefix=prefix, name="openssl@3")
     res2 = link_keg(keg, prefix=prefix, name="openssl@3")
@@ -180,6 +216,7 @@ def test_relink_is_idempotent(keg_and_prefix):
 
 
 def test_conflict_with_real_file_aborts_without_mutating(keg_and_prefix):
+    """Test that a pre-existing real file in the prefix aborts the link without any changes."""
     keg, prefix = keg_and_prefix
     (prefix / "bin").mkdir(parents=True)
     (prefix / "bin" / "openssl").write_text("USER FILE")
@@ -193,6 +230,7 @@ def test_conflict_with_real_file_aborts_without_mutating(keg_and_prefix):
 
 
 def test_conflict_with_other_keg_symlink_aborts(keg_and_prefix):
+    """Test that a symlink to a different keg is treated as a conflict and aborts."""
     keg, prefix = keg_and_prefix
     (prefix / "bin").mkdir(parents=True)
     (prefix / "bin" / "openssl").symlink_to("../Cellar/other/1.0/bin/openssl")
@@ -201,6 +239,7 @@ def test_conflict_with_other_keg_symlink_aborts(keg_and_prefix):
 
 
 def test_overwrite_replaces_conflicting_file(keg_and_prefix):
+    """Test that overwrite=True replaces a conflicting file in the prefix."""
     keg, prefix = keg_and_prefix
     (prefix / "bin").mkdir(parents=True)
     (prefix / "bin" / "openssl").write_text("USER FILE")
@@ -211,6 +250,7 @@ def test_overwrite_replaces_conflicting_file(keg_and_prefix):
 
 
 def test_keg_only_is_a_noop(keg_and_prefix):
+    """Test that keg_only=True skips all linking and creates no linked record."""
     keg, prefix = keg_and_prefix
     res = link_keg(keg, prefix=prefix, name="openssl@3", keg_only=True)
     assert res.linked == [] and res.created_dirs == []
@@ -219,8 +259,9 @@ def test_keg_only_is_a_noop(keg_and_prefix):
 
 
 def test_etc_existing_config_preserved(tmp_path):
+    """Test that a pre-existing file under etc is treated as already-linked, not a conflict."""
     prefix = tmp_path / "prefix"
-    keg = build_keg(prefix)
+    keg = _make_keg(prefix)
     (keg / "etc").mkdir()
     (keg / "etc" / "foo.conf").write_text("default")
     (prefix / "etc").mkdir()
@@ -233,8 +274,9 @@ def test_etc_existing_config_preserved(tmp_path):
 
 
 def test_etc_new_file_is_linked(tmp_path):
+    """Test that a new file in keg etc with no existing counterpart is linked."""
     prefix = tmp_path / "prefix"
-    keg = build_keg(prefix)
+    keg = _make_keg(prefix)
     (keg / "etc").mkdir()
     (keg / "etc" / "new.conf").write_text("default")
     link_keg(keg, prefix=prefix, name="openssl@3")
@@ -242,6 +284,7 @@ def test_etc_new_file_is_linked(tmp_path):
 
 
 def test_missing_eligible_dir_is_skipped(tmp_path):
+    """Test that eligible top-level dirs absent from the keg are silently skipped."""
     prefix = tmp_path / "prefix"
     keg = prefix / "Cellar" / "tiny" / "1.0"
     (keg / "lib").mkdir(parents=True)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import shutil
-import subprocess
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -29,6 +28,7 @@ from brewery.core.errors import (
 from brewery.core.logging import BreweryLogger, configure_logging, get_logger
 from brewery.core.models import Package, PackageKind
 from brewery.core.repo import Repository
+from brewery.core.shell import BrewOutput, run_brew
 from brewery.daemon.daemon import daemon_app
 
 log: BreweryLogger = get_logger(name=__name__)
@@ -126,14 +126,18 @@ def _brew_passthrough(argv: list[str]) -> int:
         The exit code of the brew command.
     """
     if shutil.which("brew") is None:
-        console.print("\n❌ brew not found on PATH\n", style="bold red")
+        console.print("\n✗ brew not found on PATH\n", style="bold red")
         return EXIT_SYSTEM_ERROR
 
     try:
-        return subprocess.run(["brew", *argv]).returncode
+        import asyncio
+
+        return asyncio.run(
+            run_brew(argv, output=BrewOutput.INHERIT, check=False, timeout=None)
+        ).returncode
 
     except FileNotFoundError:
-        console.print("\n❌ brew not found\n", style="bold red")
+        console.print("\n✗ brew not found\n", style="bold red")
         return EXIT_SYSTEM_ERROR
 
     except KeyboardInterrupt:
@@ -359,10 +363,10 @@ def outdated(
             pkgs: list[Package]
 
             if check:
-                console.print()
+                app.echo()
                 with console.status(
                     status="[bold yellow]Checking for updates...[/bold yellow]",
-                    refresh_per_second=6,
+                    refresh_per_second=5,
                 ):
                     from brewery.daemon.catalog_refresh import refresh_catalog
 
@@ -379,13 +383,16 @@ def outdated(
                 )
                 return
 
-            from brewery.cli.renderers import package_table
-
-            console.print(package_table(pkgs))
             console.print(
-                f"\n[dim] - {len(pkgs)} outdated package(s)"
-                f"\n - Run [bold]brewery upgrade[/bold] to update all outdated packages, "
-                f"\n   or [bold]brewery upgrade <packages>[/bold] to update specific packages\n"
+                f"\n[bold yellow]• {len(pkgs)} outdated package(s)[/bold yellow]\n"
+            )
+            for pkg in pkgs:
+                latest = pkg.metadata.get("latest_version")
+                console.print(f"  [dim]-[/dim] {pkg.name} → {latest}")
+
+            console.print(
+                "\n[dim]  Run [bold]brewery upgrade[/bold] to update all outdated packages, "
+                "\n  or [bold]brewery upgrade <packages>[/bold] to update specific packages[/dim]\n"
             )
 
     except Exception as e:

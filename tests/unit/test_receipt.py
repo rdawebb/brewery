@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import json
 import unittest.mock as mock
 
+import orjson
 import pytest
 
 import brewery.providers.receipt as r
+from brewery.core.config import get_brewery_env
 from brewery.providers.receipt import RuntimeDependency, Source, build_receipt, dumps
-
-API_PATH = "/Users/rdawebb/Library/Caches/Homebrew/api/formula.jws.json"
 
 SQLITE = """\
 {
@@ -221,13 +220,14 @@ def _rebuild(o: dict, tab_deps: list[dict]) -> dict:
 )
 def test_round_trip_is_byte_exact(original, tab_deps) -> None:
     """Test that round-tripping a receipt preserves byte-for-byte equality."""
-    assert dumps(_rebuild(json.loads(original), tab_deps)) == original
+    assert dumps(_rebuild(orjson.loads(original), tab_deps)) == original
 
 
 def test_all_bottle_fills_arch_from_host_and_nulls_built_on() -> None:
     """Test that an all-bottle tab fills arch from host and nulls built_on."""
     # Simulate an all-bottle tab: arch=None, built_on=None
-    parsed = json.loads(CA_CERTIFICATES)
+    env = get_brewery_env()
+    parsed = orjson.loads(CA_CERTIFICATES)
     with mock.patch.object(r.platform, "machine", lambda: "x86_64"):
         built = build_receipt(
             homebrew_version=parsed["homebrew_version"],
@@ -239,7 +239,7 @@ def test_all_bottle_fills_arch_from_host_and_nulls_built_on() -> None:
             arch=None,
             installed_on_request=False,
             time=parsed["time"],
-            source=Source(stable_version="2026-05-14", api_path=API_PATH),
+            source=Source(stable_version="2026-05-14", api_path=str(env.api_path)),
             aliases=[],
         )
     assert built["arch"] == "x86_64"  # Filled from host
@@ -269,7 +269,7 @@ def test_pkg_version_defaults_to_version() -> None:
 
 def test_top_level_field_order() -> None:
     """Test that the top-level fields are in the expected order."""
-    receipt = _rebuild(json.loads(SQLITE), SQLITE_TAB_DEPS)
+    receipt = _rebuild(orjson.loads(SQLITE), SQLITE_TAB_DEPS)
     assert list(receipt) == [
         "homebrew_version",
         "used_options",
@@ -293,7 +293,7 @@ def test_top_level_field_order() -> None:
 
 def test_compiler_is_tab_sourced_not_constant() -> None:
     """Test that the compiler is sourced from the tab, not a constant."""
-    receipt = _rebuild(json.loads(CA_CERTIFICATES), [])
+    receipt = _rebuild(orjson.loads(CA_CERTIFICATES), [])
     assert receipt["compiler"] == "gcc-12"
 
 
@@ -317,7 +317,7 @@ def test_changed_files_sorted_in_output() -> None:
 
 def test_dumps_no_trailing_newline_and_null_built_on() -> None:
     """Test that dumps does not add a trailing newline and sets built_on to null."""
-    text = dumps(_rebuild(json.loads(CA_CERTIFICATES), []))
+    text = dumps(_rebuild(orjson.loads(CA_CERTIFICATES), []))
     assert not text.endswith("\n")
     assert text.endswith('"built_on": null\n}')
 
@@ -326,7 +326,7 @@ def test_write_receipt_atomic_mode_and_content(tmp_path) -> None:
     """Test that write_receipt uses atomic mode and writes the correct content."""
     keg = tmp_path / "keg"
     keg.mkdir()
-    receipt = _rebuild(json.loads(SQLITE), SQLITE_TAB_DEPS)
+    receipt = _rebuild(orjson.loads(SQLITE), SQLITE_TAB_DEPS)
     path = r.write_receipt(keg, receipt)
     assert path == keg / "INSTALL_RECEIPT.json"
     assert path.read_text() == SQLITE

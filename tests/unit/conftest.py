@@ -9,7 +9,14 @@ import pytest
 
 
 def _build_keg(version_dir: Path) -> Path:
-    """Populate a minimal openssl@3-shaped keg at *version_dir* and return it."""
+    """Populate a minimal openssl@3-shaped keg at *version_dir* and return it.
+
+    Args:
+        version_dir: The directory to populate as a keg version root.
+
+    Returns:
+        The populated version directory.
+    """
     (version_dir / "bin").mkdir(parents=True)
     (version_dir / "lib").mkdir()
 
@@ -30,19 +37,34 @@ def _build_keg(version_dir: Path) -> Path:
 
 @pytest.fixture
 def staged_keg(tmp_path) -> Path:
-    """A staged openssl@3 3.0 keg tree ready for installation or relocation."""
+    """A staged openssl@3 3.0 keg tree ready for installation or relocation.
+
+    Args:
+        tmp_path: The pytest-provided temporary directory.
+
+    Returns:
+        The path to the populated keg version directory.
+    """
     return _build_keg(tmp_path / "stage" / "openssl@3" / "3.0")
 
 
 @pytest.fixture
 def build_keg():
-    """Return the keg-builder function for tests that need more than one keg."""
+    """Return the keg-builder function for tests that need more than one keg.
+
+    Returns:
+        The _build_keg callable, for constructing additional kegs in a test.
+    """
     return _build_keg
 
 
 @pytest.fixture
 def brew_paths() -> dict:
-    """Standard Homebrew prefix/cellar/repository paths used across relocation tests."""
+    """Standard Homebrew prefix/cellar/repository paths used across relocation tests.
+
+    Returns:
+        A dict with ``prefix``, ``cellar``, and ``repository`` Path values.
+    """
     return dict(
         prefix=Path("/opt/homebrew"),
         cellar=Path("/opt/homebrew/Cellar"),

@@ -74,7 +74,7 @@ def clone_tree(src: Path, dst: Path, *, use_clonefile: bool | None = None) -> No
     shutil.copytree(src, dst, symlinks=True)
 
 
-def _rmtree(path: Path) -> None:
+def rmtree(path: Path) -> None:
     """Remove a keg tree, tolerating the read-only files bottles ship.
 
     Args:
@@ -154,7 +154,7 @@ def install_to_cellar(
     cellar.mkdir(parents=True, exist_ok=True)
 
     if dest.is_symlink() or dest.exists():
-        _rmtree(dest)
+        rmtree(dest)
 
     try:
         clone_tree(staged_keg, dest, use_clonefile=use_clonefile)
@@ -163,7 +163,7 @@ def install_to_cellar(
         # Leave no partial keg behind
         if dest.exists():
             with contextlib.suppress(OSError):
-                _rmtree(dest)
+                rmtree(dest)
 
         raise CellarError(
             f"failed to install {name} {version} into Cellar: {exc}"

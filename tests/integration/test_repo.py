@@ -34,7 +34,7 @@ def _repo_with_providers(catalog, *, formula=None, cask=None) -> Repository:
 
     The default brew_formula/brew_cask backends are shared module singletons, so
     a test must never mutate repo.formula/repo.cask in place. Injecting fresh
-    backends via the constructor keeps stateful fakes isolated to one test.
+    backends via the constructor keeps stateful mocks isolated to one test.
 
     Args:
         catalog: The catalog to use for the repository.
@@ -47,7 +47,7 @@ def _repo_with_providers(catalog, *, formula=None, cask=None) -> Repository:
     from types import SimpleNamespace
 
     from brewery.core.repo import Repository
-    from brewery.providers import brew_cask, brew_formula
+    from brewery.providers import brew
 
     async def _noop(names) -> list[str]:
         """Simulate a no-op operation.
@@ -71,8 +71,8 @@ def _repo_with_providers(catalog, *, formula=None, cask=None) -> Repository:
 
     return Repository(
         catalog=catalog,
-        formula_backend=formula_backend if formula else brew_formula.backend,
-        cask_backend=cask_backend if cask else brew_cask.backend,
+        formula_backend=formula_backend if formula else brew.formula_backend,
+        cask_backend=cask_backend if cask else brew.cask_backend,
     )
 
 
@@ -166,12 +166,12 @@ class TestOutdatedDerivation:
         """
         called = {"n": 0}
 
-        async def fake_refresh(*, catalog):
+        async def mock_refresh(*, catalog):
             called["n"] += 1
 
         import brewery.daemon.catalog_refresh as refresh_mod
 
-        monkeypatch.setattr(refresh_mod, "refresh_catalog", fake_refresh)
+        monkeypatch.setattr(refresh_mod, "refresh_catalog", mock_refresh)
 
         await refresh_mod.refresh_catalog(catalog=repo.catalog)
         repo.cache_mgr.invalidate()
@@ -219,14 +219,14 @@ class TestInstall:
     """Tests for Repository.install_packages."""
 
     async def test_install_calls_provider(self, repo, mock_brew) -> None:
-        """Test that installing a formula invokes brew install."""
-        await repo.install_packages(["yazi"], kind=PackageKind.FORMULA)
+        """Test that installing a formula not already in the Cellar falls back to brew install."""
+        await repo.install_packages(["ripgrep"], kind=PackageKind.FORMULA)
         assert _provider_calls(mock_brew, "install")
 
     async def test_install_reports_present_package_as_installed(self, repo) -> None:
-        """Test that a package present on the fake fs is reported installed.
+        """Test that a package present on the mock fs is reported installed.
 
-        yazi already exists in the fake Cellar, so after the (mocked) install and
+        yazi already exists in the mock Cellar, so after the (mocked) install and
         re-scan it is found and returned.
         """
         installed, failures = await repo.install_packages(
@@ -247,7 +247,7 @@ class TestInstall:
         assert installed == []
         assert failures == [("ripgrep", "install failed or not found")]
 
-    async def test_install_appearing_package_is_detected(self, repo, fake_env) -> None:
+    async def test_install_appearing_package_is_detected(self, repo, mock_env) -> None:
         """Test that a keg created during install is detected on re-scan.
 
         Simulating brew creating the keg (plus a receipt) makes the package show
@@ -255,7 +255,7 @@ class TestInstall:
         """
         import orjson
 
-        keg = fake_env.cellar / "ripgrep" / "14.1.0"
+        keg = mock_env.cellar / "ripgrep" / "14.1.0"
         keg.mkdir(parents=True)
         (keg / "INSTALL_RECEIPT.json").write_bytes(
             orjson.dumps({"source": {"tap": "homebrew/core"}})
@@ -287,11 +287,11 @@ class TestUninstall:
         assert count == 0
         assert failures == [("yazi", "uninstall failed")]
 
-    async def test_uninstall_removed_package_is_success(self, repo, fake_env) -> None:
+    async def test_uninstall_removed_package_is_success(self, repo, mock_env) -> None:
         """Test that a keg removed during uninstall verifies as removed."""
         import shutil
 
-        shutil.rmtree(fake_env.cellar / "yazi")
+        shutil.rmtree(mock_env.cellar / "yazi")
         count, failures = await repo.uninstall_packages(
             ["yazi"], kind=PackageKind.FORMULA
         )
@@ -299,20 +299,20 @@ class TestUninstall:
         assert failures == []
 
     async def test_unknown_kind_resolves_via_installed(
-        self, mock_brew, catalog, fake_env
+        self, mock_brew, catalog, mock_env
     ) -> None:
         """Test that kind=None resolves each name's kind from installed state.
 
         yazi (formula) and iina (cask) are both installed; with no kind given the
         repo looks up each kind and routes to the right provider. The kegs must
-        still exist at kind-resolution time, so the fake providers delete them
+        still exist at kind-resolution time, so the mock providers delete them
         during the (mocked) uninstall to mirror brew's real present-then-gone
         sequence. Providers are injected via the constructor, never by mutating
         the shared backend singletons.
         """
         import shutil
 
-        async def fake_formula_uninstall(names) -> list[str]:
+        async def mock_formula_uninstall(names) -> list[str]:
             """Simulate brew uninstall removing the keg during the operation.
 
             Args:
@@ -322,11 +322,11 @@ class TestUninstall:
                 The names unchanged.
             """
             for name in names:
-                shutil.rmtree(fake_env.cellar / name, ignore_errors=True)
+                shutil.rmtree(mock_env.cellar / name, ignore_errors=True)
 
             return names
 
-        async def fake_cask_uninstall(names) -> list[str]:
+        async def mock_cask_uninstall(names) -> list[str]:
             """Simulate brew uninstall removing the keg during the operation.
 
             Args:
@@ -336,12 +336,12 @@ class TestUninstall:
                 The names unchanged.
             """
             for name in names:
-                shutil.rmtree(fake_env.caskroom / name, ignore_errors=True)
+                shutil.rmtree(mock_env.caskroom / name, ignore_errors=True)
 
             return names
 
         repo = _repo_with_providers(
-            catalog, formula=fake_formula_uninstall, cask=fake_cask_uninstall
+            catalog, formula=mock_formula_uninstall, cask=mock_cask_uninstall
         )
         count, failures = await repo.uninstall_packages(["yazi", "iina"])
         assert count == 2
@@ -390,13 +390,13 @@ class TestUpgrade:
         assert upgraded == []
         assert failures == [("ripgrep", "not found")]
 
-    async def test_pinned_package_skipped_on_upgrade_all(self, repo, fake_env) -> None:
+    async def test_pinned_package_skipped_on_upgrade_all(self, repo, mock_env) -> None:
         """Test that a pinned outdated package is skipped, not upgraded.
 
         Pinning act (which is outdated) should move it to failures with a
         'pinned' reason and keep it out of the upgrade targets.
         """
-        pinned_dir = fake_env.prefix / "var" / "homebrew" / "pinned"
+        pinned_dir = mock_env.prefix / "var" / "homebrew" / "pinned"
         pinned_dir.mkdir(parents=True, exist_ok=True)
         (pinned_dir / "act").touch()
 
@@ -405,20 +405,20 @@ class TestUpgrade:
         assert all(p.name != "act" for p in upgraded)
 
     async def test_upgrade_detects_version_change(
-        self, mock_brew, catalog, fake_env
+        self, mock_brew, catalog, mock_env
     ) -> None:
-        """Test that a version bump on the fake fs is reported as upgraded.
+        """Test that a version bump on the mock fs is reported as upgraded.
 
         Simulating brew replacing act 0.2.88 with 0.2.89 during the upgrade makes
         the post-upgrade re-scan see a new version, classifying it as upgraded
-        rather than current. The swap happens inside an injected fake provider so
+        rather than current. The swap happens inside an injected mock provider so
         act is still present (at 0.2.88) when the pre-upgrade snapshot is taken.
         """
         import shutil
 
         import orjson
 
-        async def fake_formula_upgrade(names) -> list[str]:
+        async def mock_formula_upgrade(names) -> list[str]:
             """Simulate brew upgrade replacing the keg with a new version.
 
             Args:
@@ -427,7 +427,7 @@ class TestUpgrade:
             Returns:
                 The names unchanged.
             """
-            act_dir = fake_env.cellar / "act"
+            act_dir = mock_env.cellar / "act"
             shutil.rmtree(act_dir)
             new_keg = act_dir / "0.2.89"
             new_keg.mkdir(parents=True)
@@ -437,7 +437,7 @@ class TestUpgrade:
 
             return names
 
-        repo = _repo_with_providers(catalog, formula=fake_formula_upgrade)
+        repo = _repo_with_providers(catalog, formula=mock_formula_upgrade)
         upgraded, current, failures = await repo.upgrade_packages(["act"])
         assert [p.name for p in upgraded] == ["act"]
         assert current == []

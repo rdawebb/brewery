@@ -180,6 +180,7 @@ def is_macho(path: Path) -> bool:
         return False
 
     magic = struct.unpack(">I", head)[0]  # Raw big-endian view of the 4 bytes
+
     return magic in _MACHO_MAGICS
 
 

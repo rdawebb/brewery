@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import os
 import platform
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+import orjson
 
 RECEIPT_NAME = "INSTALL_RECEIPT.json"
 
@@ -23,7 +24,14 @@ class RuntimeDependency:
 
     @classmethod
     def from_tab(cls, dep: dict) -> "RuntimeDependency":
-        """Build from a tab runtime_dependency, ignoring compatibility_version."""
+        """Build from a tab runtime_dependency, ignoring compatibility_version.
+
+        Args:
+            dep: A runtime dependency dict from the bottle tab manifest.
+
+        Returns:
+            A RuntimeDependency populated from the tab fields.
+        """
         return cls(
             full_name=dep["full_name"],
             version=dep["version"],
@@ -34,6 +42,11 @@ class RuntimeDependency:
         )
 
     def to_dict(self) -> dict:
+        """Serialise to a brew-compatible runtime dependency dict.
+
+        Returns:
+            A dict matching the structure brew writes in INSTALL_RECEIPT.json.
+        """
         return {
             "full_name": self.full_name,
             "version": self.version,
@@ -58,6 +71,11 @@ class Source:
     tap_git_head: str | None = None
 
     def to_dict(self) -> dict:
+        """Serialise to a brew-compatible source dict.
+
+        Returns:
+            A dict matching the `source` field brew writes in INSTALL_RECEIPT.json.
+        """
         return {
             "spec": self.spec,
             "versions": {
@@ -100,6 +118,28 @@ def build_receipt(
 
     `arch` falls back to the host arch when the tab omits it (all bottles);
     `built_on` is written verbatim, or null when the tab omits it.
+
+    Args:
+        homebrew_version: The Homebrew version string from the bottle tab.
+        changed_files: Files modified during the build, from the bottle tab.
+        source_modified_time: Unix timestamp of the formula source, from the tab.
+        compiler: The compiler used to build the bottle, from the tab.
+        runtime_dependencies: Runtime deps resolved from the tab manifest.
+        built_on: Platform dict from the tab, or None if absent.
+        arch: CPU architecture from the tab, or None to fall back to host arch.
+        installed_on_request: True if the formula was explicitly requested.
+        time: Unix timestamp of this installation.
+        source: Formula source metadata from the catalog.
+        aliases: Alias names that resolve to this formula.
+        used_options: Build options used (empty for bottle installs).
+        unused_options: Build options not used (empty for bottle installs).
+        built_as_bottle: Whether the keg was built as a bottle.
+        poured_from_bottle: Whether the keg was poured from a bottle.
+        loaded_from_api: Whether the formula was loaded from the JSON API.
+        loaded_from_internal_api: Whether loaded from the internal API.
+
+    Returns:
+        A dict matching the exact structure brew writes for INSTALL_RECEIPT.json.
     """
     return {
         "homebrew_version": homebrew_version,
@@ -124,12 +164,27 @@ def build_receipt(
 
 def dumps(receipt: dict) -> str:
     """Serialise exactly as brew does: 2-space indent, key order preserved,
-    no trailing newline (Ruby JSON.pretty_generate)."""
-    return json.dumps(receipt, indent=2, ensure_ascii=False)
+    no trailing newline (Ruby JSON.pretty_generate).
+
+    Args:
+        receipt: The receipt dict produced by build_receipt().
+
+    Returns:
+        A UTF-8 JSON string matching brew's output format.
+    """
+    return orjson.dumps(receipt, option=orjson.OPT_INDENT_2).decode("utf-8")
 
 
 def write_receipt(keg_dir: Path, receipt: dict) -> Path:
-    """Atomically write INSTALL_RECEIPT.json (mode 0644) into the keg root."""
+    """Atomically write INSTALL_RECEIPT.json (mode 0644) into the keg root.
+
+    Args:
+        keg_dir: The keg directory to write the receipt into.
+        receipt: The receipt dict produced by :func:`build_receipt`.
+
+    Returns:
+        The path to the written receipt file.
+    """
     text = dumps(receipt)
     dest = keg_dir / RECEIPT_NAME
     fd, tmp = tempfile.mkstemp(dir=keg_dir, suffix=".tmp")
@@ -138,13 +193,20 @@ def write_receipt(keg_dir: Path, receipt: dict) -> Path:
             fh.write(text)
         os.chmod(tmp, 0o644)
         os.replace(tmp, dest)
+
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
+
     return dest
 
 
 def current_arch() -> str:
-    """brew's arch token: 'arm64' or 'x86_64'. Fallback for all-bottle receipts."""
+    """brew's arch token: 'arm64' or 'x86_64'. Fallback for all-bottle receipts.
+
+    Returns:
+        `'arm64'` on Apple Silicon, otherwise the raw `platform.machine()` string.
+    """
     machine = platform.machine()
+
     return "arm64" if machine == "arm64" else machine

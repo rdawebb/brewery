@@ -9,7 +9,7 @@ import pytest
 import brewery.providers.manifest as m
 from brewery.providers.manifest import BottleTabInfo, ManifestError, fetch_bottle_tab
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
 DIGEST = "ab" * 32  # 64-hex bare sha256 (matches catalog form)
 OTHER_DIGEST = "cd" * 32

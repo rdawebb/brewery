@@ -139,9 +139,13 @@ def status() -> None:
     )
 
     if result.returncode == 0:
-        console.print("\n✓ Background refresh is active", style="bold green")
-        console.print("- Use `brewery daemon stop` to deactivate\n", style="dim")
+        console.print("\n✓ Background refresh is active\n", style="bold green")
+        console.print(
+            "  Use [bold]brewery daemon stop[/bold] to deactivate\n", style="dim"
+        )
 
     else:
-        console.print("\n✗ Background refresh is not active", style="bold red")
-        console.print("- Use `brewery daemon start` to activate\n", style="dim")
+        console.print("\n✗ Background refresh is not active\n", style="bold red")
+        console.print(
+            "  Use [bold]brewery daemon start[/bold] to activate\n", style="dim"
+        )

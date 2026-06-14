@@ -247,6 +247,32 @@
       "ruby_source_checksum": {
         "sha256": "145f256181ca74a49bdbbbc6061e1bebc2451a04eeadf1787db02c9c11ee621b"
       }
+    },
+    {
+      "name": "ripgrep",
+      "full_name": "ripgrep",
+      "tap": "homebrew/core",
+      "oldnames": [],
+      "aliases": [],
+      "versioned_formulae": [],
+      "desc": "Search tool like grep and The Silver Searcher",
+      "homepage": "https://github.com/BurntSushi/ripgrep",
+      "versions": {
+        "stable": "14.1.1",
+        "head": null,
+        "bottle": true
+      },
+      "revision": 0,
+      "version_scheme": 0,
+      "keg_only": false,
+      "dependencies": [],
+      "bottle": {
+        "stable": {
+          "rebuild": 0,
+          "root_url": "https://ghcr.io/v2/homebrew/core",
+          "files": {}
+        }
+      }
     }
   ],
   "casks": []
