@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
-import platform as _platform
 from dataclasses import dataclass
 from typing import Any
 
 import orjson
 
 from brewery.core.catalog import Catalog
+from brewery.core.host import Platform, current_platform
 from brewery.core.logging import BreweryLogger, get_logger
 
 log: BreweryLogger = get_logger(name=__name__)
 
 # macOS major version -> Homebrew bottle codename
 _MACOS_CODENAMES: dict[int, str] = {
+    27: "golden_gate",
     26: "tahoe",
     15: "sequoia",
     14: "sonoma",
@@ -35,36 +36,6 @@ class Bottle:
     url: str | None
     sha256: str | None
     cellar: str | None  # :any_skip_relocation | :any | <path>
-
-
-@dataclass(frozen=True, slots=True)
-class Platform:
-    """The current build platform for bottle selection."""
-
-    arch: str  # "arm64" | "x86_64"
-    macos_major: int
-
-
-def current_platform() -> Platform | None:
-    """Detect the current macOS build platform, or None if not resolvable.
-
-    Returns:
-        The current platform, or None if not resolvable.
-    """
-    if _platform.system() != "Darwin":
-        return None
-
-    version: str = _platform.mac_ver()[0]
-    if not version:
-        return None
-
-    try:
-        major = int(version.split(".")[0])
-
-    except ValueError:
-        return None
-
-    return Platform(arch=_platform.machine(), macos_major=major)
 
 
 def _macos_tag(arch: str, codename: str) -> str:

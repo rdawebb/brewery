@@ -1,145 +1,149 @@
-"""Unit tests for run_brew_command's result/error mapping over a faked run_capture."""
+"""Unit tests for run_brew_command's result/error mapping over a mockd run_capture."""
 
 from __future__ import annotations
+from typing import Any
+
+import asyncio
 
 import pytest
 
-from brewery.core import shell as shell_mod
-from brewery.core.errors import (
-    AlreadyInstalledWarning,
-    BrewCommandError,
-    PinnedPackageWarning,
-)
-from brewery.core.shell import run_brew_command
+import brewery.core.shell as shell
+from brewery.core.errors import BrewCommandError, BrewTimeoutError
+from brewery.core.shell import BrewOutput, run_brew
 
-pytestmark = pytest.mark.unit
+pytestmark = pytest.mark.asyncio
 
 
-def _fake_capture(out: str = "", err: str = "", code: int = 0):
-    """Build an async run_capture stub returning a fixed (out, err, code).
+class MockProc:
+    """Mock process for testing."""
 
-    Args:
-        out: The standard output to return.
-        err: The standard error to return.
-        code: The exit code to return.
-
-    Returns:
-        An async function that simulates the behavior of run_capture.
-    """
-
-    async def _capture(*cmd, timeout=None) -> tuple[str, str, int]:
-        """Simulate the behavior of run_capture.
+    def __init__(self, returncode=0, stdout=b"", stderr=b"", hang=False) -> None:
+        """Initialises the mock process.
 
         Args:
-            *cmd: The command arguments.
-            timeout: The timeout for the command.
+            returncode: The return code of the process.
+            stdout: The standard output of the process.
+            stderr: The standard error of the process.
+            hang: Whether the process should hang indefinitely.
+        """
+        self.returncode = returncode
+        self._stdout = stdout
+        self._stderr = stderr
+        self._hang = hang
+        self.killed = False
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        """Communicates with the mock process and returns its output.
 
         Returns:
-            A tuple containing the standard output, standard error, and exit code.
+            The standard output and error of the process.
         """
-        return out, err, code
+        if self._hang:
+            await asyncio.sleep(10)
 
-    return _capture
+        return self._stdout, self._stderr
 
+    async def wait(self) -> int:
+        """Waits for the mock process to complete and returns its exit code.
 
-class TestSuccess:
-    """Tests for the success path."""
-
-    async def test_returns_capture_tuple(self, monkeypatch) -> None:
-        """Test that a zero exit returns the (out, err, code) tuple."""
-        monkeypatch.setattr(shell_mod, "run_capture", _fake_capture(out="done", code=0))
-        out, err, code = await run_brew_command("install", ["wget"], ["--formula"])
-        assert (out, err, code) == ("done", "", 0)
-
-
-class TestAlreadyInstalled:
-    """Tests for the already-installed warning branch."""
-
-    async def test_install_already_installed_raises(self, monkeypatch) -> None:
-        """Test that install + 'already installed' raises AlreadyInstalledWarning."""
-        monkeypatch.setattr(
-            shell_mod,
-            "run_capture",
-            _fake_capture(err="Warning: wget already installed", code=1),
-        )
-        with pytest.raises(AlreadyInstalledWarning) as exc:
-            await run_brew_command("install", ["wget"], ["--formula"])
-        assert "wget" in exc.value.context["package"]
-
-    async def test_only_matched_names_reported(self, monkeypatch) -> None:
-        """Test that only names present in the output are attributed."""
-        monkeypatch.setattr(
-            shell_mod,
-            "run_capture",
-            _fake_capture(out="curl already installed", code=1),
-        )
-        with pytest.raises(AlreadyInstalledWarning) as exc:
-            await run_brew_command("install", ["wget", "curl"], ["--formula"])
-        assert "curl" in exc.value.context["package"]
-        assert "wget" not in exc.value.context["package"]
-
-    async def test_not_triggered_for_uninstall(self, monkeypatch) -> None:
-        """Test that the already-installed branch is install-only.
-
-        The same output under uninstall must fall through to BrewCommandError.
+        Returns:
+            The exit code of the process.
         """
-        monkeypatch.setattr(
-            shell_mod,
-            "run_capture",
-            _fake_capture(err="already installed", code=1),
-        )
-        with pytest.raises(BrewCommandError):
-            await run_brew_command("uninstall", ["wget"], ["--formula"])
+        if self._hang and not self.killed:
+            await asyncio.sleep(10)
+
+        return self.returncode
+
+    def kill(self) -> None:
+        """Kills the mock process."""
+        self.killed = True
 
 
-class TestPinned:
-    """Tests for the pinned warning branch."""
+def _patch(monkeypatch, proc, *, have_brew=True) -> dict[str, Any]:
+    """Patches the environment for testing.
 
-    async def test_upgrade_pinned_raises(self, monkeypatch) -> None:
-        """Test that upgrade + 'pinned' raises PinnedPackageWarning."""
-        monkeypatch.setattr(
-            shell_mod, "run_capture", _fake_capture(err="wget is pinned", code=1)
-        )
-        with pytest.raises(PinnedPackageWarning) as exc:
-            await run_brew_command("upgrade", ["wget"], [])
-        assert "wget" in exc.value.context["package"]
+    Args:
+        monkeypatch: The monkeypatch fixture.
+        proc: The mock process to return.
+        have_brew: Whether the brew command is available.
 
-    async def test_pinned_only_for_upgrade(self, monkeypatch) -> None:
-        """Test that 'pinned' under install falls through to BrewCommandError."""
-        monkeypatch.setattr(
-            shell_mod, "run_capture", _fake_capture(err="pinned", code=1)
-        )
-        with pytest.raises(BrewCommandError):
-            await run_brew_command("install", ["wget"], ["--formula"])
+    Returns:
+        A dict accumulating the ``cmd``, ``stdout``, and ``stderr`` args
+        passed to the most recent ``create_subprocess_exec`` call.
+    """
+    monkeypatch.setattr(
+        shell.shutil, "which", lambda _: "/usr/bin/brew" if have_brew else None
+    )
+    calls = {}
+
+    async def mock_exec(*cmd, stdout=None, stderr=None) -> MockProc:
+        """Mocks the execution of a subprocess.
+
+        Args:
+            cmd: The command to execute.
+            stdout: The standard output stream.
+            stderr: The standard error stream.
+
+        Returns:
+            A mock process with the specified output.
+        """
+        calls["cmd"] = cmd
+        calls["stdout"] = stdout
+        calls["stderr"] = stderr
+
+        return proc
+
+    monkeypatch.setattr(shell.asyncio, "create_subprocess_exec", mock_exec)
+
+    return calls
 
 
-class TestFailure:
-    """Tests for the generic failure path."""
+async def test_capture_returns_decoded_output(monkeypatch) -> None:
+    """Test that CAPTURE mode decodes stdout/stderr and pipes both streams."""
+    calls = _patch(monkeypatch, MockProc(0, b"hello out", b"warn err"))
+    res = await run_brew(["info", "wget"], output=BrewOutput.CAPTURE)
+    assert (res.stdout, res.stderr, res.returncode) == ("hello out", "warn err", 0)
+    # CAPTURE pipes both streams
+    assert calls["stdout"] is not None and calls["stderr"] is not None
+    assert calls["cmd"][0] == "brew"
 
-    async def test_nonzero_raises_brew_command_error(self, monkeypatch) -> None:
-        """Test that a nonzero exit with no special marker raises BrewCommandError."""
-        monkeypatch.setattr(shell_mod, "run_capture", _fake_capture(err="boom", code=2))
-        with pytest.raises(BrewCommandError) as exc:
-            await run_brew_command("install", ["wget"], ["--formula"])
-        assert exc.value.context.get("returncode") == 2
 
-    async def test_error_prefers_stderr(self, monkeypatch) -> None:
-        """Test that the error text uses stderr when present."""
-        monkeypatch.setattr(
-            shell_mod,
-            "run_capture",
-            _fake_capture(out="stdout text", err="stderr text", code=1),
-        )
-        with pytest.raises(BrewCommandError) as exc:
-            await run_brew_command("uninstall", ["wget"], ["--formula"])
-        assert "stderr text" in str(exc.value.context.get("error", ""))
+async def test_inherit_does_not_pipe(monkeypatch):
+    """Test that INHERIT mode leaves stdio as None so the child inherits the terminal."""
+    calls = _patch(monkeypatch, MockProc(0))
+    res = await run_brew(["install", "wget"], output=BrewOutput.INHERIT)
+    # INHERIT leaves stdio as None so the child inherits the terminal
+    assert calls["stdout"] is None and calls["stderr"] is None
+    assert res.stdout == "" and res.stderr == "" and res.returncode == 0
 
-    async def test_matching_is_case_insensitive(self, monkeypatch) -> None:
-        """Test that marker matching ignores case (combined is lowercased)."""
-        monkeypatch.setattr(
-            shell_mod,
-            "run_capture",
-            _fake_capture(err="WGET ALREADY INSTALLED", code=1),
-        )
-        with pytest.raises(AlreadyInstalledWarning):
-            await run_brew_command("install", ["wget"], ["--formula"])
+
+async def test_check_raises_on_nonzero(monkeypatch):
+    """Test that check=True raises BrewCommandError on a non-zero exit code."""
+    _patch(monkeypatch, MockProc(1, b"", b"boom"))
+    with pytest.raises(BrewCommandError) as ei:
+        await run_brew(["install", "nope"], check=True)
+    assert ei.value.context["returncode"] == 1
+
+
+async def test_no_check_returns_nonzero(monkeypatch):
+    """Test that check=False returns the result even on a non-zero exit code."""
+    _patch(monkeypatch, MockProc(1, b"out", b"err"))
+    res = await run_brew(["install", "nope"], check=False)
+    assert res.returncode == 1 and res.stderr == "err"
+
+
+async def test_timeout_kills_and_raises(monkeypatch):
+    """Test that exceeding the timeout kills the process and raises BrewTimeoutError."""
+    proc = MockProc(hang=True)
+    _patch(monkeypatch, proc)
+    with pytest.raises(BrewTimeoutError):
+        await run_brew(["install", "slow"], timeout=0.01)
+    assert proc.killed
+
+
+async def test_missing_brew_raises(monkeypatch):
+    """Test that a missing brew binary raises BrewCommandError with returncode 127."""
+    _patch(monkeypatch, MockProc(0), have_brew=False)
+    with pytest.raises(BrewCommandError) as ei:
+        await run_brew(["install", "wget"])
+    assert ei.value.context["returncode"] == 127

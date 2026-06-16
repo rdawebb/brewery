@@ -57,7 +57,7 @@ def _reset_module_state() -> Generator[None, None, None]:
     yield
 
 
-class FakeHTTPClient:
+class MockHTTPClient:
     """Async httpx-like stub shared by the catalog fetch/refresh tests.
 
     Construct with either a single canned response/exception, or a mapping of
@@ -74,7 +74,7 @@ class FakeHTTPClient:
     """
 
     def __init__(self, response=None, *, raise_on_get=None) -> None:
-        """Initialise a FakeHTTPClient.
+        """Initialise a MockHTTPClient.
 
         Args:
             response: One of an `httpx.Response`, an `Exception` to raise, a
@@ -130,14 +130,40 @@ class FakeHTTPClient:
 
 
 @pytest.fixture
+def mock_env(tmp_path, monkeypatch):
+    """A hermetic BreweryENV backed by tmp_path with no real filesystem layout.
+
+    Patches the module-level ``_env_cache`` singleton so any code path that
+    calls ``get_brewery_env()`` without an explicit ``env=`` argument gets this
+    instance.  Integration tests override this fixture in their own conftest to
+    add a pre-populated keg layout.
+    """
+    from brewery.core import config
+    from brewery.core.config import BreweryENV
+
+    prefix = tmp_path / "homebrew"
+    cache = tmp_path / "cache"
+    env = BreweryENV(
+        prefix=prefix,
+        cellar=prefix / "Cellar",
+        caskroom=prefix / "Caskroom",
+        repository=prefix / "Library" / "Homebrew",
+        api_path=cache / "api" / "formula.jws.json",
+        bottle_cache=cache,
+    )
+    monkeypatch.setattr(config, "_env_cache", env)
+    return env
+
+
+@pytest.fixture
 def http_client():
-    """Factory for a FakeHTTPClient.
+    """Factory for a MockHTTPClient.
 
     Returns a callable so each test builds its own client with the response
     shape it needs.
     """
 
-    def _make(response=None, *, raise_on_get=None) -> FakeHTTPClient:
-        return FakeHTTPClient(response, raise_on_get=raise_on_get)
+    def _make(response=None, *, raise_on_get=None) -> MockHTTPClient:
+        return MockHTTPClient(response, raise_on_get=raise_on_get)
 
     return _make

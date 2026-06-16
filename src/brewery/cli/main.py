@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import shutil
-import subprocess
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -29,6 +28,7 @@ from brewery.core.errors import (
 from brewery.core.logging import BreweryLogger, configure_logging, get_logger
 from brewery.core.models import Package, PackageKind
 from brewery.core.repo import Repository
+from brewery.core.shell import BrewOutput, run_brew
 from brewery.daemon.daemon import daemon_app
 
 log: BreweryLogger = get_logger(name=__name__)
@@ -37,7 +37,7 @@ app = ExtendedTyper(help="Brewery: A package management CLI tool")
 app.add_typer(
     daemon_app,
     name="daemon",
-    help="Daemon: Manage the Brewery background refresh daemon.",
+    help="Manage the Brewery background refresh daemon.",
 )
 
 console = Console(emoji=False, highlight=False)
@@ -126,14 +126,18 @@ def _brew_passthrough(argv: list[str]) -> int:
         The exit code of the brew command.
     """
     if shutil.which("brew") is None:
-        console.print("\n❌ brew not found on PATH\n", style="bold red")
+        console.print("\n✗ brew not found on PATH\n", style="bold red")
         return EXIT_SYSTEM_ERROR
 
     try:
-        return subprocess.run(["brew", *argv]).returncode
+        import asyncio
+
+        return asyncio.run(
+            run_brew(argv, output=BrewOutput.INHERIT, check=False, timeout=None)
+        ).returncode
 
     except FileNotFoundError:
-        console.print("\n❌ brew not found\n", style="bold red")
+        console.print("\n✗ brew not found\n", style="bold red")
         return EXIT_SYSTEM_ERROR
 
     except KeyboardInterrupt:
@@ -193,7 +197,7 @@ def list_pkgs(
             if refresh:
                 with console.status(
                     status="[bold yellow]Refreshing cache...[/bold yellow]",
-                    refresh_per_second=6,
+                    refresh_per_second=5,
                 ):
                     repo.cache_mgr.invalidate()
                     pkgs = repo.get_all_installed(kind_filter=kind)
@@ -275,12 +279,13 @@ def install(
         if not yes:
             pkg_str: str = ", ".join(names)
             if not app.confirm(text=f"Install {kind.value}: {pkg_str}?", default=True):
-                console.print("Installation cancelled.", style="dim")
+                console.print("\nInstallation cancelled\n", style="dim")
                 return
 
         with _repository() as repo:
+            app.echo()
             with console.status(
-                status="[bold green]Installing...", refresh_per_second=6
+                status="[bold green]Installing...", refresh_per_second=5
             ):
                 installed, failures = _async_run(
                     coro=repo.install_packages(names, kind)
@@ -288,7 +293,7 @@ def install(
 
             for pkg in installed:
                 console.print(
-                    f"[green]✓ Installed [bold]{pkg.name}[/bold] {pkg.versions[0] if pkg.versions else ''}[/green]"
+                    f"[green]✓ Installed [bold]{pkg.name}[/bold] {pkg.versions[0] if pkg.versions else ''}[/green]\n",
                 )
             for name, reason in failures:
                 console.print(f"[bold red] Failed {name}: {reason}[/bold red]")
@@ -320,16 +325,20 @@ def uninstall(
     try:
         if not yes:
             if not app.confirm(text=f"Uninstall: {pkg_str}?", default=False):
-                console.print("Uninstallation cancelled.", style="dim")
+                console.print("\nUninstallation cancelled\n", style="dim")
                 return
 
         with _repository() as repo:
+            app.echo()
             with console.status(
-                status=f"[bold yellow]Uninstalling...{pkg_str}", refresh_per_second=6
+                status=f"[bold yellow]Uninstalling {pkg_str}...[/bold yellow]",
+                refresh_per_second=5,
             ):
                 count, failures = _async_run(coro=repo.uninstall_packages(names, kind))
 
-            console.print(f"✓ Uninstalled {count} package(s)")
+            console.print(
+                f"[bold yellow]✓ Uninstalled {count} package(s)[/bold yellow]\n"
+            )
             for name, reason in failures:
                 console.print(f"[bold red]✗ Failed {name}: {reason}[/bold red]")
 
@@ -359,10 +368,10 @@ def outdated(
             pkgs: list[Package]
 
             if check:
-                console.print()
+                app.echo()
                 with console.status(
                     status="[bold yellow]Checking for updates...[/bold yellow]",
-                    refresh_per_second=6,
+                    refresh_per_second=5,
                 ):
                     from brewery.daemon.catalog_refresh import refresh_catalog
 
@@ -379,13 +388,16 @@ def outdated(
                 )
                 return
 
-            from brewery.cli.renderers import package_table
-
-            console.print(package_table(pkgs))
             console.print(
-                f"\n[dim] - {len(pkgs)} outdated package(s)"
-                f"\n - Run [bold]brewery upgrade[/bold] to update all outdated packages, "
-                f"\n   or [bold]brewery upgrade <packages>[/bold] to update specific packages\n"
+                f"\n[bold yellow]• {len(pkgs)} outdated package(s)[/bold yellow]\n"
+            )
+            for pkg in pkgs:
+                latest = pkg.metadata.get("latest_version")
+                console.print(f"  [dim]-[/dim] {pkg.name} → {latest}")
+
+            console.print(
+                "\n[dim]  Run [bold]brewery upgrade[/bold] to update all outdated packages, "
+                "\n  or [bold]brewery upgrade <packages>[/bold] to update specific packages[/dim]\n"
             )
 
     except Exception as e:
@@ -439,7 +451,7 @@ def upgrade(
 
             console.print()
             with console.status(
-                status="[bold yellow]Upgrading...[/bold yellow]", refresh_per_second=6
+                status="[bold yellow]Upgrading...[/bold yellow]", refresh_per_second=5
             ):
                 upgraded, current, failures = _async_run(
                     coro=repo.upgrade_packages(names, kind)
@@ -447,7 +459,7 @@ def upgrade(
 
             if not upgraded and not failures and not current:
                 console.print(
-                    "\n[bold green]✓ All packages are up to date![/bold green]\n"
+                    "[bold green]✓ All packages are up to date![/bold green]\n"
                 )
                 return
 

@@ -10,7 +10,8 @@ from brewery.core.config import BreweryENV, get_brewery_env
 from brewery.core.decorators import log_operation
 from brewery.core.errors import PackageNotFoundError
 from brewery.core.models import Package, PackageKind, PackageStatus
-from brewery.providers import brew_cask, brew_formula
+from brewery.core.shell import run_brew
+from brewery.providers import brew
 
 
 class Repository:
@@ -21,8 +22,8 @@ class Repository:
         cache: Cache | None = None,
         catalog: Catalog | None = None,
         cache_mgr: CacheManager | None = None,
-        formula_backend=brew_formula.backend,
-        cask_backend=brew_cask.backend,
+        formula_backend=brew.formula_backend,
+        cask_backend=brew.cask_backend,
         env: BreweryENV | None = None,
     ) -> None:
         """Initialise the repository.
@@ -132,9 +133,13 @@ class Repository:
         Raises:
             BrewCommandError: Propagated from provider.
         """
-        provider = self.formula if kind == PackageKind.FORMULA else self.cask
+        if kind == PackageKind.CASK:
+            await self.cask.install(names=names)
 
-        await provider.install(names=names)
+        else:
+            from brewery.providers.install_service import run_install
+
+            await run_install(self, names, run_brew=run_brew)
 
         self.cache_mgr.invalidate()
         installed_by_name: dict[str, Package] = {

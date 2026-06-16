@@ -425,6 +425,22 @@ class Catalog:
 
         return [row["dep"] for row in rows]
 
+    def runtime_deps(self, name: str) -> list[str]:
+        """Return the runtime dependency names of a formula.
+
+        Args:
+            name: Formula name.
+
+        Returns:
+            Sorted list of runtime dependency names (empty if none/unknown).
+        """
+        rows = self._conn.execute(
+            "SELECT DISTINCT dep FROM deps WHERE pkg = ? AND kind = 'runtime' ORDER BY dep",
+            (name,),
+        ).fetchall()
+
+        return [row["dep"] for row in rows]
+
     def used_by(self, name: str) -> list[str]:
         """Return the names of formulae that depend on the given package.
 
@@ -458,6 +474,21 @@ class Catalog:
         ).fetchone()
 
         return row["name"] if row else name
+
+    def aliases_of(self, name: str) -> list[str]:
+        """List all aliases of a formula name
+
+        Args:
+            name: A formula name.
+
+        Returns:
+            A list of aliases for a given formula name (empty if None)
+        """
+        rows = self._conn.execute(
+            "SELECT alias FROM alias WHERE name = ? ORDER BY alias", (name,)
+        ).fetchall()
+
+        return [row["alias"] for row in rows]
 
     def search(self, query: str, limit: int = 50) -> list[FormulaRow | CaskRow]:
         """Full-text search over formula and cask name and description.

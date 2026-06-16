@@ -5,19 +5,17 @@ from __future__ import annotations
 import orjson
 import pytest
 
-from brewery.core import catalog_parser
 from brewery.core.catalog_parser import (
     Bottle,
-    Platform,
     _json_text,
     _macos_tag,
     _parse_cask,
     _parse_formula,
     candidate_tags,
-    current_platform,
     platform_tag,
     resolve_bottle,
 )
+from brewery.core.host import Platform
 
 pytestmark = pytest.mark.unit
 
@@ -29,7 +27,7 @@ class TestMacosTag:
         ("arch", "codename", "expected"),
         [
             pytest.param("arm64", "sonoma", "arm64_sonoma", id="arm64_prefixed"),
-            pytest.param("x86_64", "sonoma", "sonoma", id="intel_bare"),
+            pytest.param("amd64", "sonoma", "sonoma", id="intel_bare"),
             pytest.param("ppc", "sonoma", "sonoma", id="unknown_arch_as_intel"),
         ],
     )
@@ -73,7 +71,7 @@ class TestCandidateTags:
                 id="current_major_first_excludes_newer",
             ),
             pytest.param(
-                Platform(arch="x86_64", macos_major=13),
+                Platform(arch="amd64", macos_major=13),
                 ["ventura", "monterey", "big_sur", "all"],
                 id="intel_excludes_newer",
             ),
@@ -109,48 +107,13 @@ class TestPlatformTag:
                 id="unknown_major_stringified",
             ),
             pytest.param(
-                Platform(arch="x86_64", macos_major=13), "ventura", id="intel_known"
+                Platform(arch="amd64", macos_major=13), "ventura", id="intel_known"
             ),
         ],
     )
     def test_platform_tag(self, platform, expected) -> None:
         """Test platform tag generation."""
         assert platform_tag(platform) == expected
-
-
-class TestCurrentPlatform:
-    """Tests for current_platform, with the platform module monkeypatched."""
-
-    def test_non_darwin_returns_none(self, monkeypatch) -> None:
-        """Test that a non-macOS system returns None."""
-        monkeypatch.setattr(catalog_parser._platform, "system", lambda: "Linux")
-        assert current_platform() is None
-
-    def test_empty_mac_ver_returns_none(self, monkeypatch) -> None:
-        """Test that an unresolvable macOS version returns None."""
-        monkeypatch.setattr(catalog_parser._platform, "system", lambda: "Darwin")
-        monkeypatch.setattr(
-            catalog_parser._platform, "mac_ver", lambda: ("", ("", "", ""), "")
-        )
-        assert current_platform() is None
-
-    def test_non_numeric_major_returns_none(self, monkeypatch) -> None:
-        """Test that a non-numeric major version returns None."""
-        monkeypatch.setattr(catalog_parser._platform, "system", lambda: "Darwin")
-        monkeypatch.setattr(
-            catalog_parser._platform, "mac_ver", lambda: ("x.0", ("", "", ""), "")
-        )
-        assert current_platform() is None
-
-    def test_resolved_platform(self, monkeypatch) -> None:
-        """Test that a valid macOS version yields a Platform with the major."""
-        monkeypatch.setattr(catalog_parser._platform, "system", lambda: "Darwin")
-        monkeypatch.setattr(
-            catalog_parser._platform, "mac_ver", lambda: ("14.5", ("", "", ""), "")
-        )
-        monkeypatch.setattr(catalog_parser._platform, "machine", lambda: "arm64")
-        plat = current_platform()
-        assert plat == Platform(arch="arm64", macos_major=14)
 
 
 class TestResolveBottle:

@@ -17,11 +17,11 @@ from brewery.core.catalog_api import (
 pytestmark = pytest.mark.unit
 
 
-class FakeMetaStore:
+class MockMetaStore:
     """In-memory get_meta/set_meta backing for validator tests."""
 
     def __init__(self, initial=None) -> None:
-        """Initialise the fake meta store.
+        """Initialise the Mock meta store.
 
         Args:
             initial: Optional initial metadata to populate the store.
@@ -160,18 +160,18 @@ class TestValidators:
 
     def test_read_returns_stored_pair(self) -> None:
         """Test that read_validators returns the (etag, last_modified) pair."""
-        store = FakeMetaStore({"formula_etag": '"e"', "formula_last_modified": "when"})
+        store = MockMetaStore({"formula_etag": '"e"', "formula_last_modified": "when"})
         assert read_validators(store, FORMULA_FEED) == ('"e"', "when")
 
     def test_read_missing_is_none_pair(self) -> None:
         """Test that absent validators read back as (None, None)."""
-        assert read_validators(FakeMetaStore(), FORMULA_FEED) == (None, None)
+        assert read_validators(MockMetaStore(), FORMULA_FEED) == (None, None)
 
     def test_store_persists_validators_on_modified(self) -> None:
         """Test that a modified result persists ETag, Last-Modified, fetched_at."""
         from brewery.core.catalog_api import FetchResult
 
-        store = FakeMetaStore()
+        store = MockMetaStore()
         result = FetchResult(
             feed=FORMULA_FEED,
             modified=True,
@@ -188,7 +188,7 @@ class TestValidators:
         """Test that a 304 result stamps fetched_at but writes no new validators."""
         from brewery.core.catalog_api import FetchResult
 
-        store = FakeMetaStore()
+        store = MockMetaStore()
         result = FetchResult(
             feed=FORMULA_FEED,
             modified=False,

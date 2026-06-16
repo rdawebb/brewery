@@ -156,7 +156,7 @@ class BrewTimeoutError(TransientError):
         self,
         message: str | None = None,
         command: str | None = None,
-        timeout: int | None = None,
+        timeout: float | None = None,
         context: dict[str, Any] | None = None,
     ) -> None:
         """Initialise BrewTimeoutError with detailed context.

@@ -23,6 +23,7 @@ class Brew:
         self.prefix = root / "homebrew"
         self.cellar = self.prefix / "Cellar"
         self.caskroom = self.prefix / "Caskroom"
+        self.repository = self.prefix / "Homebrew"
         self.cellar.mkdir(parents=True)
         self.caskroom.mkdir(parents=True)
 
@@ -34,7 +35,12 @@ class Brew:
             The Brewery environment.
         """
         return BreweryENV(
-            prefix=self.prefix, cellar=self.cellar, caskroom=self.caskroom
+            prefix=self.prefix,
+            cellar=self.cellar,
+            caskroom=self.caskroom,
+            repository=self.repository,
+            api_path=self.prefix / "api" / "formula.jws.json",
+            bottle_cache=self.prefix / "Cache",
         )
 
     def formula(

@@ -1,11 +1,4 @@
-"""Integration tests for the daemon catalog-refresh orchestration.
-
-refresh_catalog accepts an injectable HTTP client, so these tests drive it
-with the shared FakeHTTPClient (via the http_client fixture) returning canned
-responses (200 with a body, or 304). The empty_catalog fixture provides a real
-SQLite-backed catalog with get_meta/set_meta, so validator round-tripping and
-the load-then-store ordering are exercised end to end.
-"""
+"""Integration tests for the daemon catalog-refresh orchestration."""
 
 from __future__ import annotations
 
