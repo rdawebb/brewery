@@ -7,7 +7,7 @@ from typing import Any
 
 import orjson
 
-from brewery.core.catalog import Catalog
+from brewery.core.catalog.store import Catalog
 from brewery.core.host import Platform, current_platform
 from brewery.core.logging import BreweryLogger, get_logger
 

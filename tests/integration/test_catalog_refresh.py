@@ -6,7 +6,7 @@ import httpx
 import orjson
 import pytest
 
-from brewery.core import catalog_api
+from brewery.core.catalog import api
 from brewery.daemon.catalog_refresh import refresh_catalog
 
 pytestmark = pytest.mark.integration
@@ -74,8 +74,8 @@ def _both_feeds(
         A dictionary mapping feed URLs to their responses.
     """
     return {
-        catalog_api.FORMULA_FEED.url: formula_resp,
-        catalog_api.CASK_FEED.url: cask_resp,
+        api.FORMULA_FEED.url: formula_resp,
+        api.CASK_FEED.url: cask_resp,
     }
 
 
@@ -157,7 +157,7 @@ class TestConditionalRequests:
         await refresh_catalog(empty_catalog, client=second)
 
         formula_req = next(
-            h for url, h in second.requests if url == catalog_api.FORMULA_FEED.url
+            h for url, h in second.requests if url == api.FORMULA_FEED.url
         )
         assert formula_req.get("If-None-Match") == '"f1"'
 
@@ -212,7 +212,7 @@ class TestErrorHandling:
         self, empty_catalog, http_client
     ) -> None:
         """Test that an unexpected HTTP status raises CatalogFetchError."""
-        from brewery.core.catalog_api import CatalogFetchError
+        from brewery.core.catalog.api import CatalogFetchError
 
         client = http_client(_both_feeds(httpx.Response(500), httpx.Response(500)))
         with pytest.raises(CatalogFetchError):
@@ -222,7 +222,7 @@ class TestErrorHandling:
         self, empty_catalog, http_client
     ) -> None:
         """Test that a transport error is wrapped as CatalogFetchError."""
-        from brewery.core.catalog_api import CatalogFetchError
+        from brewery.core.catalog.api import CatalogFetchError
 
         client = http_client({}, raise_on_get=httpx.ConnectError("boom"))
         with pytest.raises(CatalogFetchError):
@@ -236,7 +236,7 @@ class TestErrorHandling:
         The error is raised before store_validators runs, so no ETag is written
         for the failing feed.
         """
-        from brewery.core.catalog_api import CatalogFetchError
+        from brewery.core.catalog.api import CatalogFetchError
 
         client = http_client(_both_feeds(httpx.Response(503), httpx.Response(200)))
         with pytest.raises(CatalogFetchError):

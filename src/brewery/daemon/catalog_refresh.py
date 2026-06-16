@@ -6,9 +6,8 @@ import asyncio
 
 import httpx
 
-from brewery.core import catalog_api, catalog_parser
-from brewery.core.catalog import Catalog
-from brewery.core.catalog_api import CatalogFetchError, _HttpClient
+from brewery.core.catalog import Catalog, api, parser
+from brewery.core.catalog.api import CatalogFetchError, _HttpClient
 from brewery.core.logging import BreweryLogger, configure_logging, get_logger
 
 log: BreweryLogger = get_logger(name=__name__)
@@ -41,24 +40,24 @@ async def _refresh(catalog: Catalog, client: _HttpClient) -> None:
         catalog: The catalog store to refresh.
         client: The HTTP client to use for fetching feeds.
     """
-    for feed in catalog_api.FEEDS:
-        etag, last_modified = catalog_api.read_validators(catalog=catalog, feed=feed)
+    for feed in api.FEEDS:
+        etag, last_modified = api.read_validators(catalog=catalog, feed=feed)
 
-        result = await catalog_api.fetch_feed(feed, etag, last_modified, client=client)
+        result = await api.fetch_feed(feed, etag, last_modified, client=client)
 
         if result.modified and result.body is not None:
             if feed.name == "formula":
-                count = catalog_parser.load_formulae(catalog, result.body)
+                count = parser.load_formulae(catalog, result.body)
 
             else:
-                count = catalog_parser.load_casks(catalog, result.body)
+                count = parser.load_casks(catalog, result.body)
             log.info(event="catalog_feed_loaded", feed=feed.name, count=count)
 
         else:
             log.info(event="catalog_feed_unchanged", feed=feed.name)
 
         # After the load (or on a 304) record the validators
-        catalog_api.store_validators(catalog=catalog, result=result)
+        api.store_validators(catalog=catalog, result=result)
 
 
 async def background_refresh() -> None:

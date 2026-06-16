@@ -11,7 +11,8 @@ import orjson
 from brewery.core.catalog import Catalog
 from brewery.core.config import BreweryENV, ensure_cache_dir, get_brewery_env
 from brewery.core.errors import CacheError
-from brewery.core.fs_state import attach_sizes, scan_installed
+from brewery.core.fs_state import scan_installed
+from brewery.core.keg_sizes import attach_sizes
 from brewery.core.logging import BreweryLogger, get_logger
 from brewery.core.models import InstalledRecord, Package, PackageKind
 

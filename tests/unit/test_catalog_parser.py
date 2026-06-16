@@ -5,7 +5,7 @@ from __future__ import annotations
 import orjson
 import pytest
 
-from brewery.core.catalog_parser import (
+from brewery.core.catalog.parser import (
     Bottle,
     _json_text,
     _macos_tag,

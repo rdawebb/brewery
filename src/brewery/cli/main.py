@@ -11,6 +11,7 @@ from typing import Any, Coroutine, Optional
 from rich.console import Console
 from typer_extensions import ExtendedTyper
 
+from brewery.cli.error_formatting import format_error_message, suggest_search
 from brewery.core.errors import (
     EXIT_SYSTEM_ERROR,
     EXIT_TRANSIENT_ERROR,
@@ -22,8 +23,6 @@ from brewery.core.errors import (
     SysError,
     TransientError,
     UserError,
-    format_error_message,
-    suggest_search,
 )
 from brewery.core.logging import BreweryLogger, configure_logging, get_logger
 from brewery.core.models import Package, PackageKind

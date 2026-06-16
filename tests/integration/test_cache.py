@@ -1,16 +1,17 @@
 """Integration tests for the file cache, CacheManager, and size attachment."""
 
 from __future__ import annotations
+
 from pathlib import Path
 
 import orjson
 import pytest
 
 from brewery.core import cache as cache_mod
-from brewery.core import fs_state as fs_mod
+from brewery.core import keg_sizes as keg_sizes_mod
 from brewery.core.cache import Cache, CacheManager
 from brewery.core.config import BreweryENV
-from brewery.core.fs_state import attach_sizes
+from brewery.core.keg_sizes import attach_sizes
 from brewery.core.models import InstalledRecord, PackageKind
 
 pytestmark = pytest.mark.integration
@@ -205,7 +206,7 @@ class TestAttachSizes:
         def _boom(*a, **k):
             raise AssertionError("du should not run on a size-cache hit")
 
-        monkeypatch.setattr(fs_mod.subprocess, "run", _boom)
+        monkeypatch.setattr(keg_sizes_mod.subprocess, "run", _boom)
         rec2 = _record("a", str(a))
         attach_sizes([rec2], cache_dir=cache_dir)
         assert rec2.size_kb == cached_size
@@ -267,7 +268,7 @@ class TestAttachSizes:
             """
             raise OSError("spawn failed")
 
-        monkeypatch.setattr(fs_mod.subprocess, "run", _fail)
+        monkeypatch.setattr(keg_sizes_mod.subprocess, "run", _fail)
         rec = _record("a", str(a))
         attach_sizes([rec], cache_dir=tmp_path / "cache")
         assert rec.size_kb is None

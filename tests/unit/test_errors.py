@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from brewery.cli.error_formatting import format_error_message, suggest_search
 from brewery.core.errors import (
     AlreadyInstalledWarning,
     BrewCommandError,
@@ -15,8 +16,6 @@ from brewery.core.errors import (
     SysError,
     TransientError,
     UserError,
-    format_error_message,
-    suggest_search,
 )
 
 pytestmark = pytest.mark.unit

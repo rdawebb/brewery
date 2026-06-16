@@ -1,11 +1,11 @@
-"""Unit tests for catalog_api fetch_feed/fetch_single_formula and validators."""
+"""Unit tests for catalog.api fetch_feed/fetch_single_formula and validators."""
 
 from __future__ import annotations
 
 import httpx
 import pytest
 
-from brewery.core.catalog_api import (
+from brewery.core.catalog.api import (
     FORMULA_FEED,
     CatalogFetchError,
     fetch_feed,
@@ -169,7 +169,7 @@ class TestValidators:
 
     def test_store_persists_validators_on_modified(self) -> None:
         """Test that a modified result persists ETag, Last-Modified, fetched_at."""
-        from brewery.core.catalog_api import FetchResult
+        from brewery.core.catalog.api import FetchResult
 
         store = MockMetaStore()
         result = FetchResult(
@@ -186,7 +186,7 @@ class TestValidators:
 
     def test_store_stamps_fetched_at_on_not_modified(self) -> None:
         """Test that a 304 result stamps fetched_at but writes no new validators."""
-        from brewery.core.catalog_api import FetchResult
+        from brewery.core.catalog.api import FetchResult
 
         store = MockMetaStore()
         result = FetchResult(
