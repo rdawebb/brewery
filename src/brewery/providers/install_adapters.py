@@ -137,7 +137,7 @@ class BrewAdapter:
             True on success, False on a brew failure.
         """
         try:
-            await self._run_brew("link", name)
+            await self._run_brew(["link", name])
             return True
 
         except BrewCommandError:

@@ -15,6 +15,8 @@ RECEIPT_NAME = "INSTALL_RECEIPT.json"
 
 @dataclass(frozen=True)
 class RuntimeDependency:
+    """Class representing a single runtime dependency"""
+
     full_name: str
     version: str
     revision: int = 0
@@ -92,21 +94,16 @@ class Source:
 
 def build_receipt(
     *,
-    # Manifest
     homebrew_version: str,
     changed_files: list[str],
     source_modified_time: int,
     compiler: str,
     runtime_dependencies: list[RuntimeDependency],
     built_on: dict | None,
-    arch: str | None,
-    # Host/install
     installed_on_request: bool,
     time: int,
-    # Catalog
     source: Source,
     aliases: list[str],
-    # Constants (overridable)
     used_options: list[str] = [],
     unused_options: list[str] = [],
     built_as_bottle: bool = True,
@@ -124,9 +121,9 @@ def build_receipt(
         changed_files: Files modified during the build, from the bottle tab.
         source_modified_time: Unix timestamp of the formula source, from the tab.
         compiler: The compiler used to build the bottle, from the tab.
-        runtime_dependencies: Runtime deps resolved from the tab manifest.
+        runtime_dependencies: Runtime deps resolved from the catalog.
         built_on: Platform dict from the tab, or None if absent.
-        arch: CPU architecture from the tab, or None to fall back to host arch.
+        arch: CPU architecture of the host machine.
         installed_on_request: True if the formula was explicitly requested.
         time: Unix timestamp of this installation.
         source: Formula source metadata from the catalog.
@@ -157,7 +154,7 @@ def build_receipt(
         "aliases": list(aliases),
         "runtime_dependencies": [d.to_dict() for d in runtime_dependencies],
         "source": source.to_dict(),
-        "arch": arch if arch is not None else current_arch(),
+        "arch": current_arch(),
         "built_on": built_on,
     }
 

@@ -1,10 +1,4 @@
-"""Tests for the install orchestrator.
-
-Every external dependency is a Mock (catalog, downloader,tab fetcher, brew), and
-the in-thread native pipeline is replaced with ascripted stub so the tests exercise
-the *scheduling and fallback* logic withoutreal bottles or a macOS filesystem. The
-one exception is _cleanup_partial, whichis tested directly against a real temp Cellar.
-"""
+"""Unit tests for the install orchestrator."""
 
 from __future__ import annotations
 
@@ -205,7 +199,7 @@ class MockTab:
         """
         self.fail = set(fail)
 
-    async def __call__(self, *, name, version, bottle_sha256, revision):
+    async def __call__(self, *, name, version, bottle_sha256, revision, rebuild):
         """Calls the mock tab.
 
         Args:
@@ -293,7 +287,7 @@ def _make(cat, dl, tabf, brew, native=None, order=None):
     )
     if native is not None:
 
-        def mock_native(name, fr, bottle_path, tab, on_request):
+        def mock_native(name, fr, bottle_path, tab, on_request, aliases, rt_deps):
             """Mock native installation function.
 
             Args:
@@ -302,6 +296,8 @@ def _make(cat, dl, tabf, brew, native=None, order=None):
                 bottle_path: The path to the bottle.
                 tab: The tab for the formula.
                 on_request: The request callback.
+                aliases: Aliases for the formula.
+                rt_deps: Runtime dependencies for the formula.
 
             Returns:
                 The result of the native installation.
@@ -471,6 +467,64 @@ class TestFallbackPaths:
 class TestKegOnlyPostInstall:
     """Tests for keg-only formulas and their post-install behavior."""
 
+    async def test_aliases_resolved_on_loop_thread_not_worker(self) -> None:
+        import threading
+
+        cat = MockCatalog(
+            {"x": MockFormula("x")}, {"x": []}, aliases={"x": ["x-alias"]}
+        )
+        main_ident = threading.get_ident()
+        seen: dict = {}
+
+        orig = cat.aliases_of
+
+        def recording(n):
+            seen["aliases_thread"] = threading.get_ident()
+            return orig(n)
+
+        cat.aliases_of = recording  # ty: ignore[invalid-assignment]
+
+        o = Orchestrator(
+            catalog=cat,
+            downloader=MockDownloader(),
+            tab_fetcher=MockTab(),
+            brew=MockBrew(),
+            config=CFG,
+        )
+
+        def mock_native(name, fr, bottle_path, tab, on_request, aliases, rt_deps):
+            seen["native_thread"] = threading.get_ident()
+            seen["aliases_arg"] = aliases
+            seen["rt_deps_arg"] = rt_deps
+
+            return _NativeResult(stage=None, dest=Path("/opt/hb/Cellar/x/1.0"))
+
+        o._native_install = mock_native  # ty: ignore[invalid-assignment]
+
+        await o.install(["x"])
+        assert seen["aliases_thread"] == main_ident  # Resolved on the loop thread
+        assert seen["native_thread"] != main_ident  # Worker ran elsewhere
+        assert seen["aliases_arg"] == ["x-alias"]
+        assert isinstance(seen["rt_deps_arg"], list)
+
+    async def test_report_records_failure_reasons(self) -> None:
+        deps = {"app": ["badlib"], "badlib": []}
+        cat = MockCatalog(_graph(deps), deps)
+        brew = MockBrew(install_ok=False)
+        o = _make(
+            cat,
+            MockDownloader(),
+            MockTab(),
+            brew,
+            native={"badlib": _NativeResult(stage="install", error="extract boom")},
+        )
+        report = await o.install(["app"])
+        assert "extract boom" in report.errors["badlib"]
+        assert (
+            "badlib" in report.errors["app"]
+            and "dependency failed" in report.errors["app"]
+        )
+
     async def test_keg_only_reports_native_keg_only(self) -> None:
         """Tests that keg-only formulas are reported as native keg-only."""
         cat = MockCatalog({"ko": MockFormula("ko", keg_only=True)}, {"ko": []})
@@ -485,6 +539,32 @@ class TestKegOnlyPostInstall:
         o = _make(cat, MockDownloader(), MockTab(), brew, native={})
         await o.install(["p"])
         assert ("postinstall", "p") in brew.calls
+
+
+class TestRuntimeDeps:
+    """Test for runtime dependency resolution."""
+
+    async def test_runtime_deps_sourced_from_closure_not_tab(self) -> None:
+        """Tests runtime dependencies resolved from catalog during closure."""
+        deps = {"app": ["lib"], "lib": ["sub"], "sub": []}
+        formulae = {n: MockFormula(n) for n in deps}
+        formulae["lib"].revision = 2  # -> pkg_version 1.0_2
+        formulae["sub"].bottle_rebuild = 3
+        cat = MockCatalog(formulae, deps)
+        o = Orchestrator(
+            catalog=cat,
+            downloader=MockDownloader(),
+            tab_fetcher=MockTab(),
+            brew=MockBrew(),
+            config=CFG,
+        )
+
+        entries = {d.full_name: d for d in o._runtime_dep_entries("app")}
+        assert set(entries) == {"lib", "sub"}  # Full transitive closure, excl. self
+        assert entries["lib"].declared_directly is True  # Direct dep of app
+        assert entries["sub"].declared_directly is False  # Transitive only
+        assert entries["lib"].pkg_version == "1.0_2"  # version_revision
+        assert entries["sub"].bottle_rebuild == 3  # Carried from the catalog row
 
 
 class TestPartialCleanup:

@@ -142,15 +142,17 @@ async def test_image_formula_name(name, expected) -> None:
 
 
 @pytest.mark.parametrize(
-    "version,revision,expected",
+    "version,revision,rebuild,expected",
     [
-        ("3.6.2", 0, "3.6.2"),
-        ("3.6.2", 2, "3.6.2_2"),
+        ("3.6.2", 0, 0, "3.6.2"),
+        ("3.6.2", 2, 0, "3.6.2_2"),
+        ("1.10.0", 0, 1, "1.10.0-1"),  # rebuilt bottle
+        ("1.5.7", 1, 2, "1.5.7_1-2"),  # revision and rebuild together
     ],
 )
-async def test_manifest_tag(version, revision, expected) -> None:
+async def test_manifest_tag(version, revision, rebuild, expected) -> None:
     """Test the manifest tag formatting."""
-    assert m.manifest_tag(version, revision) == expected
+    assert m.manifest_tag(version, revision, rebuild) == expected
 
 
 async def test_fetch_platform_bottle_tab() -> None:

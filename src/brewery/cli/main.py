@@ -197,7 +197,7 @@ def list_pkgs(
             if refresh:
                 with console.status(
                     status="[bold yellow]Refreshing cache...[/bold yellow]",
-                    refresh_per_second=6,
+                    refresh_per_second=5,
                 ):
                     repo.cache_mgr.invalidate()
                     pkgs = repo.get_all_installed(kind_filter=kind)
@@ -279,12 +279,13 @@ def install(
         if not yes:
             pkg_str: str = ", ".join(names)
             if not app.confirm(text=f"Install {kind.value}: {pkg_str}?", default=True):
-                console.print("Installation cancelled.", style="dim")
+                console.print("\nInstallation cancelled\n", style="dim")
                 return
 
         with _repository() as repo:
+            app.echo()
             with console.status(
-                status="[bold green]Installing...", refresh_per_second=6
+                status="[bold green]Installing...", refresh_per_second=5
             ):
                 installed, failures = _async_run(
                     coro=repo.install_packages(names, kind)
@@ -292,7 +293,7 @@ def install(
 
             for pkg in installed:
                 console.print(
-                    f"[green]✓ Installed [bold]{pkg.name}[/bold] {pkg.versions[0] if pkg.versions else ''}[/green]"
+                    f"[green]✓ Installed [bold]{pkg.name}[/bold] {pkg.versions[0] if pkg.versions else ''}[/green]\n",
                 )
             for name, reason in failures:
                 console.print(f"[bold red] Failed {name}: {reason}[/bold red]")
@@ -324,16 +325,20 @@ def uninstall(
     try:
         if not yes:
             if not app.confirm(text=f"Uninstall: {pkg_str}?", default=False):
-                console.print("Uninstallation cancelled.", style="dim")
+                console.print("\nUninstallation cancelled\n", style="dim")
                 return
 
         with _repository() as repo:
+            app.echo()
             with console.status(
-                status=f"[bold yellow]Uninstalling...{pkg_str}", refresh_per_second=6
+                status=f"[bold yellow]Uninstalling {pkg_str}...[/bold yellow]",
+                refresh_per_second=5,
             ):
                 count, failures = _async_run(coro=repo.uninstall_packages(names, kind))
 
-            console.print(f"✓ Uninstalled {count} package(s)")
+            console.print(
+                f"[bold yellow]✓ Uninstalled {count} package(s)[/bold yellow]\n"
+            )
             for name, reason in failures:
                 console.print(f"[bold red]✗ Failed {name}: {reason}[/bold red]")
 
@@ -446,7 +451,7 @@ def upgrade(
 
             console.print()
             with console.status(
-                status="[bold yellow]Upgrading...[/bold yellow]", refresh_per_second=6
+                status="[bold yellow]Upgrading...[/bold yellow]", refresh_per_second=5
             ):
                 upgraded, current, failures = _async_run(
                     coro=repo.upgrade_packages(names, kind)

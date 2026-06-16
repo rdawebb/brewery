@@ -237,6 +237,7 @@ class _Plan:
     dirs: list[Path] = field(default_factory=list)
     already: list[Path] = field(default_factory=list)
     conflicts: list[tuple[str, str]] = field(default_factory=list)
+    explosions: list[tuple[Path, Path]] = field(default_factory=list)  # (dst, src)
 
     def consider_link(self, dst: Path, src: Path, *, preserve_existing: bool) -> None:
         """Consider linking a source file or directory to a destination.
@@ -246,9 +247,29 @@ class _Plan:
             src: The source path.
             preserve_existing: Whether to preserve existing files.
         """
+        # dst resolves to the same real path as src (e.g, metapackages)
+        if (dst.is_symlink() or dst.exists()) and os.path.realpath(
+            dst
+        ) == os.path.realpath(src):
+            self.already.append(dst)
+            return
+
         if dst.is_symlink():
             if os.path.realpath(dst) == os.path.realpath(src):
                 self.already.append(dst)  # Already linked to this keg
+
+            elif src.is_dir() and os.path.isdir(os.path.realpath(dst)):
+                # dst is an exsiting whole-dir symlink, now shared with new keg
+                # Re-link displaced keg's contents, then new keg
+                other = Path(os.path.realpath(dst))
+
+                # Pre-check for unsolvable collisions
+                collisions = _merge_collisions(dst, other, src)
+                if collisions:
+                    self.conflicts.extend(collisions)
+
+                else:
+                    self.explosions.append((dst, src))
 
             else:
                 self.conflicts.append((str(dst), os.readlink(dst)))
@@ -362,6 +383,119 @@ def _build_plan(keg: Path, prefix: Path) -> _Plan:
     return plan
 
 
+def _merge_children(*sources: Path) -> dict[str, list[Path]]:
+    """Group the immediate children of several source dirs by name.
+
+    .DS_Store is ignored, matching the link walk.
+
+    Args:
+        *sources: Source directories whose children are collected.
+
+    Returns:
+        A mapping from child name to the list of paths (one per source) that
+        carry an entry with that name.
+    """
+    by_name: dict[str, list[Path]] = {}
+    for s in sources:
+        if not s.is_dir():
+            continue
+
+        for entry in sorted(s.iterdir()):
+            if entry.name == ".DS_Store":
+                continue
+
+            by_name.setdefault(entry.name, []).append(entry)
+
+    return by_name
+
+
+def _merge_collisions(dst_dir: Path, *sources: Path) -> list[tuple[str, str]]:
+    """Real conflicts from merging `sources` into one directory (read-only).
+
+    Two kegs may share a directory yet hold disjoint entries (the normal case,
+    which explodes cleanly). A genuine conflict is a same-named entry that is not
+    a directory in *every* source, a file/file or file/dir clash that cannot be
+    merged. Shared subdirectories recurse.
+
+    Args:
+        dst_dir: The prefix directory that would receive the merged entries.
+        *sources: Keg directories being merged into `dst_dir`.
+
+    Returns:
+        List of (destination_path, reason) tuples for every unresolvable conflict,
+        or an empty list.
+    """
+    out: list[tuple[str, str]] = []
+    for name, entries in _merge_children(*sources).items():
+        if len(entries) < 2:
+            continue
+
+        # Same file if resolve to the same real path
+        if len({os.path.realpath(e) for e in entries}) == 1:
+            continue
+
+        target = dst_dir / name
+        if all(e.is_dir() and not e.is_symlink() for e in entries):
+            out.extend(_merge_collisions(target, *entries))  # Shared subdir
+
+        else:
+            out.append((str(target), "provided by multiple kegs"))
+
+    return out
+
+
+def _merge_into(dst_dir: Path, *sources: Path) -> list[Path]:
+    """Link the contents of `sources` into the real directory `dst_dir`.
+
+    Each unique child becomes a relative symlink (whole-dir for directories);
+    a directory shared by several sources is itself realised and merged,
+    recursively.
+
+    Args:
+        dst_dir: The real prefix directory that receives the merged symlinks.
+        *sources: Keg directories whose children are linked into `dst_dir`.
+
+    Returns:
+        List of absolute prefix paths of every symlink that was created.
+    """
+    linked: list[Path] = []
+    for name, entries in sorted(_merge_children(*sources).items()):
+        target = dst_dir / name
+
+        # Same file in multiple kegs; link once
+        if len({os.path.realpath(e) for e in entries}) == 1:
+            entries = entries[:1]
+
+        if len(entries) > 1 and all(e.is_dir() and not e.is_symlink() for e in entries):
+            target.mkdir(parents=True, exist_ok=True)
+            linked.extend(_merge_into(target, *entries))
+
+        else:
+            _make_relative_symlink(target, entries[0])
+            linked.append(target)
+
+    return linked
+
+
+def _explode(dst: Path, src: Path) -> list[Path]:
+    """Replace a whole-dir symlink with a real directory holding both kegs' files.
+
+    Collisions are pre-checked at plan time, so the merge here is conflict-free.
+
+    Args:
+        dst: Prefix path that is currently a whole-dir symlink into another keg.
+        src: The new keg's matching directory whose contents are merged in.
+
+    Returns:
+        List of absolute prefix paths of every symlink created inside the new dir.
+    """
+    other = Path(os.path.realpath(dst))
+    dst.unlink()  # Drop the whole-dir symlink
+    dst.mkdir(parents=True, exist_ok=True)
+
+    return _merge_into(dst, other, src)
+
+
 def _make_relative_symlink(dst: Path, src: Path) -> None:
     """Create a relative symlink.
 
@@ -434,6 +568,11 @@ def link_keg(
     for dst, src in plan.links:
         _make_relative_symlink(dst, src)
         result.linked.append(dst.relative_to(prefix).as_posix())
+
+    # Explode whole-dir symlinks now shared with another keg
+    for dst, src in plan.explosions:
+        for linked in _explode(dst, src):
+            result.linked.append(linked.relative_to(prefix).as_posix())
 
     # Under overwrite, replace the conflicting targets too
     if overwrite and plan.conflicts:

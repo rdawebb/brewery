@@ -41,7 +41,8 @@ def detect_format(archive: Path) -> str:
 
 
 def _keg_filter(member: tarfile.TarInfo, dest_path: str) -> tarfile.TarInfo:
-    """data-filter security checks, but preserve the member's exact mode.
+    """data-filter security checks, but preserve the member's exact mode, and permit
+    the symlinks brew creates verbatim.
 
     Args:
         member: The tarfile member to filter.
@@ -50,7 +51,13 @@ def _keg_filter(member: tarfile.TarInfo, dest_path: str) -> tarfile.TarInfo:
     Returns:
         The filtered tarfile member.
     """
-    safe = tarfile.data_filter(member, dest_path)  # Raises FilterError if unsafe
+    try:
+        safe = tarfile.data_filter(member, dest_path)  # Raises FilterError if unsafe
+
+    except (tarfile.AbsoluteLinkError, tarfile.LinkOutsideDestinationError):
+        if member.issym():
+            return member.replace(mode=member.mode & 0o777, deep=False)
+        raise
 
     # Keep the bottle's real permission bits (read-only files stay read-only)
     return safe.replace(mode=member.mode & 0o777, deep=False)

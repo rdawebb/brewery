@@ -56,6 +56,13 @@ def make_tar(entries: list[tuple]) -> bytes:
                 ti.linkname = target
                 t.addfile(ti)
 
+            elif kind == "hardlink":
+                _, name, target = entry
+                ti = tarfile.TarInfo(name)
+                ti.type = tarfile.LNKTYPE
+                ti.linkname = target
+                t.addfile(ti)
+
             else:
                 raise ValueError(kind)
 
@@ -175,16 +182,42 @@ def test_extract_drops_setuid_bit(tmp_path, compress) -> None:
     assert oct(mode & 0o777) == "0o555"  # Permission bits intact
 
 
+def test_path_traversal_rejected(tmp_path) -> None:
+    # A file member whose name escapes the destination is still rejected.
+    raw = make_tar([("file", "../evil", b"bad", 0o644)])
+    with pytest.raises(ExtractionError, match="unsafe"):
+        extract_bottle(_archive(tmp_path, gzip.compress, raw), tmp_path / "stage")
+
+
+def test_absolute_symlink_allowed_for_bottles(tmp_path) -> None:
+    # brew creates absolute symlinks in kegs (some get relocated); for a
+    # sha-verified bottle we create them as-is rather than rejecting.
+    raw = make_tar([("link", "foo/1.0/bin/x", "/usr/local/opt/foo/bin/x")])
+    keg = extract_bottle(_archive(tmp_path, gzip.compress, raw), tmp_path / "stage")
+    assert os.readlink(keg / "bin" / "x") == "/usr/local/opt/foo/bin/x"
+
+
+def test_escaping_relative_symlink_allowed_for_bottles(tmp_path) -> None:
+    # hunspell ships a symlink whose relative target escapes the keg root; the
+    # stdlib data filter rejects it, but brew creates it, so we must too.
+    raw = make_tar([("link", "foo/1.0/share/foo", "../../../../share/foo")])
+    keg = extract_bottle(_archive(tmp_path, gzip.compress, raw), tmp_path / "stage")
+    assert os.readlink(keg / "share" / "foo") == "../../../../share/foo"
+
+
+def test_escaping_hardlink_rejected(tmp_path) -> None:
+    # Hardlinks that escape the destination remain rejected -- the relaxation is
+    # symlink-only (a hardlink to outside the tree is a genuine hazard).
+    raw = make_tar([("hardlink", "foo/1.0/bin/x", "../../../../../etc/passwd")])
+    with pytest.raises(ExtractionError, match="unsafe"):
+        extract_bottle(_archive(tmp_path, gzip.compress, raw), tmp_path / "stage")
+
+
 @pytest.mark.parametrize(
     ("entries", "match"),
     [
         pytest.param(
             [("file", "../evil", b"bad", 0o644)], "unsafe", id="path_traversal"
-        ),
-        pytest.param(
-            [("link", "foo/1.0/bin/x", "/etc/passwd")],
-            "unsafe",
-            id="absolute_symlink",
         ),
         pytest.param(
             [
@@ -202,11 +235,27 @@ def test_extract_drops_setuid_bit(tmp_path, compress) -> None:
             "one version dir",
             id="multiple_version_dirs",
         ),
-        # Only a .brew dir under the name -> no version dir to return.
+        # Only a .brew dir under the name -> no version dir to return
         pytest.param(
             [("file", "foo/.brew/foo.rb", b"x", 0o644)],
             "one version dir",
             id="no_version_dir",
+        ),
+        # brew creates absolute symlinks in kegs (some get relocated)
+        pytest.param(
+            [("link", "foo/1.0/bin/x", "/usr/local/opt/foo/bin/x")],
+            None,
+            id="absolute_symlink_allowed",
+        ),
+        pytest.param(
+            [("link", "foo/1.0/share/foo", "../../../../share/foo")],
+            None,
+            id="escaping_relative_symlink_allowed",
+        ),
+        pytest.param(
+            [("hardlink", "foo/1.0/bin/x", "../../../../../etc/passwd")],
+            "unsafe",
+            id="escaping_hardlink",
         ),
     ],
 )
@@ -214,11 +263,16 @@ def test_extract_rejects_unsafe_or_malformed(tmp_path, entries, match) -> None:
     """Test that unsafe paths and malformed keg layouts are rejected.
 
     These safety/layout cases use gzip for brevity (format independence is
-    covered by the happy-path tests parametrized over fmt).
+    covered by the happy-path tests parametrized over fmt). match=None means
+    the case is expected to succeed.
     """
     arc = _archive(tmp_path, gzip.compress, make_tar(entries))
-    with pytest.raises(ExtractionError, match=match):
+    if match is None:
         extract_bottle(arc, tmp_path / "stage")
+
+    else:
+        with pytest.raises(ExtractionError, match=match):
+            extract_bottle(arc, tmp_path / "stage")
 
 
 def test_corrupt_archive_raises(tmp_path) -> None:

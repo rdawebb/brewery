@@ -123,7 +123,13 @@ class TabFetcher(Protocol):
     """Protocol for interacting with the bottle tab fetcher."""
 
     async def __call__(
-        self, *, name: str, version: str, bottle_sha256: str, revision: int
+        self,
+        *,
+        name: str,
+        version: str,
+        bottle_sha256: str,
+        revision: int,
+        rebuild: int,
     ) -> BottleTabInfo:
         """Fetch the bottle tab information for a given formula.
 
@@ -132,6 +138,7 @@ class TabFetcher(Protocol):
             version: The version of the formula.
             bottle_sha256: The SHA256 checksum of the bottle.
             revision: The revision number of the formula.
+            rebuild: The bottle rebuild counter.
 
         Returns:
             BottleTabInfo: The bottle tab information.
@@ -231,6 +238,7 @@ class InstallReport:
     """Report on the outcome of the installation process."""
 
     outcomes: dict[str, Outcome] = field(default_factory=dict)
+    errors: dict[str, str] = field(default_factory=dict)
 
     @property
     def installed(self) -> list[str]:
@@ -276,6 +284,7 @@ class Orchestrator:
         brew: BrewPort,
         config: InstallConfig,
         install_concurrency: int = 1,
+        tab_concurrency: int = 8,
     ) -> None:
         """Initialises the orchestrator.
 
@@ -286,6 +295,7 @@ class Orchestrator:
             brew: The brew port.
             config: The installation configuration.
             install_concurrency: The number of concurrent installations. Defaults to 1.
+            tab_concurrency: Maximum concurrent manifest tab fetches. Defaults to 8.
         """
         self.catalog = catalog
         self.downloader = downloader
@@ -293,6 +303,7 @@ class Orchestrator:
         self.brew = brew
         self.cfg = config
         self._install_sem = asyncio.Semaphore(install_concurrency)
+        self._tab_sem = asyncio.Semaphore(tab_concurrency)
 
     async def install(self, requested: list[str]) -> InstallReport:
         """Installs the requested formulae.
@@ -330,9 +341,7 @@ class Orchestrator:
             while ts.is_active():
                 for name in ts.get_ready():
                     task = asyncio.create_task(
-                        self._install_one(
-                            name, formulae[name], fetch, req, report.outcomes
-                        )
+                        self._install_one(name, formulae[name], fetch, req, report)
                     )
                     pending[task] = name
 
@@ -376,9 +385,69 @@ class Orchestrator:
 
         return seen
 
+    def _runtime_closure(self, name: str) -> set[str]:
+        """Transitive runtime-dependency names of `name` (excluding itself).
+
+        Args:
+            name: The canonical formula name whose dependency tree to walk.
+
+        Returns:
+            The set of all transitive runtime dependency names, not including
+            `name` itself.
+        """
+        seen: set[str] = set()
+        stack = [self.catalog.resolve_alias(d) for d in self.catalog.runtime_deps(name)]
+
+        while stack:
+            dep = stack.pop()
+            if dep in seen:
+                continue
+
+            seen.add(dep)
+            stack.extend(
+                self.catalog.resolve_alias(d) for d in self.catalog.runtime_deps(dep)
+            )
+
+        return seen
+
+    def _runtime_dep_entries(self, name: str) -> list[RuntimeDependency]:
+        """Receipt `runtime_dependencies` built from the installed closure.
+
+        Args:
+            name: The canonical formula name whose receipt entries to build.
+
+        Returns:
+            A list of `RuntimeDependency` entries for every transitive runtime
+            dependency, sorted by name, with `declared_directly` set for
+            direct deps.
+        """
+        direct = set(self.catalog.runtime_deps(name))
+        entries: list[RuntimeDependency] = []
+        for dep in sorted(self._runtime_closure(name)):
+            dfr = self.catalog.get_formula(dep)
+            if dfr is None:
+                continue
+
+            pkg_version = (
+                f"{dfr.version}_{dfr.revision}" if dfr.revision else dfr.version
+            )
+
+            entries.append(
+                RuntimeDependency(
+                    full_name=dep,
+                    version=dfr.version,
+                    revision=dfr.revision,
+                    bottle_rebuild=dfr.bottle_rebuild,
+                    pkg_version=pkg_version,
+                    declared_directly=dep in direct,
+                )
+            )
+
+        return entries
+
     async def _fetch(
         self, name: str, fr: FormulaRowP | None
-    ) -> tuple[Path | None, BottleTabInfo | None]:
+    ) -> tuple[Path | None, BottleTabInfo | None, str | None, str | None]:
         """Download bottle + manifest concurrently. Returns (bottle_path, tab).
 
         bottle_path is None if the formula has no bottle (forces brew fallback);
@@ -390,12 +459,14 @@ class Orchestrator:
             fr: The formula row information.
 
         Returns:
-            A tuple containing the bottle path and the bottle tab information.
+            A tuple containing bottle path, tab, bottle error, and tab error information.
         """
         if fr is None or fr.bottle_url is None or fr.bottle_sha256 is None:
-            return None, None
+            return None, None, "no bottle in catalog", "no bottle in catalog"
 
         ref = BottleRef(name, fr.bottle_url, fr.bottle_sha256)
+        tab_error: str | None = None
+        bottle_error: str | None = None
 
         async def _tab() -> BottleTabInfo | None:
             """Fetch the bottle tab information.
@@ -403,15 +474,19 @@ class Orchestrator:
             Returns:
                 The bottle tab information, or None if not available.
             """
+            nonlocal tab_error
             try:
-                return await self.tab_fetcher(
-                    name=name,
-                    version=fr.version,
-                    bottle_sha256=fr.bottle_sha256,
-                    revision=fr.revision,
-                )
+                async with self._tab_sem:
+                    return await self.tab_fetcher(
+                        name=name,
+                        version=fr.version,
+                        bottle_sha256=fr.bottle_sha256,
+                        revision=fr.revision,
+                        rebuild=fr.bottle_rebuild,
+                    )
 
-            except ManifestError:
+            except ManifestError as e:
+                tab_error = str(e)
                 return None
 
         async def _bottle() -> Path | None:
@@ -420,15 +495,17 @@ class Orchestrator:
             Returns:
                 The bottle information, or None if not available.
             """
+            nonlocal bottle_error
             try:
                 return await self.downloader.fetch(ref)
 
-            except DownloadError:
+            except DownloadError as e:
+                bottle_error = str(e)
                 return None
 
         bottle_path, tab = await asyncio.gather(_bottle(), _tab())
 
-        return bottle_path, tab
+        return bottle_path, tab, bottle_error, tab_error
 
     async def _install_one(
         self,
@@ -436,7 +513,7 @@ class Orchestrator:
         fr: FormulaRowP | None,
         fetch: dict[str, asyncio.Task],
         requested: set[str],
-        outcomes: dict[str, Outcome],
+        report: "InstallReport",
     ) -> Outcome:
         """Install a single formula.
 
@@ -445,31 +522,56 @@ class Orchestrator:
             fr: The formula row information.
             fetch: The fetch tasks for the formula.
             requested: The set of requested formulae.
-            outcomes: The outcomes of the installation.
+            report: The InstallReport.
 
         Returns:
             The outcome of the installation.
         """
+        outcomes = report.outcomes
+
         # Skip if any runtime dep failed outright
         deps = self.catalog.runtime_deps(name)
-        if any(
-            outcomes.get(d) in (Outcome.FAILED, Outcome.SKIPPED_DEP_FAILED)
+        failed_deps = [
+            d
             for d in deps
-        ):
+            if outcomes.get(d) in (Outcome.FAILED, Outcome.SKIPPED_DEP_FAILED)
+        ]
+
+        if failed_deps:
             fetch[name].cancel()
+            report.errors[name] = f"dependency failed: {', '.join(sorted(failed_deps))}"
 
             return Outcome.SKIPPED_DEP_FAILED
 
-        bottle_path, tab = await fetch[name]
+        bottle_path, tab, bottle_error, tab_error = await fetch[name]
 
-        # No bottle, no tab, or unknown formula -> brew owns this one
+        # No bottle, no tab, or unknown formula -> brew owns this one.
         if fr is None or bottle_path is None or tab is None:
+            reason = (
+                "unknown formula"
+                if fr is None
+                else f"bottle download failed: {bottle_error}"
+                if bottle_path is None
+                else f"manifest tab unavailable: {tab_error}"
+            )
+            report.errors[name] = f"{reason} -> brew"
+
             return await self._brew_install(name)
 
         on_request = name in requested
+        aliases = self.catalog.aliases_of(name)
+        rt_deps = self._runtime_dep_entries(name)
+
         async with self._install_sem:
             result = await asyncio.to_thread(
-                self._native_install, name, fr, bottle_path, tab, on_request
+                self._native_install,
+                name,
+                fr,
+                bottle_path,
+                tab,
+                on_request,
+                aliases,
+                rt_deps,
             )
 
         if result.stage is None:
@@ -479,6 +581,8 @@ class Orchestrator:
             return Outcome.NATIVE_KEG_ONLY if fr.keg_only else Outcome.NATIVE
 
         if result.stage == "link":
+            report.errors[name] = f"link stage: {result.error}"
+
             # Native install succeeded but linking didn't: try brew link, then
             # leave installed-but-unlinked (brew's own behaviour)
             if await self.brew.link(name):
@@ -487,6 +591,8 @@ class Orchestrator:
             return Outcome.INSTALLED_UNLINKED
 
         # An install-stage failure -> brew pours this formula
+        report.errors[name] = f"install stage: {result.error}"
+
         return await self._brew_install(name)
 
     async def _brew_install(self, name: str) -> Outcome:
@@ -509,6 +615,8 @@ class Orchestrator:
         bottle_path: Path,
         tab: BottleTabInfo,
         on_request: bool,
+        aliases: list[str],
+        rt_deps: list[RuntimeDependency],
     ) -> _NativeResult:
         """Install a formula natively.
 
@@ -518,6 +626,8 @@ class Orchestrator:
             bottle_path: The path to the bottle file.
             tab: The bottle tab information.
             on_request: Whether the installation was triggered by a user request.
+            aliases: Known aliases for the formula, written into the receipt.
+            rt_deps: Pre-built runtime dependency entries for the receipt.
 
         Returns:
             The result of the installation.
@@ -541,7 +651,9 @@ class Orchestrator:
             dest = install_to_cellar(
                 keg, prefix=self.cfg.prefix, name=name, version=pkg_version
             )
-            write_receipt(dest, self._build_receipt(name, fr, tab, on_request))
+            write_receipt(
+                dest, self._build_receipt(name, fr, tab, on_request, aliases, rt_deps)
+            )
 
         except (ExtractionError, RelocationError, CellarError, OSError) as exc:
             if dest is not None:
@@ -578,7 +690,13 @@ class Orchestrator:
             opt.unlink()
 
     def _build_receipt(
-        self, name: str, fr: FormulaRowP, tab: BottleTabInfo, on_request: bool
+        self,
+        name: str,
+        fr: FormulaRowP,
+        tab: BottleTabInfo,
+        on_request: bool,
+        aliases: list[str],
+        rt_deps: list[RuntimeDependency],
     ) -> dict:
         """Build a receipt for the installed formula.
 
@@ -587,6 +705,8 @@ class Orchestrator:
             fr: The formula row information.
             tab: The bottle tab information.
             on_request: Whether the installation was triggered by a user request.
+            aliases: Known aliases for the formula.
+            rt_deps: Pre-built runtime dependency entries.
 
         Returns:
             A dictionary representing the receipt.
@@ -596,11 +716,8 @@ class Orchestrator:
             changed_files=tab.changed_files,
             source_modified_time=tab.source_modified_time,
             compiler=tab.compiler,
-            runtime_dependencies=[
-                RuntimeDependency.from_tab(d) for d in tab.runtime_dependencies
-            ],
+            runtime_dependencies=rt_deps,
             built_on=tab.built_on,
-            arch=tab.arch,
             installed_on_request=on_request,
             time=int(time.time()),
             source=Source(
@@ -609,5 +726,5 @@ class Orchestrator:
                 version_scheme=fr.version_scheme,
                 tap=fr.tap or "homebrew/core",
             ),
-            aliases=self.catalog.aliases_of(name),
+            aliases=aliases,
         )

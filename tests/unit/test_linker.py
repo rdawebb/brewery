@@ -1,16 +1,4 @@
-"""Tests for the keg linker.
-
-Almost all tests are UNIT tests: they build a synthetic keg under a throwaway
-prefix and assert on the resulting symlinks, so they run anywhere (no macOS, no
-brew). They cover the per-directory strategy (link-whole vs mkpath-and-descend
-vs skip), relative symlink targets, the linked record, conflict detection,
-overwrite, keg-only suppression, and etc preservation.
-
-The single INTEGRATION test (marked, macOS + brew only) is the fidelity check:
-it diffs our *planned* link set for a real installed keg against the symlinks
-brew actually created in the prefix — non-destructively, via the internal
-_build_plan, without mutating the real prefix.
-"""
+"""Unit tests for the keg linker."""
 
 from __future__ import annotations
 
@@ -87,6 +75,51 @@ def _readlink(p: Path) -> str | None:
         The symlink target string, or None.
     """
     return os.readlink(p) if p.is_symlink() else None
+
+
+def _mk(base: Path, rel: str, content: str = "x") -> Path:
+    """Create a file at *base/rel*, making parent directories as needed.
+
+    Args:
+        base: The root directory under which the file is created.
+        rel: The relative path of the file to create.
+        content: The text content to write; defaults to ``'x'``.
+
+    Returns:
+        The absolute path to the created file.
+    """
+    p = base / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content)
+    return p
+
+
+def _points_to(link: Path, target: Path) -> bool:
+    """Return True if *link* resolves to the same real path as *target*.
+
+    Args:
+        link: The symlink (or any path) to resolve.
+        target: The expected real target path.
+
+    Returns:
+        True if both paths resolve to the same filesystem location.
+    """
+    return Path(os.path.realpath(link)) == target.resolve()
+
+
+@pytest.fixture
+def prefix(tmp_path: Path) -> Path:
+    """A fresh, empty prefix directory.
+
+    Args:
+        tmp_path: The pytest-provided temporary directory.
+
+    Returns:
+        Path to the newly created prefix directory.
+    """
+    p = tmp_path / "prefix"
+    p.mkdir()
+    return p
 
 
 def test_bin_skips_absolute_target_symlinks(tmp_path):
@@ -293,6 +326,171 @@ def test_missing_eligible_dir_is_skipped(tmp_path):
     assert res.linked == ["lib/libtiny.dylib"]
 
 
+class TestLinkExplosion:
+    """Tests for symlink-explosion handling"""
+
+    def test_second_keg_explodes_whole_dir_symlink(self, tmp_path, prefix) -> None:
+        """Test that linking a second keg into a whole-dir symlink explodes it into a real directory."""
+        cellar = tmp_path / "Cellar"
+        a = cellar / "xorgproto/2025.1"
+        _mk(a, "include/X11/Xfuncproto.h")
+        b = cellar / "libx11/1.8.13"
+        _mk(b, "include/X11/Xlib.h")
+
+        link_keg(a, prefix=prefix, name="xorgproto")
+        x11 = prefix / "include/X11"
+        assert x11.is_symlink()  # First keg: whole-dir symlink
+
+        res = link_keg(b, prefix=prefix, name="libx11")
+
+        assert x11.is_dir() and not x11.is_symlink()  # Exploded into a real dir
+        assert _points_to(
+            x11 / "Xfuncproto.h", a / "include/X11/Xfuncproto.h"
+        )  # A relinked
+        assert _points_to(x11 / "Xlib.h", b / "include/X11/Xlib.h")  # B linked
+        assert "include/X11/Xlib.h" in res.linked
+
+    def test_third_keg_descends_real_dir(self, tmp_path, prefix) -> None:
+        """Test that a third keg correctly descends an already-exploded real directory."""
+        cellar = tmp_path / "Cellar"
+        a = cellar / "xorgproto/2025.1"
+        _mk(a, "include/X11/Xfuncproto.h")
+        b = cellar / "libx11/1.8.13"
+        _mk(b, "include/X11/Xlib.h")
+        c = cellar / "libxau/1.0.12"
+        _mk(c, "include/X11/Xauth.h")
+
+        link_keg(a, prefix=prefix, name="xorgproto")
+        link_keg(b, prefix=prefix, name="libx11")  # Explodes
+        link_keg(c, prefix=prefix, name="libxau")  # Descends the real dir
+
+        x11 = prefix / "include/X11"
+        assert _points_to(x11 / "Xfuncproto.h", a / "include/X11/Xfuncproto.h")
+        assert _points_to(x11 / "Xlib.h", b / "include/X11/Xlib.h")
+        assert _points_to(x11 / "Xauth.h", c / "include/X11/Xauth.h")
+
+    def test_shared_subdir_recurses(self, tmp_path, prefix) -> None:
+        """Test that a shared subdirectory within an exploded dir is itself realised and merged."""
+        cellar = tmp_path / "Cellar"
+        a = cellar / "xorgproto/2025.1"
+        _mk(a, "include/X11/extensions/Xext.h")
+        b = cellar / "libx11/1.8.13"
+        _mk(b, "include/X11/extensions/shape.h")
+
+        link_keg(a, prefix=prefix, name="xorgproto")
+        link_keg(b, prefix=prefix, name="libx11")
+
+        ext = prefix / "include/X11/extensions"
+        assert ext.is_dir() and not ext.is_symlink()  # Shared subdir realised too
+        assert _points_to(ext / "Xext.h", a / "include/X11/extensions/Xext.h")
+        assert _points_to(ext / "shape.h", b / "include/X11/extensions/shape.h")
+
+    def test_file_collision_aborts_without_mutating(self, tmp_path, prefix) -> None:
+        """Test that a same-named file across two kegs aborts explosion without mutating the prefix."""
+        cellar = tmp_path / "Cellar"
+        a = cellar / "xorgproto/2025.1"
+        _mk(a, "include/X11/Xfuncproto.h")
+        b = cellar / "libx11/1.8.13"
+        _mk(b, "include/X11/Xfuncproto.h")  # Same file -> genuine conflict
+        _mk(b, "include/X11/Xlib.h")
+
+        link_keg(a, prefix=prefix, name="xorgproto")
+        x11 = prefix / "include/X11"
+
+        with pytest.raises(LinkError):
+            link_keg(b, prefix=prefix, name="libx11")
+
+        # Nothing mutated: still A's whole-dir symlink, B's files not linked
+        assert x11.is_symlink()
+        assert _points_to(x11, a / "include/X11")
+
+    def test_explosion_is_idempotent(self, tmp_path, prefix) -> None:
+        """Test that re-linking an already-exploded keg reports already_linked without re-exploding."""
+        cellar = tmp_path / "Cellar"
+        a = cellar / "xorgproto/2025.1"
+        _mk(a, "include/X11/Xfuncproto.h")
+        b = cellar / "libx11/1.8.13"
+        _mk(b, "include/X11/Xlib.h")
+
+        link_keg(a, prefix=prefix, name="xorgproto")
+        link_keg(b, prefix=prefix, name="libx11")
+        res2 = link_keg(b, prefix=prefix, name="libx11")  # Re-link: no second explosion
+
+        x11 = prefix / "include/X11"
+        assert x11.is_dir() and not x11.is_symlink()
+        assert "include/X11/Xlib.h" in res2.already_linked
+        assert _points_to(x11 / "Xlib.h", b / "include/X11/Xlib.h")
+
+    def test_metapackage_symlink_to_whole_dir_link_is_skipped(
+        self, tmp_path, prefix
+    ) -> None:
+        """Test that an umbrella keg's symlink pointing at an existing whole-dir prefix link
+        is treated as already-linked."""
+        cellar = tmp_path / "Cellar"
+        qtbase = cellar / "qtbase/6.11.1"
+        _mk(qtbase, "lib/cmake/Qt6Gui/Qt6GuiConfig.cmake")
+        link_keg(qtbase, prefix=prefix, name="qtbase")
+        gui = prefix / "lib/cmake/Qt6Gui"
+        assert gui.is_symlink()  # Only qtbase provides it -> whole-dir symlink
+
+        # Umbrella ships lib/cmake/Qt6Gui as a symlink pointing at the prefix
+        # location, so it resolves to the same dir
+        qt = cellar / "qt/6.11.1"
+        (qt / "lib/cmake").mkdir(parents=True)
+        os.symlink(os.path.relpath(gui, qt / "lib/cmake"), qt / "lib/cmake/Qt6Gui")
+
+        res = link_keg(qt, prefix=prefix, name="qt")  # Should not conflict
+        assert "lib/cmake/Qt6Gui" in res.already_linked
+        assert _points_to(gui, qtbase / "lib/cmake/Qt6Gui")  # Unchanged
+
+    def test_metapackage_symlink_over_exploded_dir_is_skipped(
+        self, tmp_path, prefix
+    ) -> None:
+        """Test that an umbrella keg's symlink pointing at an already-exploded real directory
+        is treated as already-linked."""
+        cellar = tmp_path / "Cellar"
+        qtbase = cellar / "qtbase/6.11.1"
+        _mk(qtbase, "lib/cmake/Qt6BuildInternals/a.cmake")
+        qttools = cellar / "qttools/6.11.1"
+        _mk(qttools, "lib/cmake/Qt6BuildInternals/b.cmake")
+        link_keg(qtbase, prefix=prefix, name="qtbase")
+        link_keg(qttools, prefix=prefix, name="qttools")  # Explodes Qt6BuildInternals
+        bi = prefix / "lib/cmake/Qt6BuildInternals"
+        assert bi.is_dir() and not bi.is_symlink()  # Exploded real dir
+
+        # Umbrella's entry is a symlink at the prefix location & it resolves to the
+        # exploded real dir, so the whole entry is already satisfied
+        qt = cellar / "qt/6.11.1"
+        (qt / "lib/cmake").mkdir(parents=True)
+        os.symlink(
+            os.path.relpath(bi, qt / "lib/cmake"), qt / "lib/cmake/Qt6BuildInternals"
+        )
+
+        res = link_keg(qt, prefix=prefix, name="qt")  # Should not conflict
+        assert "lib/cmake/Qt6BuildInternals" in res.already_linked
+        assert _points_to(
+            bi / "a.cmake", qtbase / "lib/cmake/Qt6BuildInternals/a.cmake"
+        )
+        assert _points_to(
+            bi / "b.cmake", qttools / "lib/cmake/Qt6BuildInternals/b.cmake"
+        )
+
+    def test_merge_collisions_ignores_same_realpath(self, tmp_path) -> None:
+        """Test that two entries resolving to the same real file are not reported as a collision."""
+        a = tmp_path / "a"
+        _mk(a, "objs/qrc.o", "data")
+        b = tmp_path / "b"
+        (b / "objs").mkdir(parents=True)
+        os.symlink(
+            os.path.relpath(a / "objs/qrc.o", b / "objs"), b / "objs/qrc.o"
+        )  # b -> a's file
+
+        # Both "provide" objs/qrc.o, but should resolve to one file -> not a conflict
+        assert (
+            linker._merge_collisions(Path("/prefix/objs"), a / "objs", b / "objs") == []
+        )
+
+
 _CANDIDATES = ["gettext", "python@3.13", "python@3.14", "node", "openssl@3"]
 
 
@@ -302,9 +500,7 @@ _CANDIDATES = ["gettext", "python@3.13", "python@3.14", "node", "openssl@3"]
     reason="requires macOS with Homebrew",
 )
 def test_plan_matches_brew_links():
-    """Non-destructive fidelity check: our planned links for a real keg must
-    match the symlinks brew actually created. Diffs point straight at strategy
-    gaps to extend."""
+    """Non-destructive check: planned links must match those brew actually created."""
     prefix = Path(
         subprocess.run(
             ["brew", "--prefix"], capture_output=True, text=True, check=True
@@ -348,7 +544,16 @@ def test_plan_matches_brew_links():
 
 
 def _symlinks_into(root: Path, keg_real: str) -> set[str]:
-    """Symlinks under root (descending real dirs only) that resolve into keg_real."""
+    """Collect symlinks under *root* that resolve into *keg_real*, descending only real directories.
+
+    Args:
+        root: The prefix subdirectory to scan (e.g. ``prefix / 'bin'``).
+        keg_real: The real (resolved) path of the keg as a string; only symlinks
+            whose real target starts with this prefix are collected.
+
+    Returns:
+        The set of absolute path strings for every matching symlink found.
+    """
     found: set[str] = set()
     stack = [str(root)]
     while stack:

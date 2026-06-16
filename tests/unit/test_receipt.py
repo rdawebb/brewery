@@ -196,7 +196,6 @@ def _rebuild(o: dict, tab_deps: list[dict]) -> dict:
         compiler=o["compiler"],
         runtime_dependencies=[RuntimeDependency.from_tab(d) for d in tab_deps],
         built_on=o["built_on"],
-        arch=o["arch"],
         installed_on_request=o["installed_on_request"],
         time=o["time"],
         source=Source(
@@ -220,7 +219,8 @@ def _rebuild(o: dict, tab_deps: list[dict]) -> dict:
 )
 def test_round_trip_is_byte_exact(original, tab_deps) -> None:
     """Test that round-tripping a receipt preserves byte-for-byte equality."""
-    assert dumps(_rebuild(orjson.loads(original), tab_deps)) == original
+    with mock.patch.object(r.platform, "machine", lambda: "x86_64"):
+        assert dumps(_rebuild(orjson.loads(original), tab_deps)) == original
 
 
 def test_all_bottle_fills_arch_from_host_and_nulls_built_on() -> None:
@@ -236,7 +236,6 @@ def test_all_bottle_fills_arch_from_host_and_nulls_built_on() -> None:
             compiler="gcc-12",
             runtime_dependencies=[],
             built_on=None,
-            arch=None,
             installed_on_request=False,
             time=parsed["time"],
             source=Source(stable_version="2026-05-14", api_path=str(env.api_path)),
@@ -306,7 +305,6 @@ def test_changed_files_sorted_in_output() -> None:
         compiler="clang",
         runtime_dependencies=[],
         built_on=None,
-        arch="arm64",
         installed_on_request=True,
         time=1,
         source=Source(stable_version="1.0", api_path="/p"),

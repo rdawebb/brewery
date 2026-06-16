@@ -1,4 +1,4 @@
-"""Tests for the unified brew provider backends.
+"""Unit tests for the unified brew provider backends.
 
 run_brew is Mocked to return crafted BrewResults, so these verify the backend
 factory passes the right kind flags and that the "already installed" / "pinned"

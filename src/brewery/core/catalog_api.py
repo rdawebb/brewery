@@ -24,6 +24,8 @@ _SINGLE_FORMULA_URL = "https://formulae.brew.sh/api/formula/{name}.json"
 
 
 class _HttpClient(Protocol):
+    """Structural protocol for an async HTTP client that can perform GET requests."""
+
     async def get(
         self,
         url: str,
@@ -113,6 +115,7 @@ async def fetch_feed(
     headers: dict[str, str] = {"User-Agent": _USER_AGENT}
     if etag:
         headers["If-None-Match"] = etag
+
     if last_modified:
         headers["If-Modified-Since"] = last_modified
 
