@@ -1,5 +1,11 @@
 """Relocate a staged Homebrew bottle keg into a target prefix."""
 
+# This file contains code derived from Homebrew (https://github.com/Homebrew/brew)
+# Copyright (c) 2009-present, Homebrew contributors
+# Licensed under BSD 2-Clause License (see LICENSE-HOMEBREW)
+#
+# Portions of this module reimplement Homebrew's keg relocation logic.
+
 from __future__ import annotations
 
 import contextlib

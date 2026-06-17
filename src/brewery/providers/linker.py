@@ -4,6 +4,12 @@ Conflict detection is a pre-pass: nothing is mutated if the link would conflict,
 so the caller can fall back to `brew link` without a partially linked prefix.
 """
 
+# This file contains code derived from Homebrew (https://github.com/Homebrew/brew)
+# Copyright (c) 2009-present, Homebrew contributors
+# Licensed under BSD 2-Clause License (see LICENSE-HOMEBREW)
+#
+# Portions of this module reimplement Homebrew's keg linking logic.
+
 from __future__ import annotations
 
 import os
