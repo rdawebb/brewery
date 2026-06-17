@@ -8,15 +8,10 @@ from typing import BinaryIO
 
 import zstandard
 
-from brewery.core.errors import BrewError
+from brewery.core.errors import ExtractionError
 
 _GZIP_MAGIC = b"\x1f\x8b"
 _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
-
-
-class ExtractionError(BrewError):
-    """A bottle could not be extracted (bad format, unsafe member, corrupt
-    archive, or unexpected layout). Treated as a per-formula fallback signal."""
 
 
 def detect_format(archive: Path) -> str:
@@ -37,7 +32,9 @@ def detect_format(archive: Path) -> str:
     if head[:4] == _ZSTD_MAGIC:
         return "zstd"
 
-    raise ExtractionError(f"unrecognized bottle compression: {head[:4].hex()}")
+    raise ExtractionError(
+        f"unrecognized bottle compression: {head[:4].hex()}", archive=archive
+    )
 
 
 def _keg_filter(member: tarfile.TarInfo, dest_path: str) -> tarfile.TarInfo:
@@ -105,10 +102,14 @@ def extract_bottle(archive: Path, dest: Path) -> Path:
                 _extract_stream(reader, dest)
 
     except tarfile.FilterError as exc:
-        raise ExtractionError(f"unsafe tar member in {archive.name}: {exc}") from exc
+        raise ExtractionError(
+            f"unsafe tar member in {archive.name}: {exc}", archive=archive, dest=dest
+        ) from exc
 
     except (tarfile.TarError, zstandard.ZstdError, OSError) as exc:
-        raise ExtractionError(f"failed to extract {archive.name}: {exc}") from exc
+        raise ExtractionError(
+            f"failed to extract {archive.name}: {exc}", archive=archive, dest=dest
+        ) from exc
 
     return _locate_keg(dest)
 
@@ -125,7 +126,8 @@ def _locate_keg(dest: Path) -> Path:
     top = [p for p in dest.iterdir() if p.is_dir() and not p.name.startswith(".")]
     if len(top) != 1:
         raise ExtractionError(
-            f"expected a single top-level keg dir, found {[p.name for p in top]}"
+            f"expected a single top-level keg dir, found {[p.name for p in top]}",
+            dest=dest,
         )
 
     name_dir = top[0]
@@ -136,7 +138,8 @@ def _locate_keg(dest: Path) -> Path:
     if len(versions) != 1:
         raise ExtractionError(
             f"expected one version dir under {name_dir.name}, "
-            f"found {[p.name for p in versions]}"
+            f"found {[p.name for p in versions]}",
+            dest=dest,
         )
 
     return versions[0]

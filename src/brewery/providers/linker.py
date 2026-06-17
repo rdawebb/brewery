@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
-from brewery.core.errors import BrewError
+from brewery.core.errors import LinkError
 
 # Top-level keg directories
 _ELIGIBLE = ("bin", "sbin", "etc", "include", "lib", "share", "Frameworks")
@@ -84,22 +84,6 @@ _FRAMEWORK_RX = re.compile(r"[^/]*\.framework(/Versions)?$")
 
 _LINKED_RECORD_DIR = "var/homebrew/linked"
 _PYC_EXT = (".pyc", ".pyo")
-
-
-class LinkError(BrewError):
-    """Linking the keg conflicts with existing files; per-formula fallback signal."""
-
-    def __init__(self, conflicts: list[tuple[str, str]]) -> None:
-        """Initialise the LinkError with a list of conflicts.
-
-        Args:
-            conflicts: A list of tuples containing the destination and existing file paths.
-        """
-        self.conflicts = conflicts
-        listing = "\n".join(
-            f"  {dst} -> already {existing}" for dst, existing in conflicts
-        )
-        super().__init__(f"link conflicts:\n{listing}")
 
 
 class Action(Enum):

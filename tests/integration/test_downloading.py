@@ -12,7 +12,8 @@ import httpx
 import pytest
 
 import brewery.providers.downloader as d
-from brewery.providers.downloader import BottleRef, Downloader, DownloadError
+from brewery.core.errors import DownloadError
+from brewery.providers.downloader import BottleRef, Downloader
 
 pytestmark = pytest.mark.integration
 

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from brewery.core.errors import BrewError
+from brewery.core.errors import RelocationError
 
 # Mach-O Constants
 _MH_MAGIC = 0xFEEDFACE  # 32-bit, host byte order
@@ -88,24 +88,6 @@ class InstallName:
 
     kind: NameKind
     value: str
-
-
-class RelocationError(BrewError):
-    """Raised when a keg cannot be relocated natively.
-
-    Used as a per-formula signal to fallback to brew.
-    """
-
-    def __init__(self, path: Path, reason: str) -> None:
-        """Initialise a RelocationError.
-
-        Args:
-            path: The path to the file that could not be relocated.
-            reason: The reason for the relocation failure.
-        """
-        self.path = path
-        self.reason = reason
-        super().__init__(f"{path}: {reason}")
 
 
 def build_substitutions(

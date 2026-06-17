@@ -7,8 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from brewery.providers.downloader import BottleRef, DownloadError
-from brewery.providers.manifest import BottleTabInfo, ManifestError
+from brewery.core.errors import DownloadError
+from brewery.providers.downloader import BottleRef
+from brewery.core.errors import ManifestError
+from brewery.providers.manifest import BottleTabInfo
 from brewery.providers.orchestrator import (
     InstallConfig,
     Orchestrator,
@@ -185,7 +187,7 @@ class FailingDownloader:
         Raises:
             DownloadError: Mocked download error.
         """
-        raise DownloadError(ref, "boom")
+        raise DownloadError("boom", name=ref.name, url=ref.url)
 
 
 class MockTab:

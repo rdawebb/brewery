@@ -7,7 +7,8 @@ import orjson
 import pytest
 
 import brewery.providers.manifest as m
-from brewery.providers.manifest import BottleTabInfo, ManifestError, fetch_bottle_tab
+from brewery.core.errors import ManifestError
+from brewery.providers.manifest import BottleTabInfo, fetch_bottle_tab
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 

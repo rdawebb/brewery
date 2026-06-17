@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from brewery.core.errors import BrewError
+from brewery.core.errors import DownloadError, SysError
 
 # Homebrew's hardcoded anonymous bearer for pulling bottles from ghcr.io
 DEFAULT_GHCR_TOKEN = "QQ=="
@@ -27,33 +27,10 @@ _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 ProgressCb = Callable[[int, "int | None"], None]
 
 
-class DownloadError(BrewError):
-    """A bottle could not be downloaded or failed verification.
-
-    The pipeline should treat this as a per-formula fallback signal.
-    """
-
-    def __init__(self, ref: "BottleRef", reason: str) -> None:
-        """Initialise DownloadError.
-
-        Args:
-            ref: The reference to the bottle that failed to download.
-            reason: The reason for the download failure.
-        """
-        self.ref = ref
-        self.reason = reason
-        super().__init__(f"{ref.name} <{ref.url}>: {reason}")
-
-
-class _Transient(Exception):
-    """Internal: a retryable HTTP status was returned."""
+class _RetryableStatus(Exception):
+    """Internal: a retryable HTTP status was received; signals the retry loop."""
 
     def __init__(self, status: int) -> None:
-        """Initialise _Transient.
-
-        Args:
-            status: The HTTP status code that triggered the retry.
-        """
         self.status = status
         super().__init__(f"HTTP {status}")
 
@@ -206,12 +183,16 @@ class Downloader:
             try:
                 return await self._attempt(ref, dest, on_progress)
 
-            except (httpx.TransportError, _Transient) as exc:
+            except (httpx.TransportError, _RetryableStatus) as exc:
                 last = exc
                 if attempt < self._max_retries:
                     await asyncio.sleep(min(2 ** (attempt - 1), 8))
 
-        raise DownloadError(ref, f"failed after {self._max_retries} attempts: {last}")
+        raise DownloadError(
+            f"failed after {self._max_retries} attempts: {last}",
+            name=ref.name,
+            url=ref.url,
+        )
 
     async def _attempt(
         self, ref: BottleRef, dest: Path, on_progress: ProgressCb | None
@@ -227,7 +208,7 @@ class Downloader:
             The path to the cached bottle.
         """
         if self._client is None:
-            raise BrewError(message="HTTP client is not initialised.")
+            raise SysError("HTTP client is not initialised.")
 
         hasher = hashlib.sha256()
         fd, tmp_name = tempfile.mkstemp(dir=self._cache_dir, suffix=".part")
@@ -242,7 +223,7 @@ class Downloader:
                     follow_redirects=True,
                 ) as resp:
                     if resp.status_code in _RETRYABLE_STATUS:
-                        raise _Transient(resp.status_code)
+                        raise _RetryableStatus(resp.status_code)
 
                     resp.raise_for_status()
                     total = int(resp.headers.get("Content-Length", 0)) or None
@@ -257,14 +238,18 @@ class Downloader:
             digest = hasher.hexdigest()
             if digest != ref.sha256:
                 raise DownloadError(
-                    ref, f"sha256 mismatch: expected {ref.sha256}, got {digest}"
+                    f"sha256 mismatch: expected {ref.sha256}, got {digest}",
+                    name=ref.name,
+                    url=ref.url,
                 )
             os.replace(tmp, dest)  # Atomic publish into the content-addressed cache
 
             return dest
 
         except httpx.HTTPStatusError as exc:
-            raise DownloadError(ref, f"HTTP {exc.response.status_code}") from exc
+            raise DownloadError(
+                f"HTTP {exc.response.status_code}", name=ref.name, url=ref.url
+            ) from exc
 
         finally:
             with contextlib.suppress(FileNotFoundError):

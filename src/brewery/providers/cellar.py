@@ -12,13 +12,9 @@ import stat
 import sys
 from pathlib import Path
 
-from brewery.core.errors import BrewError
+from brewery.core.errors import CellarError
 
 _IS_DARWIN = sys.platform == "darwin"
-
-
-class CellarError(BrewError):
-    """Installing a keg into the Cellar failed; per-formula fallback signal."""
 
 
 def _clonefile(src: Path, dst: Path) -> None:
@@ -166,7 +162,10 @@ def install_to_cellar(
                 rmtree(dest)
 
         raise CellarError(
-            f"failed to install {name} {version} into Cellar: {exc}"
+            f"failed to install into Cellar: {exc}",
+            name=name,
+            version=version,
+            path=dest,
         ) from exc
 
     _link_opt(prefix, name, version)

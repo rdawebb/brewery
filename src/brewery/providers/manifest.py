@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 import httpx
 import orjson
 
-from brewery.core.errors import BrewError
+from brewery.core.errors import ManifestFetchError, ManifestParseError
 from brewery.core.host import current_platform
 
 GHCR_BASE = "https://ghcr.io/v2/homebrew/core"
@@ -19,14 +19,6 @@ _TAB_ANNOTATION = "sh.brew.tab"
 _DIGEST_ANNOTATION = "sh.brew.bottle.digest"
 _PATH_EXEC_ANNOTATION = "sh.brew.path_exec_files"
 _INSTALLED_SIZE_ANNOTATION = "sh.brew.bottle.installed_size"
-
-
-class ManifestError(BrewError):
-    """Raised when the manifest can't yield a usable tab.
-
-    Callers treat this as 'fall back to scanning the keg + assembling the
-    receipt without tab fields', not as a hard install failure.
-    """
 
 
 @dataclass(frozen=True)
@@ -258,8 +250,9 @@ async def fetch_bottle_tab(
         BottleTabInfo with the bottle-intrinsic receipt fields (+ extras).
 
     Raises:
-        ManifestError: manifest unreachable, no digest match, or tab
-            missing/unparseable.
+        ManifestFetchError: manifest index could not be retrieved from GHCR.
+        ManifestParseError: index has unexpected structure, no digest match,
+            or tab is missing/unparseable.
     """
     image = image_formula_name(name)
     tag = manifest_tag(version, revision, rebuild)
@@ -277,11 +270,13 @@ async def fetch_bottle_tab(
         index = orjson.loads(resp.content)
 
     except (httpx.HTTPError, orjson.JSONDecodeError) as exc:
-        raise ManifestError(f"manifest fetch failed for {name} {tag}: {exc}") from exc
+        raise ManifestFetchError(
+            f"manifest fetch failed: {exc}", name=name, tag=tag
+        ) from exc
 
     manifests = index.get("manifests")
     if not isinstance(manifests, list):
-        raise ManifestError(f"no manifests array in index for {name} {tag}")
+        raise ManifestParseError("no manifests array in index", name=name, tag=tag)
 
     p = current_platform()
     oci_arch = p.arch if p is not None else "amd64"
@@ -292,22 +287,22 @@ async def fetch_bottle_tab(
 
     if entry is None:
         want = bottle_sha256.removeprefix("sha256:").lower()
-        raise ManifestError(
-            f"no manifest matching bottle digest {want[:12]}… for {name} {tag}"
+        raise ManifestParseError(
+            f"no manifest matching bottle digest {want[:12]}…", name=name, tag=tag
         )
 
     ann = entry["annotations"]
 
     raw_tab = ann.get(_TAB_ANNOTATION)
     if not raw_tab:
-        raise ManifestError(f"missing {_TAB_ANNOTATION} for {name} {tag}")
+        raise ManifestParseError(f"missing {_TAB_ANNOTATION}", name=name, tag=tag)
 
     try:
         tab = orjson.loads(raw_tab)
 
     except orjson.JSONDecodeError as exc:
-        raise ManifestError(
-            f"unparseable {_TAB_ANNOTATION} for {name} {tag}: {exc}"
+        raise ManifestParseError(
+            f"unparseable {_TAB_ANNOTATION}: {exc}", name=name, tag=tag
         ) from exc
 
     # Required tab fields (present on both platform and all bottles)
@@ -317,8 +312,8 @@ async def fetch_bottle_tab(
         compiler = tab["compiler"]
 
     except (KeyError, TypeError, ValueError) as exc:
-        raise ManifestError(
-            f"incomplete {_TAB_ANNOTATION} for {name} {tag}: {exc}"
+        raise ManifestParseError(
+            f"incomplete {_TAB_ANNOTATION}: {exc}", name=name, tag=tag
         ) from exc
 
     # Optional on all bottles: arch and built_on are absent

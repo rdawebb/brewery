@@ -15,18 +15,26 @@ from graphlib import TopologicalSorter
 from pathlib import Path
 from typing import Protocol
 
-from brewery.providers.cellar import CellarError, install_to_cellar, rmtree
-from brewery.providers.downloader import BottleRef, DownloadError
-from brewery.providers.extractor import ExtractionError, extract_bottle
-from brewery.providers.linker import LinkError, link_keg
-from brewery.providers.manifest import BottleTabInfo, ManifestError
+from brewery.core.errors import (
+    CellarError,
+    DownloadError,
+    ExtractionError,
+    LinkError,
+    ManifestError,
+    RelocationError,
+)
+from brewery.providers.cellar import install_to_cellar, rmtree
+from brewery.providers.downloader import BottleRef
+from brewery.providers.extractor import extract_bottle
+from brewery.providers.linker import link_keg
+from brewery.providers.manifest import BottleTabInfo
 from brewery.providers.receipt import (
     RuntimeDependency,
     Source,
     build_receipt,
     write_receipt,
 )
-from brewery.providers.relocator import RelocationError, relocate_keg
+from brewery.providers.relocator import relocate_keg
 
 
 class FormulaRowP(Protocol):
