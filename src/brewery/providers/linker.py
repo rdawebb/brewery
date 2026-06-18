@@ -744,6 +744,11 @@ def unlink_keg(keg_dir: Path, *, prefix: Path, name: str) -> UnlinkResult:
 
     result.pruned = _prune_dirs(prefix, prune_targets)
 
+    # Drop the opt link if it still points at this keg
+    opt = prefix / "opt" / name
+    if opt.is_symlink() and _points_into(opt, keg_real):
+        opt.unlink()
+
     # Drop brew's linked-keg pointer if it still points at this keg
     record = prefix / _LINKED_RECORD_DIR / name
     if record.is_symlink() and _points_into(record, keg_real):

@@ -606,7 +606,7 @@ class TestUnlink:
         _mk(keg, "lib/libtool.dylib", "x")
         link_keg(
             keg, prefix=prefix, name="tool", keg_only=True
-        )  # no links, no manifest
+        )  # No links, no manifest
         res = unlink_keg(keg, prefix=prefix, name="tool")
         assert res.removed == []
         assert res.scanned is True  # No manifest -> scan finds nothing
@@ -623,6 +623,29 @@ class TestUnlink:
         outside.symlink_to(tmp_path / "other")
         assert _points_into(inside, keg.resolve()) is True
         assert _points_into(outside, keg.resolve()) is False
+
+    def test_unlink_removes_opt_link(self, tmp_path, prefix) -> None:
+        """The opt link is removed so no broken symlink survives the keg."""
+        cellar = tmp_path / "Cellar"
+        keg = cellar / "openssl@3" / "3.0"
+        _mk(keg, "bin/openssl", "x")
+        (prefix / "opt").mkdir(parents=True, exist_ok=True)
+        (prefix / "opt" / "openssl@3").symlink_to(keg)
+        link_keg(keg, prefix=prefix, name="openssl@3")
+        unlink_keg(keg, prefix=prefix, name="openssl@3")
+        assert not (prefix / "opt" / "openssl@3").exists()
+
+    def test_unlink_keeps_opt_link_for_other_version(self, tmp_path, prefix) -> None:
+        """Unlinking a stale keg leaves opt pointing at the active one."""
+        cellar = tmp_path / "Cellar"
+        old = cellar / "openssl@3" / "3.0"
+        new = cellar / "openssl@3" / "3.1"
+        _mk(old, "bin/openssl", "x")
+        _mk(new, "bin/openssl", "x")
+        (prefix / "opt").mkdir(parents=True, exist_ok=True)
+        (prefix / "opt" / "openssl@3").symlink_to(new)  # opt -> active (3.1)
+        unlink_keg(old, prefix=prefix, name="openssl@3")
+        assert (prefix / "opt" / "openssl@3").is_symlink()  # Untouched
 
 
 _CANDIDATES = ["gettext", "python@3.13", "python@3.14", "node", "openssl@3"]
