@@ -191,18 +191,25 @@ class Repository:
             ]
 
         else:
-            formula_names: list[str] | list = (
-                names if kind == PackageKind.FORMULA else []
-            )
-            cask_names: list[str] | list = names if kind == PackageKind.CASK else []
+            formula_names: list[str] = names if kind == PackageKind.FORMULA else []
+            cask_names: list[str] = names if kind == PackageKind.CASK else []
             failures: list = []
 
-        for pkg_names, provider in [
-            (formula_names, self.formula),
-            (cask_names, self.cask),
-        ]:
-            if pkg_names:
-                await provider.uninstall(names=pkg_names)
+        blocked = self._blocking_dependents(set(formula_names))
+        if blocked:
+            failures.extend(
+                (name, f"required by {', '.join(deps)}")
+                for name, deps in blocked.items()
+            )
+            formula_names = [n for n in formula_names if n not in blocked]
+
+        if formula_names:
+            from brewery.providers.uninstall_service import run_uninstall
+
+            await run_uninstall(self, formula_names)
+
+        if cask_names:
+            await self.cask.uninstall(names=cask_names)
 
         self.cache_mgr.invalidate()
 
@@ -223,6 +230,38 @@ class Repository:
         failures.extend((n, "uninstall failed") for n in failed)
 
         return len(removed), failures
+
+    def _blocking_dependents(self, removal: set[str]) -> dict[str, list[str]]:
+        """Installed formulae outside `removal` that still require a target.
+
+        Reads each target's receipt-derived reverse-deps and drops any dependent
+        that is itself being removed in the same batch.
+
+        Args:
+            removal: Canonical formula names slated for removal.
+
+        Returns:
+            target -> sorted installed formulae that require it (empty if none).
+        """
+        if not removal:
+            return {}
+
+        installed = {
+            p.name: p
+            for p in self.cache_mgr.installed_packages(kind=PackageKind.FORMULA)
+        }
+
+        blockers: dict[str, list[str]] = {}
+        for name in removal:
+            pkg = installed.get(name)
+            if pkg is None:
+                continue
+
+            deps = sorted(d for d in pkg.used_by if d not in removal)
+            if deps:
+                blockers[name] = deps
+
+        return blockers
 
     def _verify_removed(
         self, names: list[str], kind: PackageKind

@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
+import orjson
+
 from brewery.core.errors import LinkError
 
 # Top-level keg directories
@@ -91,6 +93,9 @@ _FRAMEWORK_RX = re.compile(r"[^/]*\.framework(/Versions)?$")
 _LINKED_RECORD_DIR = "var/homebrew/linked"
 _PYC_EXT = (".pyc", ".pyo")
 
+# Stored symlink set for fast unlinking
+_LINK_MANIFEST = ".brewery_links.json"
+
 
 class Action(Enum):
     """Action to take for each file/directory."""
@@ -109,6 +114,15 @@ class LinkResult:
     already_linked: list[str] = field(
         default_factory=list
     )  # Already pointing at this keg
+
+
+@dataclass
+class UnlinkResult:
+    """Result of unlinking a keg from the prefix."""
+
+    removed: list[str] = field(default_factory=list)  # Relative prefix paths unlinked
+    pruned: list[str] = field(default_factory=list)  # Emptied dirs removed
+    scanned: bool = False  # Fell back to a filesystem scan
 
 
 def _strategy_lib(rel: Path, is_dir: bool) -> Action:
@@ -517,6 +531,28 @@ def _write_linked_record(prefix: Path, name: str, keg: Path) -> None:
     record.symlink_to(os.path.relpath(keg, record.parent))
 
 
+def _write_link_manifest(keg: Path, result: LinkResult) -> None:
+    """Persist the candidate symlink/dir set for fast unlinking.
+
+    Written atomically at the keg root so it shares the keg's lifecycle: removing
+    the keg removes the manifest. Unlink realpath-verifies every entry before acting.
+
+    Args:
+        keg: The keg directory the links point into.
+        result: The result of linking this keg.
+    """
+    payload = {
+        "version": 1,
+        "linked": result.linked,
+        "created_dirs": result.created_dirs,
+    }
+
+    manifest = keg / _LINK_MANIFEST
+    tmp = manifest.with_name(manifest.name + ".tmp")
+    tmp.write_bytes(orjson.dumps(payload))
+    os.replace(tmp, manifest)
+
+
 def link_keg(
     keg_dir: Path,
     *,
@@ -578,5 +614,139 @@ def link_keg(
         result.already_linked.append(dst.relative_to(prefix).as_posix())
 
     _write_linked_record(prefix, name, keg_dir)
+    _write_link_manifest(keg_dir, result)
+
+    return result
+
+
+def _points_into(link: Path, keg_real: Path) -> bool:
+    """Whether a symlink resolves into the given keg.
+
+    Args:
+        link: The symlink to test.
+        keg_real: The realpath of the keg.
+
+    Returns:
+        True if the link's target resolves to the keg or a path within it.
+    """
+    try:
+        real = Path(os.path.realpath(link))
+
+    except OSError:
+        return False
+
+    return real == keg_real or keg_real in real.parents
+
+
+def _iter_symlinks(base: Path):
+    """Recursively yield every symlink under base without following symlinked dirs.
+
+    Args:
+        base: The directory to scan.
+
+    Yields:
+        Each symlink path found (symlinked dirs are yielded, not descended).
+    """
+    if not base.exists():
+        return
+
+    with os.scandir(base) as it:
+        for entry in it:
+            if entry.is_symlink():
+                yield Path(entry.path)
+
+            elif entry.is_dir(follow_symlinks=False):
+                yield from _iter_symlinks(Path(entry.path))
+
+
+def _prune_dirs(prefix: Path, rels: set[str]) -> list[str]:
+    """Remove now-empty mkpath'd dirs, deepest first. Eligible roots are kept.
+
+    Args:
+        prefix: The prefix directory.
+        rels: Relative dir paths to attempt to prune.
+
+    Returns:
+        The relative paths that were removed.
+    """
+    pruned: list[str] = []
+    for rel in sorted(rels, key=lambda p: p.count("/"), reverse=True):
+        if rel in _ELIGIBLE:  # Never remove shared directories
+            continue
+
+        try:
+            (prefix / rel).rmdir()  # Succeeds only when empty
+            pruned.append(rel)
+
+        except OSError:
+            pass  # Still holds another keg's links, or already removed
+
+    return pruned
+
+
+def unlink_keg(keg_dir: Path, *, prefix: Path, name: str) -> UnlinkResult:
+    """Remove the prefix symlinks pointing into this keg.
+
+    Read the keg's manifest as a candidate set and realpath-verify each entry still
+    resolves into this keg before removing it. With no manifest (brew-installed) the
+    eligible roots are scanned in full.
+
+    Args:
+        keg_dir: The keg being unlinked.
+        prefix: The prefix it was linked into.
+        name: The formula name (for the linked-keg pointer).
+
+    Returns:
+        An UnlinkResult describing what was removed and pruned.
+    """
+    keg_real = Path(os.path.realpath(keg_dir))
+    result = UnlinkResult()
+
+    try:
+        manifest = orjson.loads((keg_dir / _LINK_MANIFEST).read_text())
+        candidates: list[str] = manifest["linked"]
+        prune_targets: set[str] = set(manifest.get("created_dirs", []))
+
+    except (OSError, ValueError, KeyError):
+        manifest = None
+        candidates, prune_targets = [], set()
+
+    if manifest is not None:
+        exploded: list[Path] = []
+        for rel in candidates:
+            dst = prefix / rel
+            if dst.is_symlink():
+                if _points_into(dst, keg_real):
+                    dst.unlink()
+                    result.removed.append(rel)
+
+            elif dst.is_dir():
+                exploded.append(dst)  # Explosion: stragglers live under here
+
+        for d in exploded:
+            for link in _iter_symlinks(d):
+                if _points_into(link, keg_real):
+                    link.unlink()
+                    rel = link.relative_to(prefix).as_posix()
+                    result.removed.append(rel)
+
+            prune_targets.add(d.relative_to(prefix).as_posix())
+
+    else:
+        result.scanned = True
+        for root in _ELIGIBLE:
+            for link in _iter_symlinks(prefix / root):
+                if _points_into(link, keg_real):
+                    link.unlink()
+                    result.removed.append(link.relative_to(prefix).as_posix())
+
+        prune_targets = {Path(r).parent.as_posix() for r in result.removed}
+
+    result.pruned = _prune_dirs(prefix, prune_targets)
+
+    # Drop brew's linked-keg pointer if it still points at this keg
+    record = prefix / _LINKED_RECORD_DIR / name
+    if record.is_symlink() and _points_into(record, keg_real):
+        record.unlink()
 
     return result

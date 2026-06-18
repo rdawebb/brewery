@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -76,6 +77,34 @@ def _repo_with_providers(catalog, *, formula=None, cask=None) -> Repository:
     )
 
 
+def _install_formula(cellar, name, version="1.0", deps=()) -> Path:
+    """Write a minimal installed keg + receipt so the scan derives used_by.
+
+    Args:
+        cellar: The cellar directory to write to
+        name: The name of the formula
+        version: The version of the formula (default: "1.0")
+        deps: The dependencies of the formula (default: ())
+
+    Returns:
+        The path to the installed keg
+    """
+    import orjson
+
+    keg = cellar / name / version
+    keg.mkdir(parents=True)
+    (keg / "INSTALL_RECEIPT.json").write_bytes(
+        orjson.dumps(
+            {
+                "source": {"tap": "homebrew/core"},
+                "runtime_dependencies": [{"full_name": d} for d in deps],
+            }
+        )
+    )
+
+    return keg
+
+
 class TestGetAllInstalled:
     """Tests for the get_all_installed method."""
 
@@ -98,6 +127,14 @@ class TestGetAllInstalled:
         import brewery.core.cache as cache_mod
 
         def _boom(env=None) -> None:
+            """Raise AssertionError to simulate scan_installed not being called on a cache hit.
+
+            Args:
+                env: Environment variable (unused)
+
+            Raises:
+                AssertionError: Always raised to simulate scan_installed not being called on a cache hit
+            """
             raise AssertionError("scan_installed should not be called on a cache hit")
 
         monkeypatch.setattr(cache_mod, "scan_installed", _boom)
@@ -118,7 +155,7 @@ class TestOutdatedDerivation:
     Reconciling against a fresh catalog is the caller's job: await
     refresh_catalog(...) then call get_outdated()."""
 
-    async def test_act_outdated_against_catalog(self, repo):
+    async def test_act_outdated_against_catalog(self, repo) -> None:
         """Catalog 0.2.89 > installed 0.2.88 → act is OUTDATED."""
         outdated = repo.get_outdated()
 
@@ -127,14 +164,14 @@ class TestOutdatedDerivation:
         assert PackageStatus.OUTDATED in act.status
         assert act.metadata["latest_version"] == "0.2.89"
 
-    async def test_outdated_result_stable_across_reads(self, repo):
+    async def test_outdated_result_stable_across_reads(self, repo) -> None:
         """A second read reports the same outdated set from the cached records."""
         repo.get_outdated()
 
         cached_outdated = repo.get_outdated()
         assert {p.name for p in cached_outdated} == {"act"}
 
-    async def test_non_outdated_packages_keep_clean_status(self, repo):
+    async def test_non_outdated_packages_keep_clean_status(self, repo) -> None:
         """Non-outdated packages stay clean."""
         repo.get_outdated()
         all_pkgs = repo.get_all_installed()
@@ -143,7 +180,7 @@ class TestOutdatedDerivation:
         assert PackageStatus.OUTDATED not in yazi.status
         assert PackageStatus.OUTDATED not in iina.status
 
-    def test_get_outdated_does_not_refresh(self, repo, monkeypatch):
+    def test_get_outdated_does_not_refresh(self, repo, monkeypatch) -> None:
         """Test that get_outdated never touches the network/refresh path.
 
         The refresh is the caller's responsibility, so a read alone must not
@@ -151,14 +188,23 @@ class TestOutdatedDerivation:
         """
         import brewery.daemon.catalog_refresh as refresh_mod
 
-        def _boom(*a, **k):
+        def _boom(*a, **k) -> None:
+            """Raise AssertionError to simulate refresh_catalog not being called.
+
+            Args:
+                *a: Positional arguments
+                **k: Keyword arguments
+
+            Raises:
+                AssertionError: Always raised to simulate refresh_catalog not being called
+            """
             raise AssertionError("get_outdated must not refresh")
 
         monkeypatch.setattr(refresh_mod, "refresh_catalog", _boom)
         outdated = repo.get_outdated()
         assert {p.name for p in outdated} == {"act"}
 
-    async def test_caller_refresh_then_read(self, repo, monkeypatch):
+    async def test_caller_refresh_then_read(self, repo, monkeypatch) -> None:
         """Test the caller-side sequence: refresh first, then a pure read.
 
         This mirrors what the CLI's `outdated --check` does: await the refresh
@@ -166,7 +212,13 @@ class TestOutdatedDerivation:
         """
         called = {"n": 0}
 
-        async def mock_refresh(*, catalog):
+        async def mock_refresh(*, catalog) -> None:
+            """Simulate a refresh by incrementing the call counter.
+
+            Args:
+                *a: Positional arguments
+                **k: Keyword arguments
+            """
             called["n"] += 1
 
         import brewery.daemon.catalog_refresh as refresh_mod
@@ -211,7 +263,11 @@ class TestSearch:
         assert PackageStatus.OUTDATED in act.status
 
     async def test_no_match_returns_empty(self, repo) -> None:
-        """Test that a non-matching term returns no results."""
+        """Test that a non-matching term returns no results.
+
+        Args:
+            repo: The Repository instance to test with
+        """
         assert repo.search("zzzznomatch") == []
 
 
@@ -270,17 +326,29 @@ class TestInstall:
 class TestUninstall:
     """Tests for Repository.uninstall_packages."""
 
-    async def test_uninstall_calls_provider(self, repo, mock_brew) -> None:
-        """Test that uninstalling a formula invokes brew uninstall."""
-        await repo.uninstall_packages(["yazi"], kind=PackageKind.FORMULA)
-        assert _provider_calls(mock_brew, "uninstall")
-
-    async def test_uninstall_still_present_is_failure(self, repo) -> None:
-        """Test that a package still on disk after uninstall is a failure.
+    async def test_uninstall_still_present_is_failure(self, repo, monkeypatch) -> None:
+        """Test that a package still on disk after native & fallback uninstall is a failure.
 
         The mock does not delete the keg, so _verify_removed sees it still present
         and reports failure rather than a phantom success.
         """
+        import brewery.providers.uninstall_service as svc
+
+        def _boom(*a, **k) -> None:
+            """Raise OSError to simulate native uninstall failure.
+
+            Args:
+                *a: Positional arguments
+                **k: Keyword arguments
+
+            Raises:
+                OSError: Always raised to simulate native uninstall failure
+            """
+            raise OSError("native failed")
+
+        monkeypatch.setattr(svc, "_remove_formula", _boom)
+
+        # mock_brew logs but does not delete the keg, so _verify_removed sees it
         count, failures = await repo.uninstall_packages(
             ["yazi"], kind=PackageKind.FORMULA
         )
@@ -298,33 +366,10 @@ class TestUninstall:
         assert count == 1
         assert failures == []
 
-    async def test_unknown_kind_resolves_via_installed(
-        self, mock_brew, catalog, mock_env
-    ) -> None:
-        """Test that kind=None resolves each name's kind from installed state.
-
-        yazi (formula) and iina (cask) are both installed; with no kind given the
-        repo looks up each kind and routes to the right provider. The kegs must
-        still exist at kind-resolution time, so the mock providers delete them
-        during the (mocked) uninstall to mirror brew's real present-then-gone
-        sequence. Providers are injected via the constructor, never by mutating
-        the shared backend singletons.
-        """
+    async def test_unknown_kind_resolves_via_installed(self, catalog, mock_env) -> None:
+        """Test that kind=None resolves each name's kind from installed state and
+        routes them to the correct backend: formula -> native, cask -> provider"""
         import shutil
-
-        async def mock_formula_uninstall(names) -> list[str]:
-            """Simulate brew uninstall removing the keg during the operation.
-
-            Args:
-                names: The names to operate on.
-
-            Returns:
-                The names unchanged.
-            """
-            for name in names:
-                shutil.rmtree(mock_env.cellar / name, ignore_errors=True)
-
-            return names
 
         async def mock_cask_uninstall(names) -> list[str]:
             """Simulate brew uninstall removing the keg during the operation.
@@ -340,9 +385,7 @@ class TestUninstall:
 
             return names
 
-        repo = _repo_with_providers(
-            catalog, formula=mock_formula_uninstall, cask=mock_cask_uninstall
-        )
+        repo = _repo_with_providers(catalog, cask=mock_cask_uninstall)
         count, failures = await repo.uninstall_packages(["yazi", "iina"])
         assert count == 2
         assert failures == []
@@ -353,15 +396,81 @@ class TestUninstall:
         assert count == 0
         assert failures == [("ripgrep", "not found")]
 
-    async def test_uninstall_routes_formula_and_cask_providers(
-        self, repo, mock_brew
+    async def test_uninstall_routes_formula_native_and_cask_providers(
+        self, repo, mock_brew, mock_env
     ) -> None:
-        """Test that mixed uninstall hits both formula and cask providers."""
+        """Test that formulae removed natively, casks routed to brew."""
         await repo.uninstall_packages(["yazi", "iina"])
-        uninstalls = _provider_calls(mock_brew, "uninstall")
-        flat = [arg for call in uninstalls for arg in call]
-        assert "yazi" in flat
-        assert "iina" in flat
+        assert not (mock_env.cellar / "yazi").exists()  # Formula: native
+        flat = [a for c in _provider_calls(mock_brew, "uninstall") for a in c]
+        assert "iina" in flat  # Cask: brew provider
+        assert "yazi" not in flat  # Formula should not hit brew
+
+    async def test_uninstall_blocked_by_dependent(self, repo, mock_env) -> None:
+        """A formula required by another installed formula is refused."""
+        _install_formula(mock_env.cellar, "openssl")
+        _install_formula(mock_env.cellar, "curl", deps=["openssl"])
+        repo.cache_mgr.invalidate()
+        count, failures = await repo.uninstall_packages(
+            ["openssl"], kind=PackageKind.FORMULA
+        )
+        assert count == 0
+        assert failures == [("openssl", "required by curl")]
+        assert (mock_env.cellar / "openssl").exists()
+
+    async def test_uninstall_both_in_batch_unblocks(self, repo, mock_env) -> None:
+        """A dependent removed in the same batch does not block the target."""
+        _install_formula(mock_env.cellar, "openssl")
+        _install_formula(mock_env.cellar, "curl", deps=["openssl"])
+        repo.cache_mgr.invalidate()
+        count, failures = await repo.uninstall_packages(
+            ["openssl", "curl"], kind=PackageKind.FORMULA
+        )
+        assert count == 2
+        assert failures == []
+        assert not (mock_env.cellar / "openssl").exists()
+
+    async def test_uninstall_lists_multiple_dependents(self, repo, mock_env) -> None:
+        """Multiple dependents are reported sorted and comma-joined."""
+        _install_formula(mock_env.cellar, "openssl")
+        _install_formula(mock_env.cellar, "curl", deps=["openssl"])
+        _install_formula(mock_env.cellar, "wget", deps=["openssl"])
+        repo.cache_mgr.invalidate()
+        _, failures = await repo.uninstall_packages(
+            ["openssl"], kind=PackageKind.FORMULA
+        )
+        assert failures == [("openssl", "required by curl, wget")]
+
+    async def test_uninstall_removes_keg_natively(
+        self, repo, mock_brew, mock_env
+    ) -> None:
+        """Formula uninstall removes the keg via the native path, not brew."""
+        count, _ = await repo.uninstall_packages(["yazi"], kind=PackageKind.FORMULA)
+        assert count == 1
+        assert not (mock_env.cellar / "yazi").exists()
+        assert _provider_calls(mock_brew, "uninstall") == []
+
+    async def test_uninstall_falls_back_to_brew(
+        self, repo, mock_brew, monkeypatch
+    ) -> None:
+        """A native failure falls back to brew uninstall for that formula."""
+        import brewery.providers.uninstall_service as svc
+
+        def _boom(*a, **k) -> None:
+            """Raise OSError to simulate native uninstall failure.
+
+            Args:
+                *a: Positional arguments
+                **k: Keyword arguments
+
+            Raises:
+                OSError: Always raised to simulate native uninstall failure
+            """
+            raise OSError("native failed")
+
+        monkeypatch.setattr(svc, "_remove_formula", _boom)
+        await repo.uninstall_packages(["yazi"], kind=PackageKind.FORMULA)
+        assert _provider_calls(mock_brew, "uninstall")
 
 
 class TestUpgrade:
