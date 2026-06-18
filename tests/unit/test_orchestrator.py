@@ -7,9 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from brewery.core.errors import DownloadError
+from brewery.core.errors import DownloadError, ManifestError
 from brewery.providers.downloader import BottleRef
-from brewery.core.errors import ManifestError
 from brewery.providers.manifest import BottleTabInfo
 from brewery.providers.orchestrator import (
     InstallConfig,
@@ -201,7 +200,9 @@ class MockTab:
         """
         self.fail = set(fail)
 
-    async def __call__(self, *, name, version, bottle_sha256, revision, rebuild):
+    async def __call__(
+        self, *, name, version, bottle_sha256, revision, rebuild
+    ) -> BottleTabInfo:
         """Calls the mock tab.
 
         Args:
@@ -270,7 +271,7 @@ class MockBrew:
         return True
 
 
-def _make(cat, dl, tabf, brew, native=None, order=None):
+def _make(cat, dl, tabf, brew, native=None, order=None) -> Orchestrator:
     """Create an orchestrator with mocks and optional native install tracking.
 
     Args:
@@ -289,7 +290,9 @@ def _make(cat, dl, tabf, brew, native=None, order=None):
     )
     if native is not None:
 
-        def mock_native(name, fr, bottle_path, tab, on_request, aliases, rt_deps):
+        def mock_native(
+            name, fr, bottle_path, tab, on_request, aliases, rt_deps
+        ) -> Orchestrator:
             """Mock native installation function.
 
             Args:
@@ -480,7 +483,15 @@ class TestKegOnlyPostInstall:
 
         orig = cat.aliases_of
 
-        def recording(n):
+        def recording(n: str) -> list[str]:
+            """Records the thread identity and calls the original aliases_of method.
+
+            Args:
+                n: The name of the formula.
+
+            Returns:
+                The aliases for the formula.
+            """
             seen["aliases_thread"] = threading.get_ident()
             return orig(n)
 

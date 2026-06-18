@@ -20,7 +20,7 @@ def prefix(tmp_path) -> Path:
     """Create a prefix directory structure for testing.
 
     Args:
-        tmp_path (Path): The temporary path fixture.
+        tmp_path: The temporary path fixture.
 
     Returns:
         Path: The path to the created prefix directory.
@@ -32,14 +32,14 @@ def _install(staged, prefix, name="openssl@3", version="3.0", **kw):
     """Install a keg into the Cellar.
 
     Args:
-        staged (Path): The path to the staged keg.
-        prefix (Path): The prefix path.
-        name (str): The name of the formula.
-        version (str): The version of the formula.
+        staged: The path to the staged keg.
+        prefix: The prefix path.
+        name: The name of the formula.
+        version: The version of the formula.
         **kw: Additional keyword arguments.
 
     Returns:
-        Path: The path to the installed keg.
+        The path to the installed keg.
     """
     kw.setdefault("use_clonefile", False)
 
@@ -71,7 +71,15 @@ def test_clone_tree_falls_back_when_clonefile_unsupported(
     """Test that cloning a directory falls back when clonefile is unsupported."""
 
     def enotsup(src, dst) -> None:
-        """Simulate ENOTSUP error."""
+        """Simulate ENOTSUP error.
+
+        Args:
+            src: The source path.
+            dst: The destination path.
+
+        Raises:
+            OSError: With `errno.ENOTSUP`.
+        """
         raise OSError(errno.ENOTSUP, "not supported")
 
     monkeypatch.setattr(_cellar, "_clonefile", enotsup)
@@ -86,7 +94,15 @@ def test_clone_tree_reraises_real_clonefile_error(
     """Test that cloning a directory reraises real clonefile errors."""
 
     def eacces(src, dst) -> None:
-        """Simulate EACCES error."""
+        """Simulate EACCES error.
+
+        Args:
+            src: The source path.
+            dst: The destination path.
+
+        Raises:
+            OSError: With `errno.EACCES`.
+        """
         raise OSError(errno.EACCES, "permission denied")
 
     monkeypatch.setattr(_cellar, "_clonefile", eacces)
@@ -157,6 +173,9 @@ def test_install_cleans_partial_keg_on_failure(staged_keg, prefix, monkeypatch) 
             src: The source path.
             dst: The destination path.
             use_clonefile: Whether to use clonefile.
+
+        Raises:
+            OSError: With `errno.EIO`.
         """
         dst.mkdir(parents=True)
         (dst / "partial").write_bytes(b"x")
@@ -177,7 +196,15 @@ def test_clonefile_matches_copytree(staged_keg, tmp_path) -> None:
     clone_tree(staged_keg, via_clone, use_clonefile=True)
     clone_tree(staged_keg, via_copy, use_clonefile=False)
 
-    def snapshot(root: Path):
+    def snapshot(root: Path) -> dict:
+        """Snapshot the contents of a directory.
+
+        Args:
+            root: The directory to snapshot.
+
+        Returns:
+            A dictionary mapping relative paths to their type and contents.
+        """
         out = {}
         for p in sorted(root.rglob("*")):
             rel = p.relative_to(root)

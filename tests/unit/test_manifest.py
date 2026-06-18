@@ -59,7 +59,7 @@ def _index(entries: list[dict]) -> bytes:
         entries: The entries to include in the index.
 
     Returns:
-        bytes: The serialized OCI image index.
+        The serialised OCI image index.
     """
     manifests = []
     for e in entries:
@@ -83,9 +83,9 @@ def _handler(body: bytes, *, status: int = 200, requests: list | None = None):
     """Create a request handler that returns a mocked HTTP response.
 
     Args:
-        body (bytes): The response body.
-        status (int, optional): The HTTP status code. Defaults to 200.
-        requests (list | None, optional): A list to append the requests to. Defaults to None.
+        body: The response body.
+        status: The HTTP status code. Defaults to 200.
+        requests: A list to append the requests to. Defaults to None.
 
     Returns:
         callable: The request handler.
@@ -95,10 +95,10 @@ def _handler(body: bytes, *, status: int = 200, requests: list | None = None):
         """Handle an HTTP request.
 
         Args:
-            req (httpx.Request): The HTTP request.
+            req: The HTTP request.
 
         Returns:
-            httpx.Response: The mocked HTTP response.
+            The mocked HTTP response.
         """
         if requests is not None:
             requests.append(req)
@@ -114,13 +114,13 @@ async def _fetch(
 
     Args:
         handler: The request handler.
-        name (str, optional): The formula name. Defaults to "openssl@3".
-        version (str, optional): The formula version. Defaults to "3.6.2".
-        sha (str, optional): The bottle SHA256 digest. Defaults to DIGEST.
-        revision (int, optional): The formula revision. Defaults to 0.
+        name: The formula name. Defaults to "openssl@3".
+        version The formula version. Defaults to "3.6.2".
+        sha: The bottle SHA256 digest. Defaults to DIGEST.
+        revision: The formula revision. Defaults to 0.
 
     Returns:
-        BottleTabInfo: The fetched bottle tab information.
+        The fetched bottle tab information.
     """
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         return await fetch_bottle_tab(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
@@ -49,7 +50,7 @@ def staged_keg(tmp_path) -> Path:
 
 
 @pytest.fixture
-def build_keg():
+def build_keg() -> Callable[[Path], Path]:
     """Return the keg-builder function for tests that need more than one keg.
 
     Returns:
@@ -63,7 +64,7 @@ def brew_paths() -> dict:
     """Standard Homebrew prefix/cellar/repository paths used across relocation tests.
 
     Returns:
-        A dict with ``prefix``, ``cellar``, and ``repository`` Path values.
+        A dict with `prefix`, `cellar`, and `repository` Path values.
     """
     return dict(
         prefix=Path("/opt/homebrew"),

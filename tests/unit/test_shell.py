@@ -1,9 +1,9 @@
 """Unit tests for run_brew_command's result/error mapping over a mockd run_capture."""
 
 from __future__ import annotations
-from typing import Any
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -68,8 +68,8 @@ def _patch(monkeypatch, proc, *, have_brew=True) -> dict[str, Any]:
         have_brew: Whether the brew command is available.
 
     Returns:
-        A dict accumulating the ``cmd``, ``stdout``, and ``stderr`` args
-        passed to the most recent ``create_subprocess_exec`` call.
+        A dict accumulating the `cmd`, `stdout`, and `stderr` args
+        passed to the most recent `create_subprocess_exec` call.
     """
     monkeypatch.setattr(
         shell.shutil, "which", lambda _: "/usr/bin/brew" if have_brew else None
@@ -103,21 +103,23 @@ async def test_capture_returns_decoded_output(monkeypatch) -> None:
     calls = _patch(monkeypatch, MockProc(0, b"hello out", b"warn err"))
     res = await run_brew(["info", "wget"], output=BrewOutput.CAPTURE)
     assert (res.stdout, res.stderr, res.returncode) == ("hello out", "warn err", 0)
+
     # CAPTURE pipes both streams
     assert calls["stdout"] is not None and calls["stderr"] is not None
     assert calls["cmd"][0] == "brew"
 
 
-async def test_inherit_does_not_pipe(monkeypatch):
+async def test_inherit_does_not_pipe(monkeypatch) -> None:
     """Test that INHERIT mode leaves stdio as None so the child inherits the terminal."""
     calls = _patch(monkeypatch, MockProc(0))
     res = await run_brew(["install", "wget"], output=BrewOutput.INHERIT)
+
     # INHERIT leaves stdio as None so the child inherits the terminal
     assert calls["stdout"] is None and calls["stderr"] is None
     assert res.stdout == "" and res.stderr == "" and res.returncode == 0
 
 
-async def test_check_raises_on_nonzero(monkeypatch):
+async def test_check_raises_on_nonzero(monkeypatch) -> None:
     """Test that check=True raises BrewCommandError on a non-zero exit code."""
     _patch(monkeypatch, MockProc(1, b"", b"boom"))
     with pytest.raises(BrewCommandError) as ei:
@@ -125,14 +127,14 @@ async def test_check_raises_on_nonzero(monkeypatch):
     assert ei.value.context["returncode"] == 1
 
 
-async def test_no_check_returns_nonzero(monkeypatch):
+async def test_no_check_returns_nonzero(monkeypatch) -> None:
     """Test that check=False returns the result even on a non-zero exit code."""
     _patch(monkeypatch, MockProc(1, b"out", b"err"))
     res = await run_brew(["install", "nope"], check=False)
     assert res.returncode == 1 and res.stderr == "err"
 
 
-async def test_timeout_kills_and_raises(monkeypatch):
+async def test_timeout_kills_and_raises(monkeypatch) -> None:
     """Test that exceeding the timeout kills the process and raises BrewTimeoutError."""
     proc = MockProc(hang=True)
     _patch(monkeypatch, proc)
@@ -141,7 +143,7 @@ async def test_timeout_kills_and_raises(monkeypatch):
     assert proc.killed
 
 
-async def test_missing_brew_raises(monkeypatch):
+async def test_missing_brew_raises(monkeypatch) -> None:
     """Test that a missing brew binary raises BrewCommandError with returncode 127."""
     _patch(monkeypatch, MockProc(0), have_brew=False)
     with pytest.raises(BrewCommandError) as ei:

@@ -6,14 +6,17 @@ between tests so that test order cannot leak state.
 """
 
 from __future__ import annotations
-from typing import Generator
 
 import os
 import sys
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING, Generator
 
 import pytest
+
+if TYPE_CHECKING:
+    from brewery.core.config import BreweryENV
 
 # Isolates on disk state at import time, before any brewery module is imported
 _TMP_ROOT = Path(tempfile.mkdtemp(prefix="brewery-tests-"))
@@ -61,16 +64,16 @@ class MockHTTPClient:
     """Async httpx-like stub shared by the catalog fetch/refresh tests.
 
     Construct with either a single canned response/exception, or a mapping of
-    ``url -> response``. Every GET is recorded (url + request headers) so tests
-    can assert that conditional validators were sent, and ``aclose()`` flips
-    ``closed`` so client-ownership tests can check the caller did not close an
+    `url -> response`. Every GET is recorded (url + request headers) so tests
+    can assert that conditional validators were sent, and `aclose()` flips
+    `closed` so client-ownership tests can check the caller did not close an
     injected client.
 
     Args:
-        response: One of an ``httpx.Response``, an ``Exception`` to raise, a
-            ``dict[str, httpx.Response]`` keyed by URL, or ``None``.
+        response: One of an `httpx.Response`, an `Exception` to raise, a
+            `dict[str, httpx.Response]` keyed by URL, or `None`.
         raise_on_get: If set, every GET raises this exception (used for
-            transport-error paths), regardless of ``response``.
+            transport-error paths), regardless of `response`.
     """
 
     def __init__(self, response=None, *, raise_on_get=None) -> None:
@@ -130,13 +133,16 @@ class MockHTTPClient:
 
 
 @pytest.fixture
-def mock_env(tmp_path, monkeypatch):
+def mock_env(tmp_path, monkeypatch) -> BreweryENV:
     """A hermetic BreweryENV backed by tmp_path with no real filesystem layout.
 
-    Patches the module-level ``_env_cache`` singleton so any code path that
-    calls ``get_brewery_env()`` without an explicit ``env=`` argument gets this
+    Patches the module-level `_env_cache` singleton so any code path that
+    calls `get_brewery_env()` without an explicit `env=` argument gets this
     instance.  Integration tests override this fixture in their own conftest to
     add a pre-populated keg layout.
+
+    Returns:
+        A BreweryENV instance.
     """
     from brewery.core import config
     from brewery.core.config import BreweryENV
@@ -152,6 +158,7 @@ def mock_env(tmp_path, monkeypatch):
         bottle_cache=cache,
     )
     monkeypatch.setattr(config, "_env_cache", env)
+
     return env
 
 
@@ -164,6 +171,15 @@ def http_client():
     """
 
     def _make(response=None, *, raise_on_get=None) -> MockHTTPClient:
+        """Create a MockHTTPClient with the given response and raise_on_get.
+
+        Args:
+            response: The response to return from the client.
+            raise_on_get: If set, raise an exception when the client is used.
+
+        Returns:
+            A MockHTTPClient instance.
+        """
         return MockHTTPClient(response, raise_on_get=raise_on_get)
 
     return _make

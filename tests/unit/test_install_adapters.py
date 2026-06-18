@@ -18,63 +18,67 @@ pytestmark = pytest.mark.asyncio
 class MockCatalog:
     """Minimal catalog stub that records calls and returns predictable values."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialise the mock catalog with an empty call log."""
         self.calls = []
 
-    def get_formula(self, name):
+    def get_formula(self, name: str) -> str:
         """Record the call and return a row sentinel string.
 
         Args:
             name: The formula name to look up.
 
         Returns:
-            A sentinel string ``"row:<name>"``.
+            A sentinel string `"row:<name>"`.
         """
         self.calls.append(("get_formula", name))
+
         return f"row:{name}"
 
-    def resolve_alias(self, name):
+    def resolve_alias(self, name: str) -> str:
         """Record the call and return a canonical name sentinel string.
 
         Args:
             name: The alias to resolve.
 
         Returns:
-            A sentinel string ``"canon:<name>"``.
+            A sentinel string `"canon:<name>"`.
         """
         self.calls.append(("resolve_alias", name))
+
         return f"canon:{name}"
 
-    def runtime_deps(self, name):
+    def runtime_deps(self, name: str) -> list[str]:
         """Record the call and return a single predictable dependency.
 
         Args:
             name: The formula name.
 
         Returns:
-            A list containing ``"<name>-dep"``.
+            A list containing `"<name>-dep"`.
         """
         self.calls.append(("runtime_deps", name))
+
         return [f"{name}-dep"]
 
-    def aliases_of(self, name):
+    def aliases_of(self, name: str) -> list[str]:
         """Record the call and return a single predictable alias.
 
         Args:
             name: The formula name.
 
         Returns:
-            A list containing ``"<name>-alias"``.
+            A list containing `"<name>-alias"`.
         """
         self.calls.append(("aliases_of", name))
+
         return [f"{name}-alias"]
 
 
 class MockCacheMgr:
     """Minimal cache manager stub that reports a fixed set of installed packages."""
 
-    def __init__(self, installed=()):
+    def __init__(self, installed=()) -> None:
         """Initialise the mock cache manager.
 
         Args:
@@ -83,7 +87,7 @@ class MockCacheMgr:
         self._installed = set(installed)
         self.calls = []
 
-    def find_installed(self, name, kind):
+    def find_installed(self, name: str, kind: PackageKind) -> Package | None:
         """Return a Package if *name* is in the installed set, else None.
 
         Args:
@@ -94,13 +98,14 @@ class MockCacheMgr:
             A Package if installed, else None.
         """
         self.calls.append((name, kind))
+
         return Package(name, kind) if name in self._installed else None
 
 
 class MockRepo:
     """Minimal repo stub wiring together a MockCatalog and MockCacheMgr."""
 
-    def __init__(self, installed=()):
+    def __init__(self, installed=()) -> None:
         """Initialise the mock repo.
 
         Args:
@@ -111,7 +116,7 @@ class MockRepo:
         self.formula = None
 
 
-async def test_catalog_methods_delegate_to_repo_catalog():
+async def test_catalog_methods_delegate_to_repo_catalog() -> None:
     """Test that each CatalogPort method delegates to repo.catalog."""
     repo = MockRepo()
     adapter = RepositoryCatalogAdapter(repo)
@@ -123,7 +128,7 @@ async def test_catalog_methods_delegate_to_repo_catalog():
     assert ("aliases_of", "openssl@3") in repo.catalog.calls
 
 
-async def test_is_satisfied_true_when_installed():
+async def test_is_satisfied_true_when_installed() -> None:
     """Test that is_satisfied returns True when the package is found in the cache."""
     repo = MockRepo(installed={"wget"})
     adapter = RepositoryCatalogAdapter(repo)
@@ -132,7 +137,7 @@ async def test_is_satisfied_true_when_installed():
     assert repo.cache_mgr.calls == [("wget", PackageKind.FORMULA)]
 
 
-async def test_is_satisfied_false_when_absent():
+async def test_is_satisfied_false_when_absent() -> None:
     """Test that is_satisfied returns False when the package is absent from the cache."""
     repo = MockRepo(installed=set())
     adapter = RepositoryCatalogAdapter(repo)
@@ -142,7 +147,7 @@ async def test_is_satisfied_false_when_absent():
 class MockBackend:
     """Minimal formula backend stub with configurable install failure."""
 
-    def __init__(self, exc=None):
+    def __init__(self, exc=None) -> None:
         """Initialise the mock backend.
 
         Args:
@@ -151,7 +156,7 @@ class MockBackend:
         self.exc = exc
         self.calls = []
 
-    async def install(self, names):
+    async def install(self, names) -> list[str]:
         """Record the call and optionally raise the configured exception.
 
         Args:
@@ -163,34 +168,39 @@ class MockBackend:
         self.calls.append(names)
         if self.exc is not None:
             raise self.exc
+
         return names
 
 
 class MockRunBrew:
     """Minimal brew runner stub that fails on a configured set of subcommands."""
 
-    def __init__(self, fail_on=()):
+    def __init__(self, fail_on=()) -> None:
         """Initialise the mock runner.
 
         Args:
-            fail_on: Subcommand names (e.g. ``"link"``) that should raise BrewCommandError.
+            fail_on: Subcommand names (e.g. `"link"`) that should raise BrewCommandError.
         """
-        self.fail_on = set(fail_on)  # subcommands that should raise
+        self.fail_on = set(fail_on)  # Subcommands that should raise
         self.calls = []
 
-    async def __call__(self, args):
+    async def __call__(self, args) -> None:
         """Record the call and raise BrewCommandError if the subcommand is in fail_on.
 
         Args:
             args: The argument list passed to the runner.
+
+        Raises:
+            BrewCommandError: If the subcommand is in fail_on.
         """
         self.calls.append(args)
         if args and args[0] in self.fail_on:
             raise BrewCommandError(command="brew " + " ".join(args), returncode=1)
+
         return None
 
 
-async def test_install_success_returns_true():
+async def test_install_success_returns_true() -> None:
     """Test that a successful backend install returns True."""
     backend = MockBackend()
     adapter = BrewAdapter(backend, MockRunBrew())
@@ -198,14 +208,14 @@ async def test_install_success_returns_true():
     assert backend.calls == [["wget"]]
 
 
-async def test_install_already_installed_is_success():
+async def test_install_already_installed_is_success() -> None:
     """Test that AlreadyInstalledWarning from the backend is treated as success."""
     backend = MockBackend(exc=AlreadyInstalledWarning(package="wget"))
     adapter = BrewAdapter(backend, MockRunBrew())
     assert await adapter.install("wget") is True
 
 
-async def test_install_command_error_is_failure():
+async def test_install_command_error_is_failure() -> None:
     """Test that a BrewCommandError from the backend returns False."""
     backend = MockBackend(
         exc=BrewCommandError(command="brew install wget", returncode=1)
@@ -214,7 +224,7 @@ async def test_install_command_error_is_failure():
     assert await adapter.install("wget") is False
 
 
-async def test_link_success_and_failure():
+async def test_link_success_and_failure() -> None:
     """Test that link returns True on success and False when the runner raises."""
     run = MockRunBrew()
     adapter = BrewAdapter(MockBackend(), run)
@@ -226,7 +236,7 @@ async def test_link_success_and_failure():
     assert await adapter.link("wget") is False
 
 
-async def test_post_install_success_and_failure():
+async def test_post_install_success_and_failure() -> None:
     """Test that post_install returns True on success and False when the runner raises."""
     run = MockRunBrew()
     adapter = BrewAdapter(MockBackend(), run)
@@ -238,7 +248,7 @@ async def test_post_install_success_and_failure():
     assert await adapter.post_install("openssl@3") is False
 
 
-async def test_pinned_warning_from_backend_propagates():
+async def test_pinned_warning_from_backend_propagates() -> None:
     """Test that PinnedPackageWarning is not swallowed and propagates to the caller."""
     backend = MockBackend(exc=PinnedPackageWarning(package="wget"))
     adapter = BrewAdapter(backend, MockRunBrew())

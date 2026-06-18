@@ -13,8 +13,6 @@ from brewery.providers.install_adapters import BrewAdapter, RepositoryCatalogAda
 from brewery.providers.manifest import fetch_bottle_tab
 from brewery.providers.orchestrator import InstallConfig, InstallReport, Orchestrator
 
-# Async callable that invokes `brew <args>` and raises BrewCommandError on a
-# non-zero exit — bind to your brew passthrough runner.
 RunBrew = Callable[[list[str]], Awaitable[object]]
 
 

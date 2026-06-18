@@ -185,7 +185,7 @@ def _rebuild(o: dict, tab_deps: list[dict]) -> dict:
         tab_deps: The tab-shaped dependencies.
 
     Returns:
-        dict: The rebuilt receipt.
+        The rebuilt receipt.
     """
     src, ver = o["source"], o["source"]["versions"]
 

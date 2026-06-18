@@ -16,11 +16,11 @@ pytestmark = pytest.mark.asyncio
 class MockClient:
     """Async context manager stub that records whether it was closed."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialise the mock client."""
         self.closed = False
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> MockClient:
         """Enter the async context and return self.
 
         Returns:
@@ -28,7 +28,7 @@ class MockClient:
         """
         return self
 
-    async def __aexit__(self, *exc):
+    async def __aexit__(self, *exc) -> bool:
         """Exit the async context and mark the client as closed.
 
         Args:
@@ -46,7 +46,7 @@ class MockDownloader:
 
     last = None
 
-    def __init__(self, cache_dir, client):
+    def __init__(self, cache_dir, client) -> None:
         """Initialise the mock downloader and record this instance.
 
         Args:
@@ -63,7 +63,7 @@ class MockOrchestrator:
 
     last = None
 
-    def __init__(self, **kwargs):
+    def __init__(self, **kwargs) -> None:
         """Initialise the mock orchestrator and record this instance.
 
         Args:
@@ -73,14 +73,14 @@ class MockOrchestrator:
         self.kwargs = kwargs
         self.installed_with = None
 
-    async def install(self, names):
+    async def install(self, names) -> str:
         """Record the names and return a sentinel report string.
 
         Args:
             names: The list of formula names to install.
 
         Returns:
-            A sentinel string ``"report:<comma-joined names>"``.
+            A sentinel string `"report:<comma-joined names>"`.
         """
         self.installed_with = names
         return f"report:{','.join(names)}"
@@ -89,14 +89,14 @@ class MockOrchestrator:
 class MockRepo:
     """Minimal repo stub exposing catalog, cache_mgr, and formula attributes."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialise the mock repo with opaque sentinel objects for each attribute."""
         self.catalog = object()
         self.cache_mgr = object()
-        self.formula = object()  # the formula backend the BrewAdapter wraps
+        self.formula = object()  # The formula backend the BrewAdapter wraps
 
 
-async def _run_brew(args):
+async def _run_brew(args) -> None:
     """No-op brew runner stub used to construct a BrewAdapter in tests.
 
     Args:
@@ -109,7 +109,7 @@ async def _run_brew(args):
 
 
 @pytest.fixture
-def patched(monkeypatch):
+def patched(monkeypatch) -> MockClient:
     """Patch httpx.AsyncClient, Downloader, and Orchestrator with stubs.
 
     Args:
@@ -122,10 +122,11 @@ def patched(monkeypatch):
     monkeypatch.setattr(svc.httpx, "AsyncClient", lambda: client)
     monkeypatch.setattr(svc, "Downloader", MockDownloader)
     monkeypatch.setattr(svc, "Orchestrator", MockOrchestrator)
+
     return client
 
 
-async def test_returns_orchestrator_report(patched, mock_env):
+async def test_returns_orchestrator_report(patched, mock_env) -> None:
     """Test that run_install returns the report produced by the orchestrator."""
     repo = MockRepo()
     report = await svc.run_install(
@@ -136,14 +137,14 @@ async def test_returns_orchestrator_report(patched, mock_env):
     assert MockOrchestrator.last.installed_with == ["wget", "curl"]
 
 
-async def test_client_is_closed(patched, mock_env):
+async def test_client_is_closed(patched, mock_env) -> None:
     """Test that the HTTP client is closed after run_install completes."""
     repo = MockRepo()
     await svc.run_install(repo, ["wget"], run_brew=_run_brew, env=mock_env)
     assert patched.closed is True
 
 
-async def test_downloader_built_with_env_cache_and_client(patched, mock_env):
+async def test_downloader_built_with_env_cache_and_client(patched, mock_env) -> None:
     """Test that the Downloader is constructed with the env bottle_cache and the live client."""
     repo = MockRepo()
     await svc.run_install(repo, ["wget"], run_brew=_run_brew, env=mock_env)
@@ -153,7 +154,7 @@ async def test_downloader_built_with_env_cache_and_client(patched, mock_env):
     assert dl.client is patched
 
 
-async def test_orchestrator_wired_with_adapters_and_config(patched, mock_env):
+async def test_orchestrator_wired_with_adapters_and_config(patched, mock_env) -> None:
     """Test that the Orchestrator receives correctly wired adapters and InstallConfig."""
     repo = MockRepo()
     await svc.run_install(
@@ -190,7 +191,7 @@ async def test_orchestrator_wired_with_adapters_and_config(patched, mock_env):
     assert cfg.staging_root == mock_env.prefix / "var" / "homebrew" / ".staging"
 
 
-async def test_env_resolved_when_omitted(patched, mock_env, monkeypatch):
+async def test_env_resolved_when_omitted(patched, mock_env, monkeypatch) -> None:
     """Test that omitting env= falls back to get_brewery_env() automatically."""
     monkeypatch.setattr(svc, "get_brewery_env", lambda: mock_env)
     repo = MockRepo()

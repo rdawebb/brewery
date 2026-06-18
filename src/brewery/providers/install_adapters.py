@@ -7,7 +7,7 @@ from brewery.core.models import PackageKind
 from brewery.providers.orchestrator import BrewPort, CatalogPort, FormulaRowP
 
 
-class RepositoryCatalogAdapter:  # implements orchestrator.CatalogPort
+class RepositoryCatalogAdapter:  # Implements orchestrator.CatalogPort
     """Binds CatalogPort to the existing Repository.
 
     Catalog lookups delegate to repo.catalog; installed-state (is_satisfied)

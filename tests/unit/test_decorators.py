@@ -16,7 +16,13 @@ pytestmark = pytest.mark.unit
 def no_sleep(monkeypatch) -> None:
     """Make asyncio.sleep a no-op so backoff delays don't slow the suite."""
 
-    async def _instant(*_args, **_kwargs):
+    async def _instant(*_args, **_kwargs) -> None:
+        """A no-op function that returns None.
+
+        Args:
+            *_args: Variable length argument list.
+            **_kwargs: Arbitrary keyword arguments.
+        """
         return None
 
     monkeypatch.setattr(asyncio, "sleep", _instant)
@@ -30,9 +36,14 @@ class TestRetryOnTransient:
         calls = []
 
         @retry_on_transient(max_retries=3, base_delay=0)
-        async def op():
-            """Simulate an operation that may fail."""
+        async def op() -> str:
+            """Simulate an operation that may fail.
+
+            Returns:
+                The result of the operation.
+            """
             calls.append(1)
+
             return "ok"
 
         assert await op() == "ok"
@@ -43,11 +54,19 @@ class TestRetryOnTransient:
         attempts = {"n": 0}
 
         @retry_on_transient(max_retries=3, base_delay=0)
-        async def op():
-            """Simulate an operation that may fail."""
+        async def op() -> str:
+            """Simulate an operation that may fail.
+
+            Returns:
+                str: The result of the operation.
+
+            Raises:
+                TransientError: If the operation fails transiently.
+            """
             attempts["n"] += 1
             if attempts["n"] < 3:
                 raise TransientError("temporary")
+
             return "recovered"
 
         assert await op() == "recovered"
@@ -58,8 +77,12 @@ class TestRetryOnTransient:
         attempts = {"n": 0}
 
         @retry_on_transient(max_retries=3, base_delay=0)
-        async def op():
-            """Simulate an operation that may fail."""
+        async def op() -> None:
+            """Simulate an operation that may fail.
+
+            Raises:
+                TransientError: Always raises a TransientError.
+            """
             attempts["n"] += 1
             raise TransientError("always fails")
 
@@ -72,8 +95,12 @@ class TestRetryOnTransient:
         attempts = {"n": 0}
 
         @retry_on_transient(max_retries=3, base_delay=0)
-        async def op():
-            """Simulate an operation that may fail."""
+        async def op() -> None:
+            """Simulate an operation that may fail.
+
+            Raises:
+                UserError: Always raises a UserError.
+            """
             attempts["n"] += 1
             raise UserError("bad input")
 
@@ -85,8 +112,12 @@ class TestRetryOnTransient:
         """Test that retry_on_transient backoff delays follow the specified schedule."""
         delays: list[float] = []
 
-        async def _record(d):
-            """Record the delay."""
+        async def _record(d) -> None:
+            """Record the delay.
+
+            Args:
+                d: The delay to record.
+            """
             delays.append(d)
 
         monkeypatch.setattr(asyncio, "sleep", _record)
@@ -106,8 +137,12 @@ class TestRetryOnTransient:
         with pytest.raises(TypeError):
 
             @retry_on_transient()
-            def sync_op():
-                """Simulate a synchronous operation that may fail."""
+            def sync_op() -> int:
+                """Simulate a synchronous operation that may fail.
+
+                Returns:
+                    Always returns 1.
+                """
                 return 1
 
 
@@ -118,8 +153,15 @@ class TestLogOperation:
         """Test that log_operation returns the underlying result."""
 
         @log_operation(event_prefix="thing")
-        async def op(x):
-            """Simulate an operation that may fail."""
+        async def op(x) -> int:
+            """Simulate an operation that may fail.
+
+            Args:
+                x: The input value.
+
+            Returns:
+                int: The result of the operation.
+            """
             return x * 2
 
         assert await op(21) == 42
@@ -128,8 +170,12 @@ class TestLogOperation:
         """Test that log_operation reraises exceptions."""
 
         @log_operation(event_prefix="thing")
-        async def op():
-            """Simulate an operation that may fail."""
+        async def op() -> None:
+            """Simulate an operation that may fail.
+
+            Raises:
+                ValueError: Always raises a ValueError.
+            """
             raise ValueError("nope")
 
         with pytest.raises(ValueError):
@@ -141,8 +187,15 @@ class TestLogOperation:
         import logging
 
         @log_operation(event_prefix="myop", log_args=["name"])
-        async def op(name):
-            """Simulate an operation that may fail."""
+        async def op(name) -> str:
+            """Simulate an operation that may fail.
+
+            Args:
+                name: The name to return.
+
+            Returns:
+                str: The name.
+            """
             return "done"
 
         with caplog.at_level(logging.INFO, logger="brewery.core.decorators"):
@@ -161,8 +214,12 @@ class TestLogOperation:
         import logging
 
         @log_operation(event_prefix="myop")
-        async def op():
-            """Simulate an operation that may fail."""
+        async def op() -> None:
+            """Simulate an operation that may fail.
+
+            Raises:
+                RuntimeError: Always raises a RuntimeError.
+            """
             raise RuntimeError("kaboom")
 
         with caplog.at_level(logging.ERROR, logger="brewery.core.decorators"):
@@ -177,8 +234,12 @@ class TestLogOperation:
         import logging
 
         @log_operation(event_prefix="listop", log_result=True)
-        async def op():
-            """Simulate an operation that may fail."""
+        async def op() -> list[int]:
+            """Simulate an operation that may fail.
+
+            Returns:
+                The list of integers.
+            """
             return [1, 2, 3]
 
         with caplog.at_level(logging.INFO, logger="brewery.core.decorators"):

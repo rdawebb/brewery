@@ -28,7 +28,7 @@ def _raise_for_known(subcommand: str, names: list[str], result: BrewResult) -> N
     and may need updating if brew changes its wording.
 
     Args:
-        subcommand: The brew subcommand that was run (e.g. ``"install"``).
+        subcommand: The brew subcommand that was run (e.g. "install").
         names: The package names passed to the subcommand.
         result: The captured output and return code from brew.
     """
@@ -47,7 +47,7 @@ async def _run(subcommand: str, names: list[str], flags: list[str]) -> list[str]
     """Run a brew package subcommand, capturing output for semantic mapping.
 
     Args:
-        subcommand: The brew subcommand to run (e.g. ``"install"``).
+        subcommand: The brew subcommand to run (e.g. "install").
         names: The package names to pass to the subcommand.
         flags: Extra flags to insert between the subcommand and the names.
 

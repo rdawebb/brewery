@@ -258,11 +258,23 @@ def mock_run(monkeypatch):
         """
         runs: list[list[str]] = []
 
-        def stub(cmd, *args, **kwargs):
+        def stub(cmd, *args, **kwargs) -> subprocess.CompletedProcess:
+            """Record the command and return a CompletedProcess stub.
+
+            Args:
+                cmd: The command to record and return.
+                *args: Additional args to pass to subprocess.run.
+                **kwargs: Additional kwargs to pass to subprocess.run.
+
+            Returns:
+                A CompletedProcess stub with the given return code and stdout/stderr.
+            """
             runs.append(list(cmd))
+
             return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
 
         monkeypatch.setattr(r.subprocess, "run", stub)
+
         return runs
 
     return install
@@ -415,7 +427,7 @@ class TestTextSymlinkRelocation:
         # Inside _run the file must be writable
         seen_mode: list[int] = []
 
-        def record(cmd):
+        def record(cmd) -> None:
             """Records the file's write bit at the moment _run is invoked.
 
             Args:

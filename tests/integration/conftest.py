@@ -9,7 +9,9 @@ import orjson
 
 if TYPE_CHECKING:
     from collections.abc import Generator
+
     from _layout import Brew
+
     from brewery.core.catalog import Catalog
     from brewery.core.config import BreweryENV
     from brewery.core.repo import Repository
@@ -238,6 +240,9 @@ def repo(mock_brew, catalog) -> Repository:
     Args:
         mock_brew: The mock subprocess call log.
         catalog: The pre-populated catalog.
+
+    Returns:
+        A Repository instance.
     """
     from brewery.core.repo import Repository
 
