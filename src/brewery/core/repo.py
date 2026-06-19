@@ -161,7 +161,7 @@ class Repository:
     @log_operation(event_prefix="uninstall_package", log_args=["name", "kind"])
     async def uninstall_packages(
         self, names: list[str], kind: PackageKind | None = None
-    ) -> tuple[int, list[tuple[str, str]]]:
+    ) -> tuple[list[str], list[tuple[str, str]]]:
         """Uninstall packages and refresh cache on success.
 
         Args:
@@ -229,7 +229,7 @@ class Repository:
 
         failures.extend((n, "uninstall failed") for n in failed)
 
-        return len(removed), failures
+        return removed, failures
 
     def _blocking_dependents(self, removal: set[str]) -> dict[str, list[str]]:
         """Installed formulae outside `removal` that still require a target.

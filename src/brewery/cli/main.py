@@ -94,6 +94,7 @@ def handle_error(error: Exception) -> int:
             )
         except Exception:
             pass
+
         console.print(f"\n{format_error_message(error)}\n", style="bold red")
 
         if isinstance(error, PackageNotFoundError):
@@ -102,10 +103,13 @@ def handle_error(error: Exception) -> int:
 
         if isinstance(error, TransientError):
             return EXIT_TRANSIENT_ERROR
+
         elif isinstance(error, UserError):
             return EXIT_USER_ERROR
+
         elif isinstance(error, SysError):
             return EXIT_SYSTEM_ERROR
+
         else:
             return EXIT_USER_ERROR
 
@@ -284,21 +288,31 @@ def install(
         with _repository() as repo:
             app.echo()
             with console.status(
-                status="[bold green]Installing...", refresh_per_second=5
+                status="[bold green]Installing...[/bold green]", refresh_per_second=5
             ):
                 installed, failures = _async_run(
                     coro=repo.install_packages(names, kind)
                 )
 
+            console.print(
+                f"✓ Installed {len(installed)} package(s)\n", style="bold green"
+            )
             for pkg in installed:
                 console.print(
-                    f"[green]✓ Installed [bold]{pkg.name}[/bold] {pkg.versions[0] if pkg.versions else ''}[/green]\n",
+                    f"  [dim]→[/dim] {pkg.name} {pkg.versions[0] if pkg.versions else ''}"
                 )
-            for name, reason in failures:
-                console.print(f"[bold red] Failed {name}: {reason}[/bold red]")
+
+            if failures:
+                console.print(
+                    f"✗ Failed to install {len(failures)} package(s)", style="bold red"
+                )
+                for name, reason in failures:
+                    console.print(f"  [dim]-[/dim] {name} - {reason}")
+
+            app.echo()
 
     except AlreadyInstalledWarning as e:
-        console.print(f"\n[bold yellow]⚠ {e.message}[/bold yellow]\n")
+        console.print(f"\n⚠ {e.message}\n", style="bold yellow")
 
     except Exception as e:
         sys.exit(handle_error(error=e))
@@ -330,16 +344,28 @@ def uninstall(
         with _repository() as repo:
             app.echo()
             with console.status(
-                status=f"[bold yellow]Uninstalling {pkg_str}...[/bold yellow]",
+                status="[bold yellow]Uninstalling...[/bold yellow]",
                 refresh_per_second=5,
             ):
-                count, failures = _async_run(coro=repo.uninstall_packages(names, kind))
+                removed, failures = _async_run(
+                    coro=repo.uninstall_packages(names, kind)
+                )
 
             console.print(
-                f"[bold yellow]✓ Uninstalled {count} package(s)[/bold yellow]\n"
+                f"✓ Uninstalled {len(removed)} package(s)\n", style="bold green"
             )
-            for name, reason in failures:
-                console.print(f"[bold red]✗ Failed {name}: {reason}[/bold red]")
+            for pkg in removed:
+                console.print(f"  [dim]-[/dim] {pkg}")
+
+            if failures:
+                console.print(
+                    f"✗ Failed to uninstall {len(failures)} package(s)",
+                    style="bold red",
+                )
+                for name, reason in failures:
+                    console.print(f"  [dim]-[/dim] {name} - {reason}")
+
+            app.echo()
 
     except Exception as e:
         sys.exit(handle_error(error=e))
@@ -382,21 +408,18 @@ def outdated(
                 pkgs = repo.get_outdated()
 
             if not pkgs:
-                console.print(
-                    "\n[bold green]✓ All packages are up to date![/bold green]\n"
-                )
+                console.print("\n✓ All packages are up to date!\n", style="bold green")
                 return
 
-            console.print(
-                f"\n[bold yellow]• {len(pkgs)} outdated package(s)[/bold yellow]\n"
-            )
+            console.print(f"\n• {len(pkgs)} outdated package(s)\n", style="bold yellow")
             for pkg in pkgs:
                 latest = pkg.metadata.get("latest_version")
                 console.print(f"  [dim]-[/dim] {pkg.name} → {latest}")
 
             console.print(
-                "\n[dim]  Run [bold]brewery upgrade[/bold] to update all outdated packages, "
-                "\n  or [bold]brewery upgrade <packages>[/bold] to update specific packages[/dim]\n"
+                "\n  Run [bold]brewery upgrade[/bold] to update all outdated packages, "
+                "\n  or [bold]brewery upgrade <packages>[/bold] to update specific packages\n",
+                style="dim",
             )
 
     except Exception as e:
@@ -433,7 +456,7 @@ def upgrade(
                     outdated: list[Package] = repo.get_outdated(live=False)
                     if not outdated:
                         console.print(
-                            "\n[bold green]✓ All packages are up to date![/bold green]\n"
+                            "\n✓ All packages are up to date!\n", style="bold green"
                         )
                         return
 
@@ -448,7 +471,7 @@ def upgrade(
                         console.print("Upgrade cancelled.", style="dim")
                         return
 
-            console.print()
+            app.echo()
             with console.status(
                 status="[bold yellow]Upgrading...[/bold yellow]", refresh_per_second=5
             ):
@@ -457,13 +480,11 @@ def upgrade(
                 )
 
             if not upgraded and not failures and not current:
-                console.print(
-                    "[bold green]✓ All packages are up to date![/bold green]\n"
-                )
+                console.print("✓ All packages are up to date!\n", style="bold green")
                 return
 
             console.print(
-                f"[bold green]✓ Upgraded {len(upgraded)} package(s)[/bold green]\n"
+                f"✓ Upgraded {len(upgraded)} package(s)\n", style="bold green"
             )
             for pkg in upgraded:
                 console.print(
@@ -471,20 +492,19 @@ def upgrade(
                 )
 
             if current:
-                console.print(f"\n[dim]{len(current)} already up-to-date:[/dim]\n")
+                console.print(f"\n{len(current)} already up-to-date:\n", style="dim")
                 for pkg in current:
                     console.print(
-                        f"  [dim]→ {pkg.name} {pkg.versions[0] if pkg.versions else ''}[/dim]"
+                        f"  - {pkg.name} {pkg.versions[0] if pkg.versions else ''}",
+                        style="dim",
                     )
 
             if failures:
-                console.print(
-                    f"\n[bold red]✗ {len(failures)} skipped/failed:[/bold red]"
-                )
+                console.print(f"\n✗ {len(failures)} skipped/failed:", style="bold red")
                 for pkg_name, reason in failures:
                     console.print(f"  - {pkg_name}: [dim]{reason}[/dim]")
 
-            console.print()
+            app.echo()
 
     except PinnedPackageWarning as e:
         console.print(f"\n[bold yellow]⚠ {e.message}[/bold yellow]\n")
@@ -494,7 +514,11 @@ def upgrade(
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Intercepts the entry point for the brewery CLI to handle commands passthrough."""
+    """Intercepts the entry point for the brewery CLI to handle commands passthrough.
+
+    Args:
+        argv: The command-line arguments to pass to the brewery CLI.
+    """
     if argv is None:
         argv = sys.argv[1:]
 
