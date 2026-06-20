@@ -1,4 +1,4 @@
-"""Install orchestration: resolve the runtime closure, fetch bottles + manifests
+"""Install + upgrade orchestration: resolve the runtime closure, fetch bottles + manifests
 concurrently, and run the native pipeline in dependency order with per-formula
 brew fallback.
 """
@@ -26,15 +26,17 @@ from brewery.core.errors import (
 from brewery.providers.cellar import install_to_cellar, rmtree
 from brewery.providers.downloader import BottleRef
 from brewery.providers.extractor import extract_bottle
-from brewery.providers.linker import link_keg
+from brewery.providers.linker import link_keg, unlink_keg
 from brewery.providers.manifest import BottleTabInfo
 from brewery.providers.receipt import (
     RuntimeDependency,
     Source,
     build_receipt,
+    read_receipt,
     write_receipt,
 )
 from brewery.providers.relocator import relocate_keg
+from brewery.providers.retention import mark_replaced
 
 
 class FormulaRowP(Protocol):
@@ -168,6 +170,17 @@ class BrewPort(Protocol):
         """
         ...
 
+    async def upgrade(self, name: str) -> bool:
+        """Upgrade a formula.
+
+        Args:
+            name: The name of the formula to upgrade.
+
+        Returns:
+            True if the upgrade was successful, False otherwise.
+        """
+        ...
+
     async def link(self, name: str) -> bool:
         """Link a formula.
 
@@ -225,6 +238,7 @@ class Outcome(Enum):
     NATIVE_KEG_ONLY = "native_keg_only"  # Installed natively, keg-only (not linked)
     BREW_INSTALL = "brew_install"  # Native failed -> brew installed
     BREW_LINK = "brew_link"  # Installed natively, brew did the linking
+    BREW_UPGRADE = "brew_upgrade"  # Upgraded via brew
     INSTALLED_UNLINKED = (
         "installed_unlinked"  # Installed, neither we nor brew could link
     )
@@ -326,6 +340,50 @@ class Orchestrator:
         closure = self._closure(req)
         to_install = {n for n in closure if not self.catalog.is_satisfied(n)}
 
+        return await self._run_pipeline(to_install, req)
+
+    async def upgrade(
+        self, requested: list[str], old_kegs: dict[str, Path]
+    ) -> InstallReport:
+        """Upgrade installed formulae by re-pouring and swapping each keg.
+
+        The requested targets are forced past is_satisfied, but deps keep normal
+        skip-if-present semantics, so only new or missing deps are poured.
+
+        Args:
+            requested: Canonical names of the formulae to upgrade.
+            old_kegs: Target name -> its current active keg path.
+
+        Returns:
+            The InstallReport (per-formula outcomes).
+        """
+        req = {self.catalog.resolve_alias(n) for n in requested}
+        to_install = {
+            n
+            for n in self._closure(req)
+            if n in req or not self.catalog.is_satisfied(n)
+        }
+
+        return await self._run_pipeline(to_install, req, old_kegs)
+
+    async def _run_pipeline(
+        self,
+        to_install: set[str],
+        req: set[str],
+        old_kegs: dict[str, Path] | None = None,
+    ) -> InstallReport:
+        """Fetch concurrently and run the pipeline in dependency order.
+
+        Shared by install and upgrade; old_kegs is empty for install.
+
+        Args:
+            to_install: The resolved set of formulae to pour.
+            req: The explicitly requested names (sets installed_on_request).
+            old_kegs: For upgrades, target -> old keg to unlink and mark.
+
+        Returns:
+            The InstallReport.
+        """
         report = InstallReport()
         if not to_install:
             return report
@@ -349,7 +407,9 @@ class Orchestrator:
             while ts.is_active():
                 for name in ts.get_ready():
                     task = asyncio.create_task(
-                        self._install_one(name, formulae[name], fetch, req, report)
+                        self._install_one(
+                            name, formulae[name], fetch, req, report, old_kegs
+                        )
                     )
                     pending[task] = name
 
@@ -522,6 +582,7 @@ class Orchestrator:
         fetch: dict[str, asyncio.Task],
         requested: set[str],
         report: "InstallReport",
+        old_kegs: dict[str, Path] | None = None,
     ) -> Outcome:
         """Install a single formula.
 
@@ -531,11 +592,13 @@ class Orchestrator:
             fetch: The fetch tasks for the formula.
             requested: The set of requested formulae.
             report: The InstallReport.
+            old_kegs: Optional paths of the old kegs to be removed.
 
         Returns:
             The outcome of the installation.
         """
         outcomes = report.outcomes
+        old = (old_kegs or {}).get(name)
 
         # Skip if any runtime dep failed outright
         deps = self.catalog.runtime_deps(name)
@@ -564,9 +627,14 @@ class Orchestrator:
             )
             report.errors[name] = f"{reason} -> brew"
 
-            return await self._brew_install(name)
+            return await self._brew_pour(name, upgrade=old is not None)
 
         on_request = name in requested
+        if old is not None:
+            prev = read_receipt(old)
+            if prev is not None:
+                on_request = bool(prev.get("installed_on_request", on_request))
+
         aliases = self.catalog.aliases_of(name)
         rt_deps = self._runtime_dep_entries(name)
 
@@ -580,7 +648,11 @@ class Orchestrator:
                 on_request,
                 aliases,
                 rt_deps,
+                old,
             )
+
+        if old is not None and result.stage != "install":
+            await asyncio.to_thread(mark_replaced, old, by=fr.version)
 
         if result.stage is None:
             if fr.post_install:
@@ -601,7 +673,23 @@ class Orchestrator:
         # An install-stage failure -> brew pours this formula
         report.errors[name] = f"install stage: {result.error}"
 
-        return await self._brew_install(name)
+        return await self._brew_pour(name, upgrade=old is not None)
+
+    async def _brew_pour(self, name: str, *, upgrade: bool) -> Outcome:
+        """Brew fallback: `brew upgrade` for an upgrade target, else `brew install`.
+
+        Args:
+            name: The name of the formula.
+            upgrade: Whether this is an upgrade operation.
+
+        Returns:
+            The outcome of the installation.
+        """
+        ok = await (self.brew.upgrade(name) if upgrade else self.brew.install(name))
+        if not ok:
+            return Outcome.FAILED
+
+        return Outcome.BREW_UPGRADE if upgrade else Outcome.BREW_INSTALL
 
     async def _brew_install(self, name: str) -> Outcome:
         """Install a formula using Homebrew.
@@ -625,6 +713,7 @@ class Orchestrator:
         on_request: bool,
         aliases: list[str],
         rt_deps: list[RuntimeDependency],
+        old_keg: Path | None = None,
     ) -> _NativeResult:
         """Install a formula natively.
 
@@ -636,6 +725,7 @@ class Orchestrator:
             on_request: Whether the installation was triggered by a user request.
             aliases: Known aliases for the formula, written into the receipt.
             rt_deps: Pre-built runtime dependency entries for the receipt.
+            old_keg: Optional path of the old keg to be removed.
 
         Returns:
             The result of the installation.
@@ -673,9 +763,12 @@ class Orchestrator:
             shutil.rmtree(staging, ignore_errors=True)
 
         try:
+            if old_keg is not None and old_keg != dest:
+                unlink_keg(old_keg, prefix=self.cfg.prefix, name=name)
+
             link_keg(dest, prefix=self.cfg.prefix, name=name, keg_only=fr.keg_only)
 
-        except LinkError as exc:
+        except (LinkError, OSError) as exc:
             return _NativeResult(stage="link", dest=dest, error=str(exc))
 
         return _NativeResult(stage=None, dest=dest)

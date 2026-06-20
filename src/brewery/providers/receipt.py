@@ -198,6 +198,26 @@ def write_receipt(keg_dir: Path, receipt: dict) -> Path:
     return dest
 
 
+def read_receipt(keg_dir: Path) -> dict | None:
+    """Read INSTALL_RECEIPT.json from a keg, tolerating absence or corruption.
+
+    The inverse of write_receipt, used to inherit fields from a superseded keg during an upgrade.
+
+    Args:
+        keg_dir: The keg directory to read the receipt from.
+
+    Returns:
+        The parsed receipt dict, or None if missing or unreadable.
+    """
+    try:
+        data = orjson.loads((keg_dir / RECEIPT_NAME).read_bytes())
+
+    except (OSError, orjson.JSONDecodeError):
+        return None
+
+    return data if isinstance(data, dict) else None
+
+
 def current_arch() -> str:
     """brew's arch token: 'arm64' or 'x86_64'. Fallback for all-bottle receipts.
 

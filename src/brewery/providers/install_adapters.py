@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from brewery.core.errors import AlreadyInstalledWarning, BrewCommandError
 from brewery.core.models import PackageKind
 from brewery.providers.orchestrator import BrewPort, CatalogPort, FormulaRowP
@@ -69,18 +71,22 @@ class RepositoryCatalogAdapter:  # Implements orchestrator.CatalogPort
         return self._catalog.aliases_of(name)
 
     def is_satisfied(self, name: str) -> bool:
-        """Return True if any version of the formula is already installed.
+        """Return True if a complete keg for the formula is already installed.
+
+        A keg without an INSTALL_RECEIPT.json is treated as incomplete (e.g. an
+        interrupted install) and will be reinstalled.
 
         Args:
             name: The canonical formula name to check.
 
         Returns:
-            True if a matching installed keg is found in the cache, False otherwise.
+            True if a complete installed keg is found in the cache, False otherwise.
         """
-        # Any version counts as satisfied for a fresh install, matching brew
-        return (
-            self._repo.cache_mgr.find_installed(name, PackageKind.FORMULA) is not None
-        )
+        pkg = self._repo.cache_mgr.find_installed(name, PackageKind.FORMULA)
+        if pkg is None or not pkg.path:
+            return False
+
+        return (Path(pkg.path) / "INSTALL_RECEIPT.json").exists()
 
 
 # Static assertion that the adapter satisfies the port
@@ -122,6 +128,22 @@ class BrewAdapter:
             return True
 
         except AlreadyInstalledWarning:
+            return True
+
+        except BrewCommandError:
+            return False
+
+    async def upgrade(self, name: str) -> bool:
+        """Upgrade a formula via the formula backend.
+
+        Args:
+            name: The canonical formula name to upgrade.
+
+        Returns:
+            True on success, False on a brew failure.
+        """
+        try:
+            await self._backend.upgrade(names=[name])
             return True
 
         except BrewCommandError:
