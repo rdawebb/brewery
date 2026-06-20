@@ -314,6 +314,13 @@ def install(
     except AlreadyInstalledWarning as e:
         console.print(f"\n⚠ {e.message}\n", style="bold yellow")
 
+    except KeyboardInterrupt:
+        console.print(
+            "\n⚠ Interrupted. Re-run [bold]brewery install <name>[/bold] to complete it\n",
+            style="bold yellow",
+        )
+        sys.exit(130)
+
     except Exception as e:
         sys.exit(handle_error(error=e))
 
@@ -366,6 +373,13 @@ def uninstall(
                     console.print(f"  [dim]-[/dim] {name} - {reason}")
 
             app.echo()
+
+    except KeyboardInterrupt:
+        console.print(
+            "\n⚠ Interrupted. Re-run [bold]brewery uninstall <name>[/bold] to complete it\n",
+            style="bold yellow",
+        )
+        sys.exit(130)
 
     except Exception as e:
         sys.exit(handle_error(error=e))
@@ -453,17 +467,22 @@ def upgrade(
                         return
 
                 else:
-                    outdated: list[Package] = repo.get_outdated(live=False)
+                    outdated: list[Package] = repo.get_outdated()
                     if not outdated:
                         console.print(
                             "\n✓ All packages are up to date!\n", style="bold green"
                         )
                         return
 
-                    from brewery.cli.renderers import package_table
+                    console.print(
+                        f"\n• {len(outdated)} outdated package(s)\n",
+                        style="bold yellow",
+                    )
+                    for pkg in outdated:
+                        latest = pkg.metadata.get("latest_version")
+                        console.print(f"  [dim]-[/dim] {pkg.name} → {latest}")
 
-                    console.print(package_table(pkgs=outdated))
-
+                    app.echo()
                     if not app.confirm(
                         text=f"Upgrade {len(outdated)} outdated package(s)?",
                         default=True,
@@ -508,6 +527,13 @@ def upgrade(
 
     except PinnedPackageWarning as e:
         console.print(f"\n[bold yellow]⚠ {e.message}[/bold yellow]\n")
+
+    except KeyboardInterrupt:
+        console.print(
+            "\n⚠ Interrupted. Re-run [bold]brewery upgrade <name>[/bold] to complete it\n",
+            style="bold yellow",
+        )
+        sys.exit(130)
 
     except Exception as e:
         sys.exit(handle_error(error=e))
