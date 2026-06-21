@@ -36,6 +36,7 @@ app = ExtendedTyper(help="Brewery: A package management CLI tool")
 app.add_typer(
     daemon_app,
     name="daemon",
+    aliases=["d"],
     help="Manage the Brewery background refresh daemon.",
 )
 
@@ -71,6 +72,7 @@ KNOWN_COMMANDS: set[str] = {
     "up",
     # Daemon commands/aliases
     "daemon",
+    "d",
 }
 
 
@@ -178,7 +180,7 @@ def setup() -> None:
     configure_logging(level="INFO", enable_console=True)
 
 
-@app.command_with_aliases(name="list", aliases=["ls", "l"])
+@app.command(name="list", aliases=["ls", "l"])
 def list_pkgs(
     kind: Optional[PackageKind] = app.Option(
         None, "--kind", "-k", help="formula | cask | all"
@@ -219,7 +221,7 @@ def list_pkgs(
         sys.exit(handle_error(error=e))
 
 
-@app.command_with_aliases(aliases=["i", "in"])
+@app.command(aliases=["i", "in"])
 def info(
     name: str,
     kind: Optional[PackageKind] = app.Option(
@@ -244,7 +246,7 @@ def info(
         sys.exit(handle_error(error=e))
 
 
-@app.command_with_aliases(aliases=["s", "find"])
+@app.command(aliases=["s", "find"])
 def search(term: str) -> None:
     """Search for packages by name or description.
 
@@ -262,7 +264,7 @@ def search(term: str) -> None:
         sys.exit(handle_error(error=e))
 
 
-@app.command_with_aliases(aliases=["add"])
+@app.command(aliases=["add"])
 def install(
     names: list[str] = app.Argument(...),
     kind: Optional[PackageKind] = app.Option(
@@ -325,7 +327,7 @@ def install(
         sys.exit(handle_error(error=e))
 
 
-@app.command_with_aliases(aliases=["rm", "remove"])
+@app.command(aliases=["rm", "remove"])
 def uninstall(
     names: list[str],
     kind: Optional[PackageKind] = app.Option(
@@ -385,7 +387,7 @@ def uninstall(
         sys.exit(handle_error(error=e))
 
 
-@app.command_with_aliases(aliases=["o", "out"])
+@app.command(aliases=["o", "out"])
 def outdated(
     check: bool = app.Option(
         False,
@@ -440,7 +442,7 @@ def outdated(
         sys.exit(handle_error(error=e))
 
 
-@app.command_with_aliases(aliases=["u", "up"])
+@app.command(aliases=["u", "up"])
 def upgrade(
     names: Optional[list[str]] = app.Argument(
         None, help="Package(s) to upgrade (leave empty to upgrade all)"

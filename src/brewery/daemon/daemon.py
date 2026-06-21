@@ -80,7 +80,7 @@ def _patch_executable_paths(plist_path: Path) -> None:
     plist_path.write_bytes(plistlib.dumps(data))
 
 
-@daemon_app.command_with_aliases(aliases=["a", "add"])
+@daemon_app.command(aliases=["a", "add"])
 def start() -> None:
     """Activate the background refresh daemon."""
     LAUNCH_AGENTS.mkdir(parents=True, exist_ok=True)
@@ -110,7 +110,7 @@ def start() -> None:
     )
 
 
-@daemon_app.command_with_aliases(aliases=["d", "rm"])
+@daemon_app.command(aliases=["d", "rm"])
 def stop() -> None:
     """Deactivate the background refresh daemon."""
     if not PLIST_DEST.exists():
@@ -122,14 +122,14 @@ def stop() -> None:
     console.print(f"\n✓ Daemon removed ({PLIST_LABEL})\n", style="bold green")
 
 
-@daemon_app.command_with_aliases(aliases=["r"])
+@daemon_app.command(aliases=["r"])
 def restart() -> None:
     """Restart the background refresh daemon."""
     stop()
     start()
 
 
-@daemon_app.command_with_aliases(aliases=["st", "stat"])
+@daemon_app.command(aliases=["st", "stat"])
 def status() -> None:
     """Check whether the daemon is currently active."""
     result = subprocess.run(
