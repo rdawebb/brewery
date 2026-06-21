@@ -547,26 +547,29 @@ class TestOrchestration:
         with pytest.raises(RelocationError, match="missing from keg"):
             r.relocate_keg(keg, **brew_paths, text_files=["lib/pkgconfig/gone.pc"])
 
-    def test_relocate_keg_skip_relocation_is_noop(
+    def test_relocate_keg_skip_relocation_still_substitutes_text(
         self, tmp_path, mock_run, brew_paths
     ) -> None:
-        """Tests that skipping relocation is a no-op."""
+        """skip_relocation maps to brew's skip_linkage: Mach-O install names are
+        left alone, but text placeholders are still substituted (a script that
+        sources @@HOMEBREW_CELLAR@@/... would break at runtime otherwise)."""
         keg = tmp_path / "keg"
-        keg.mkdir()
+        (keg / "lib").mkdir(parents=True)
         (keg / "config").write_text("p=@@HOMEBREW_PREFIX@@\n")
+        (keg / "lib" / "libx.dylib").write_bytes(
+            _thin_macho(
+                [_lc_dylib(r._LC_ID_DYLIB, "@@HOMEBREW_PREFIX@@/lib/libx.dylib")]
+            )
+        )
 
         called = mock_run()
 
         n = r.relocate_keg(keg, **brew_paths, skip_relocation=True)
-        assert (
-            n.changed_files == []
-            and n.macho_relocated == 0
-            and n.symlinks_relocated == 0
-        )
-        assert called == []
 
-        # File left untouched because :any_skip_relocation bottles need no work
-        assert "@@HOMEBREW_PREFIX@@" in (keg / "config").read_text()
+        # Text file substituted; Mach-O linkage skipped (no install_name_tool)
+        assert "@@HOMEBREW_PREFIX@@" not in (keg / "config").read_text()
+        assert n.macho_relocated == 0
+        assert called == []
 
     def test_relocate_keg_propagates_macho_failure(
         self, tmp_path, mock_run, brew_paths
