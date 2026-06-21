@@ -5,40 +5,13 @@ from __future__ import annotations
 import functools
 
 import pytest
+from unit.stubs import MockClient, MockRepo, _run_brew
 
 import brewery.providers.install_service as svc
 from brewery.providers.install_adapters import BrewAdapter, RepositoryCatalogAdapter
 from brewery.providers.orchestrator import InstallConfig
 
 pytestmark = pytest.mark.asyncio
-
-
-class MockClient:
-    """Async context manager stub that records whether it was closed."""
-
-    def __init__(self) -> None:
-        """Initialise the mock client."""
-        self.closed = False
-
-    async def __aenter__(self) -> MockClient:
-        """Enter the async context and return self.
-
-        Returns:
-            This client instance.
-        """
-        return self
-
-    async def __aexit__(self, *exc) -> bool:
-        """Exit the async context and mark the client as closed.
-
-        Args:
-            *exc: Exception info (ignored).
-
-        Returns:
-            False, so exceptions propagate normally.
-        """
-        self.closed = True
-        return False
 
 
 class MockDownloader:
@@ -84,28 +57,6 @@ class MockOrchestrator:
         """
         self.installed_with = names
         return f"report:{','.join(names)}"
-
-
-class MockRepo:
-    """Minimal repo stub exposing catalog, cache_mgr, and formula attributes."""
-
-    def __init__(self) -> None:
-        """Initialise the mock repo with opaque sentinel objects for each attribute."""
-        self.catalog = object()
-        self.cache_mgr = object()
-        self.formula = object()  # The formula backend the BrewAdapter wraps
-
-
-async def _run_brew(args) -> None:
-    """No-op brew runner stub used to construct a BrewAdapter in tests.
-
-    Args:
-        args: The argument list (ignored).
-
-    Returns:
-        None.
-    """
-    return None
 
 
 @pytest.fixture

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from brewery.core.errors import (
@@ -78,14 +81,14 @@ class MockCatalog:
 class MockCacheMgr:
     """Minimal cache manager stub that reports a fixed set of installed packages."""
 
-    def __init__(self, installed=()) -> None:
+    def __init__(self, installed: dict[str, str | None] | None = None) -> None:
         """Initialise the mock cache manager.
 
         Args:
-            installed: Names of packages to treat as already installed.
+            installed: Mapping of package name -> keg path (or None for no path).
         """
-        self._installed = set(installed)
-        self.calls = []
+        self._installed: dict[str, str | None] = installed or {}
+        self.calls: list = []
 
     def find_installed(self, name: str, kind: PackageKind) -> Package | None:
         """Return a Package if *name* is in the installed set, else None.
@@ -95,21 +98,23 @@ class MockCacheMgr:
             kind: The package kind.
 
         Returns:
-            A Package if installed, else None.
+            A Package with path if installed, else None.
         """
         self.calls.append((name, kind))
+        if name not in self._installed:
+            return None
 
-        return Package(name, kind) if name in self._installed else None
+        return Package(name, kind, path=self._installed[name])
 
 
 class MockRepo:
     """Minimal repo stub wiring together a MockCatalog and MockCacheMgr."""
 
-    def __init__(self, installed=()) -> None:
+    def __init__(self, installed: dict[str, str | None] | None = None) -> None:
         """Initialise the mock repo.
 
         Args:
-            installed: Names of packages to treat as already installed.
+            installed: Mapping of package name -> keg path passed to MockCacheMgr.
         """
         self.catalog = MockCatalog()
         self.cache_mgr = MockCacheMgr(installed)
@@ -118,7 +123,7 @@ class MockRepo:
 
 async def test_catalog_methods_delegate_to_repo_catalog() -> None:
     """Test that each CatalogPort method delegates to repo.catalog."""
-    repo = MockRepo()
+    repo = MockRepo(installed={})
     adapter = RepositoryCatalogAdapter(repo)
     assert adapter.get_formula("wget") == "row:wget"
     assert adapter.resolve_alias("py") == "canon:py"
@@ -128,18 +133,44 @@ async def test_catalog_methods_delegate_to_repo_catalog() -> None:
     assert ("aliases_of", "openssl@3") in repo.catalog.calls
 
 
-async def test_is_satisfied_true_when_installed() -> None:
-    """Test that is_satisfied returns True when the package is found in the cache."""
-    repo = MockRepo(installed={"wget"})
+async def test_is_satisfied_true_when_installed_with_receipt(
+    tmp_path: Path,
+) -> None:
+    """Test that is_satisfied returns True when the keg has a valid receipt."""
+    keg = tmp_path / "wget" / "1.21.4"
+    keg.mkdir(parents=True)
+    (keg / "INSTALL_RECEIPT.json").write_text(json.dumps({}))
+
+    repo = MockRepo(installed={"wget": str(keg)})
     adapter = RepositoryCatalogAdapter(repo)
     assert adapter.is_satisfied("wget") is True
-    # queried as a formula
     assert repo.cache_mgr.calls == [("wget", PackageKind.FORMULA)]
 
 
 async def test_is_satisfied_false_when_absent() -> None:
     """Test that is_satisfied returns False when the package is absent from the cache."""
-    repo = MockRepo(installed=set())
+    repo = MockRepo(installed={})
+    adapter = RepositoryCatalogAdapter(repo)
+    assert adapter.is_satisfied("wget") is False
+
+
+async def test_is_satisfied_false_when_keg_has_no_receipt(tmp_path: Path) -> None:
+    """Test that is_satisfied returns False for a keg with no INSTALL_RECEIPT.json.
+
+    This is the interrupted-install case: the keg directory exists in the Cellar
+    but the install pipeline never completed, so there is no receipt.
+    """
+    keg = tmp_path / "wget" / "1.21.4"
+    keg.mkdir(parents=True)
+
+    repo = MockRepo(installed={"wget": str(keg)})
+    adapter = RepositoryCatalogAdapter(repo)
+    assert adapter.is_satisfied("wget") is False
+
+
+async def test_is_satisfied_false_when_pkg_has_no_path() -> None:
+    """Test that is_satisfied returns False when find_installed returns a Package with no path."""
+    repo = MockRepo(installed={"wget": None})
     adapter = RepositoryCatalogAdapter(repo)
     assert adapter.is_satisfied("wget") is False
 

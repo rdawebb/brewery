@@ -349,10 +349,10 @@ class TestUninstall:
         monkeypatch.setattr(svc, "_remove_formula", _boom)
 
         # mock_brew logs but does not delete the keg, so _verify_removed sees it
-        count, failures = await repo.uninstall_packages(
+        removed, failures = await repo.uninstall_packages(
             ["yazi"], kind=PackageKind.FORMULA
         )
-        assert count == 0
+        assert removed == []
         assert failures == [("yazi", "uninstall failed")]
 
     async def test_uninstall_removed_package_is_success(self, repo, mock_env) -> None:
@@ -360,10 +360,10 @@ class TestUninstall:
         import shutil
 
         shutil.rmtree(mock_env.cellar / "yazi")
-        count, failures = await repo.uninstall_packages(
+        removed, failures = await repo.uninstall_packages(
             ["yazi"], kind=PackageKind.FORMULA
         )
-        assert count == 1
+        assert "yazi" in removed
         assert failures == []
 
     async def test_unknown_kind_resolves_via_installed(self, catalog, mock_env) -> None:
@@ -386,14 +386,14 @@ class TestUninstall:
             return names
 
         repo = _repo_with_providers(catalog, cask=mock_cask_uninstall)
-        count, failures = await repo.uninstall_packages(["yazi", "iina"])
-        assert count == 2
+        removed, failures = await repo.uninstall_packages(["yazi", "iina"])
+        assert len(removed) == 2
         assert failures == []
 
     async def test_unknown_kind_not_installed_is_not_found(self, repo) -> None:
         """Test that an uninstall target that is not installed is 'not found'."""
-        count, failures = await repo.uninstall_packages(["ripgrep"])
-        assert count == 0
+        removed, failures = await repo.uninstall_packages(["ripgrep"])
+        assert removed == []
         assert failures == [("ripgrep", "not found")]
 
     async def test_uninstall_routes_formula_native_and_cask_providers(
@@ -411,10 +411,10 @@ class TestUninstall:
         _install_formula(mock_env.cellar, "openssl")
         _install_formula(mock_env.cellar, "curl", deps=["openssl"])
         repo.cache_mgr.invalidate()
-        count, failures = await repo.uninstall_packages(
+        removed, failures = await repo.uninstall_packages(
             ["openssl"], kind=PackageKind.FORMULA
         )
-        assert count == 0
+        assert removed == []
         assert failures == [("openssl", "required by curl")]
         assert (mock_env.cellar / "openssl").exists()
 
@@ -423,10 +423,10 @@ class TestUninstall:
         _install_formula(mock_env.cellar, "openssl")
         _install_formula(mock_env.cellar, "curl", deps=["openssl"])
         repo.cache_mgr.invalidate()
-        count, failures = await repo.uninstall_packages(
+        removed, failures = await repo.uninstall_packages(
             ["openssl", "curl"], kind=PackageKind.FORMULA
         )
-        assert count == 2
+        assert len(removed) == 2
         assert failures == []
         assert not (mock_env.cellar / "openssl").exists()
 
@@ -445,8 +445,8 @@ class TestUninstall:
         self, repo, mock_brew, mock_env
     ) -> None:
         """Formula uninstall removes the keg via the native path, not brew."""
-        count, _ = await repo.uninstall_packages(["yazi"], kind=PackageKind.FORMULA)
-        assert count == 1
+        removed, _ = await repo.uninstall_packages(["yazi"], kind=PackageKind.FORMULA)
+        assert "yazi" in removed
         assert not (mock_env.cellar / "yazi").exists()
         assert _provider_calls(mock_brew, "uninstall") == []
 
@@ -560,3 +560,150 @@ class TestUpgrade:
         await repo.upgrade_packages(kind=PackageKind.CASK)
         flat = [arg for call in _provider_calls(mock_brew, "upgrade") for arg in call]
         assert "act" not in flat
+
+    async def test_native_upgrade_bumps_version_and_retains_old(
+        self, brew, empty_catalog, monkeypatch
+    ) -> None:
+        """Test that a native upgrade links the new version and keeps the old as a stamped stale keg."""
+        from pathlib import Path
+
+        import orjson
+
+        import brewery.providers.install_service as install_svc
+        import brewery.providers.orchestrator as orch_mod
+        from brewery.core import config
+        from brewery.core.repo import Repository
+        from brewery.core.shell import BrewResult
+        from brewery.providers.manifest import BottleTabInfo
+
+        # Installed state: wget 1.0, opt -> 1.0, minimal receipt
+        brew.formula(
+            "wget",
+            "1.0",
+            receipt={
+                "source": {"tap": "homebrew/core"},
+                "runtime_dependencies": [],
+                "installed_on_request": True,
+            },
+            link_opt=True,
+        )
+        monkeypatch.setattr(config, "_env_cache", brew.env)
+
+        # Catalog: wget 2.0 WITH bottle fields
+        empty_catalog.write_formulae(
+            [
+                {
+                    "name": "wget",
+                    "desc": None,
+                    "homepage": None,
+                    "tap": "homebrew/core",
+                    "version": "2.0",
+                    "revision": 0,
+                    "version_scheme": 0,
+                    "keg_only": 0,
+                    "has_service": 0,
+                    "post_install": 0,
+                    "bottle_url": "https://ghcr.io/v2/homebrew/core/wget/blobs/sha256:dead",
+                    "bottle_sha256": "d" * 64,
+                    "bottle_cellar": ":any_skip_relocation",
+                    "bottle_rebuild": 0,
+                    "deprecated": 0,
+                    "disabled": 0,
+                }
+            ],
+            [],
+            [],
+        )
+
+        # The keg the mocked download+extract hands back.
+        staged = brew.prefix.parent / "staged_wget"
+        (staged / "bin").mkdir(parents=True)
+        (staged / "bin" / "wget").write_text("v2")
+
+        class MockDownloader:
+            def __init__(self, cache_dir, client):  # build_orchestrator's call shape
+                """Initialise the mock downloader with a cache directory and client."""
+                pass
+
+            async def fetch(self, ref) -> Path:
+                """Return a mock Path for the wget tarball.
+
+                Args:
+                    ref: The reference to fetch (unused).
+
+                Returns:
+                    A Path object pointing to the fake wget tarball.
+                """
+                return Path("/fake/wget.tar.gz")
+
+        async def mock_tab(
+            client, *, name, version, bottle_sha256, revision, rebuild
+        ) -> BottleTabInfo:
+            """Return a mock BottleTabInfo for the wget package.
+
+            Args:
+                name: The package name.
+                version: The package version.
+                bottle_sha256: The SHA-256 hash of the bottle.
+                revision: The revision number.
+                rebuild: Whether the bottle needs to be rebuilt.
+
+            Returns:
+                A BottleTabInfo object with mock data for the wget package.
+            """
+            return BottleTabInfo(
+                homebrew_version="5.1",
+                changed_files=[],
+                source_modified_time=1,
+                compiler="clang",
+                runtime_dependencies=[],
+                arch="x86_64",
+                built_on={"os": "Macintosh"},
+                path_exec_files=[],
+                installed_size=None,
+            )
+
+        monkeypatch.setattr(install_svc, "Downloader", MockDownloader)
+        monkeypatch.setattr(install_svc, "fetch_bottle_tab", mock_tab)
+        monkeypatch.setattr(orch_mod, "extract_bottle", lambda bp, st: staged)
+        monkeypatch.setattr(orch_mod, "relocate_keg", lambda *a, **k: None)
+
+        # Defensive: a stray fallback must never reach the real brew binary
+        async def no_brew(args, *, output=None, check=None):
+            """Raise an exception to ensure no real brew call is made.
+
+            Args:
+                args: The command-line arguments for the brew call.
+                output: The output file path (unused).
+                check: Whether to raise an exception on non-zero return code (unused).
+
+            Returns:
+                A BrewResult object with empty stdout/stderr and returncode 0.
+            """
+            return BrewResult(stdout="", stderr="", returncode=0)
+
+        monkeypatch.setattr("brewery.providers.brew.run_brew", no_brew)
+
+        repo = Repository(catalog=empty_catalog)
+        upgraded, _current, failures = await repo.upgrade_packages(["wget"])
+
+        # Version bump reported
+        assert [p.name for p in upgraded] == ["wget"]
+        assert upgraded[0].versions[0] == "2.0"
+        assert failures == []
+
+        # New keg linked; opt and the prefix link point at 2.0
+        new = brew.cellar / "wget" / "2.0"
+        assert new.exists()
+        assert Path((brew.prefix / "opt" / "wget").resolve()) == new
+        assert Path((brew.prefix / "bin" / "wget").resolve()) == new / "bin" / "wget"
+
+        # Old keg retained as a stale version and stamped for cleanup
+        old = brew.cellar / "wget" / "1.0"
+        assert old.exists()
+        sidecar = orjson.loads((old / ".brewery_replaced.json").read_text())
+        assert sidecar["replaced_by"] == "2.0"
+
+        # The rescan resolves the active version to 2.0 (1.0 is now a stale version)
+        pkg = next(p for p in repo.get_all_installed() if p.name == "wget")
+        assert pkg.versions[0] == "2.0"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
 from brewery.core.cache import Cache, CacheManager
@@ -169,7 +170,7 @@ class Repository:
             kind: Kind of the package(s) (formula or cask).
 
         Returns:
-            Number of successes, and list of failures
+            List of successfully removed package names, and list of (name, reason) failures
 
         Raises:
             BrewCommandError: Propagated from provider.
@@ -329,12 +330,18 @@ class Repository:
             p.name: (p.versions[0] if p.versions else None) for p in targets
         }
 
-        for pkg_names, provider in [
-            (formula_names, self.formula),
-            (cask_names, self.cask),
-        ]:
-            if pkg_names:
-                await provider.upgrade(names=pkg_names)
+        if formula_names:
+            from brewery.providers.upgrade_service import run_upgrade
+
+            old_kegs = {
+                p.name: Path(p.path)
+                for p in targets
+                if p.kind == PackageKind.FORMULA and p.path
+            }
+            await run_upgrade(self, formula_names, old_kegs, run_brew=run_brew)
+
+        if cask_names:
+            await self.cask.upgrade(names=cask_names)
 
         self.cache_mgr.invalidate()
 
