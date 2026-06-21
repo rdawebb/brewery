@@ -70,6 +70,10 @@ KNOWN_COMMANDS: set[str] = {
     "upgrade",
     "u",
     "up",
+    # Cleanup commands/aliases
+    "cleanup",
+    "c",
+    "clean",
     # Daemon commands/aliases
     "daemon",
     "d",
@@ -536,6 +540,40 @@ def upgrade(
             style="bold yellow",
         )
         sys.exit(130)
+
+    except Exception as e:
+        sys.exit(handle_error(error=e))
+
+
+@app.command(name="cleanup", aliases=["c", "clean"])
+def cleanup() -> None:
+    """Remove old package versions."""
+    try:
+        with _repository() as repo:
+            app.echo()
+            with console.status(
+                status="[bold yellow]Cleaning up...[/bold yellow]", refresh_per_second=5
+            ):
+                removed, failures = _async_run(coro=repo.cleanup_packages())
+
+            if not removed and not failures:
+                console.print("✓ Nothing to clean up\n", style="bold green")
+                return
+
+            console.print(
+                f"✓ Removed {len(removed)} old version(s)\n", style="bold green"
+            )
+            for label in removed:
+                console.print(f"  [dim]-[/dim] {label}")
+
+            if failures:
+                console.print(
+                    f"\n✗ {len(failures)} could not be removed:", style="bold red"
+                )
+                for label, reason in failures:
+                    console.print(f"  [dim]-[/dim] {label} - {reason}")
+
+            app.echo()
 
     except Exception as e:
         sys.exit(handle_error(error=e))

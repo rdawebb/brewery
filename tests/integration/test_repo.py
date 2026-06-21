@@ -707,3 +707,43 @@ class TestUpgrade:
         # The rescan resolves the active version to 2.0 (1.0 is now a stale version)
         pkg = next(p for p in repo.get_all_installed() if p.name == "wget")
         assert pkg.versions[0] == "2.0"
+
+
+class TestCleanup:
+    """Tests for Repository.cleanup_packages."""
+
+    async def test_cleanup_removes_old_keeps_active_and_recent(
+        self, brew, empty_catalog, monkeypatch
+    ) -> None:
+        """Test that cleanup removes old stale versions, keeps active and recent versions."""
+        import time
+
+        from brewery.core import config
+        from brewery.core.repo import Repository
+        from brewery.providers.retention import mark_replaced
+
+        DAY = 86400
+        brew.formula(
+            "wget",
+            "2.0",
+            receipt={"source": {"tap": "homebrew/core"}, "runtime_dependencies": []},
+            link_opt=True,  # opt -> 2.0, so fs_state marks it active
+        )
+        monkeypatch.setattr(config, "_env_cache", brew.env)
+
+        cellar = brew.cellar
+        old = cellar / "wget" / "1.0"
+        old.mkdir(parents=True)
+        recent = cellar / "wget" / "3.0"
+        recent.mkdir(parents=True)
+        now = int(time.time())
+        mark_replaced(old, by="2.0", at=now - 40 * DAY)
+        mark_replaced(recent, by="2.0", at=now - 2 * DAY)
+
+        removed, failures = await Repository(catalog=empty_catalog).cleanup_packages()
+
+        assert removed == ["wget 1.0"]
+        assert failures == []
+        assert not old.exists()  # Old stale: removed
+        assert recent.exists()  # Recent stale: kept
+        assert (cellar / "wget" / "2.0").exists()  # Active: kept

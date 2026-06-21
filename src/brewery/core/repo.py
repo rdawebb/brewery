@@ -363,3 +363,42 @@ class Repository:
                 current.append(pkg)
 
         return upgraded, current, failures
+
+    @log_operation(event_prefix="cleanup")
+    async def cleanup_packages(
+        self, max_age_days: int = 30
+    ) -> tuple[list[str], list[tuple[str, str]]]:
+        """Remove stale kegs replaced more than max_age_days ago.
+
+        Args:
+            max_age_days: Age threshold in days, defaults to 30.
+
+        Returns:
+            Tuple of (removed "name version" strings, (label, reason) failures).
+        """
+        import asyncio
+
+        from brewery.providers.cellar import rmtree
+        from brewery.providers.retention import cleanup_candidates
+
+        env = self.cache_mgr.env or get_brewery_env()
+        installed = self.cache_mgr.installed_packages(kind=PackageKind.FORMULA)
+        active = {Path(p.path) for p in installed if p.path}
+
+        removed: list[str] = []
+        failures: list[tuple[str, str]] = []
+        for c in cleanup_candidates(
+            env.cellar, active=active, max_age_days=max_age_days
+        ):
+            label = f"{c.name} {c.version}"
+            try:
+                await asyncio.to_thread(rmtree, c.keg)
+                removed.append(label)
+
+            except OSError as e:
+                failures.append((label, str(e)))
+
+        if removed:
+            self.cache_mgr.invalidate()
+
+        return removed, failures
