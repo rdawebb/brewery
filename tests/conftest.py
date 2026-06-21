@@ -156,6 +156,7 @@ def mock_env(tmp_path, monkeypatch) -> BreweryENV:
         repository=prefix / "Library" / "Homebrew",
         api_path=cache / "api" / "formula.jws.json",
         bottle_cache=cache,
+        cache=tmp_path / "brewery_cache",
     )
     monkeypatch.setattr(config, "_env_cache", env)
 

@@ -23,6 +23,7 @@ class BreweryENV:
     repository: Path
     api_path: Path
     bottle_cache: Path
+    cache: Path
 
 
 _DEF_CACHE = Path(
@@ -117,6 +118,7 @@ def get_brewery_env() -> BreweryENV:
         repository=repository,
         api_path=api_path,
         bottle_cache=bottle_cache,
+        cache=ensure_cache_dir(),
     )
 
     return _env_cache

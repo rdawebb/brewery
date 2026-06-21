@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from unit.stubs import MockClient, MockRepo, _run_brew
+from _stubs import MockClient, MockRepo, _run_brew
 
 import brewery.providers.upgrade_service as svc
 

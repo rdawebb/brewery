@@ -200,4 +200,5 @@ class TestGetBreweryEnv:
             repository=Path("/custom/brew/Homebrew"),
             api_path=FORMULA_API_PATH,
             bottle_cache=HOMEBREW_CACHE,
+            cache=cache_dir,
         )

@@ -38,7 +38,6 @@ module-name = "brewery"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-pythonpath = ["tests"]
 markers = [
   "unit: fast isolated tests with no subprocess or network",
   "integration: tests that exercise the provider pipeline against fixtures",
