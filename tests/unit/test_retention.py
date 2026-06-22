@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from brewery.providers.retention import cleanup_candidates, mark_replaced
+from brewery.providers.retention import (
+    _stamp_path,
+    cleanup_candidates,
+    due_for_cleanup,
+    mark_cleanup_run,
+    mark_replaced,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -70,3 +76,32 @@ class TestCleanupCandidates:
     def test_missing_cellar_is_empty(self, tmp_path) -> None:
         """Test that a missing cellar is empty."""
         assert cleanup_candidates(tmp_path / "nope", active=set()) == []
+
+
+class TestCleanupGate:
+    """Tests for the cleanup gate."""
+
+    def test_missing_stamp_is_due(self, tmp_path) -> None:
+        """Test that a missing stamp is due for cleanup."""
+        assert due_for_cleanup(tmp_path) is True
+
+    def test_recent_stamp_not_due(self, tmp_path) -> None:
+        """Test that a recent stamp is not due for cleanup."""
+        mark_cleanup_run(tmp_path, at=1000)
+        assert due_for_cleanup(tmp_path, now=1000 + 100) is False
+
+    def test_boundary_is_due(self, tmp_path) -> None:
+        """Test that the boundary is due for cleanup."""
+        mark_cleanup_run(tmp_path, at=1000)
+        assert due_for_cleanup(tmp_path, now=1000 + 86400) is True  # >= interval
+
+    def test_corrupt_stamp_is_due(self, tmp_path) -> None:
+        """Test that a corrupt stamp is due for cleanup."""
+        _stamp_path(tmp_path).write_text("not-a-number")
+        assert due_for_cleanup(tmp_path) is True  # ValueError -> due
+
+    def test_mark_round_trip_atomic(self, tmp_path) -> None:
+        """Test that mark_cleanup_run is atomic."""
+        mark_cleanup_run(tmp_path, at=12345)
+        assert _stamp_path(tmp_path).read_text() == "12345"
+        assert list(tmp_path.glob("*.tmp")) == []  # No temp left behind

@@ -82,7 +82,7 @@ def _patch_executable_paths(plist_path: Path) -> None:
 
 @daemon_app.command(aliases=["a", "add"])
 def start() -> None:
-    """Activate the background refresh daemon."""
+    """Activate the background daemon."""
     LAUNCH_AGENTS.mkdir(parents=True, exist_ok=True)
 
     # If already bootstrapped, cycle it out first
@@ -112,7 +112,7 @@ def start() -> None:
 
 @daemon_app.command(aliases=["d", "rm"])
 def stop() -> None:
-    """Deactivate the background refresh daemon."""
+    """Deactivate the background daemon."""
     if not PLIST_DEST.exists():
         console.print("\nDaemon is not installed\n", style="bold yellow")
         sys.exit(1)
@@ -124,7 +124,7 @@ def stop() -> None:
 
 @daemon_app.command(aliases=["r"])
 def restart() -> None:
-    """Restart the background refresh daemon."""
+    """Restart the background daemon."""
     stop()
     start()
 
@@ -139,13 +139,17 @@ def status() -> None:
     )
 
     if result.returncode == 0:
-        console.print("\n✓ Background refresh is active\n", style="bold green")
+        console.print(
+            "\n✓ Background refresh + cleanup is active\n", style="bold green"
+        )
         console.print(
             "  Use [bold]brewery daemon stop[/bold] to deactivate\n", style="dim"
         )
 
     else:
-        console.print("\n✗ Background refresh is not active\n", style="bold red")
+        console.print(
+            "\n✗ Background refresh + cleanup is not active\n", style="bold red"
+        )
         console.print(
             "  Use [bold]brewery daemon start[/bold] to activate\n", style="dim"
         )

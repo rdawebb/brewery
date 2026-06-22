@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import httpx
 import orjson
 import pytest
 
 from brewery.core.catalog import api
+from brewery.daemon import catalog_refresh as cr
 from brewery.daemon.catalog_refresh import refresh_catalog
+from brewery.providers import retention
 
 pytestmark = pytest.mark.integration
 
@@ -259,3 +263,89 @@ class TestClientLifecycle:
         )
         await refresh_catalog(empty_catalog, client=client)
         assert client.closed is False
+
+
+class TestMaybeCleanup:
+    """Tests for the daemon _maybe_cleanup helper."""
+
+    def _patch(self, monkeypatch, *, due, cleanup=None) -> tuple[list, list]:
+        """Sets up the mock environment for testing _maybe_cleanup.
+
+        Args:
+            monkeypatch: The monkeypatch fixture for modifying attributes.
+            due: Whether the cleanup is due.
+            cleanup: Optional cleanup function to simulate a failure.
+
+        Returns:
+            A tuple of the calls list and marks list."""
+        monkeypatch.setattr(
+            "brewery.core.config.ensure_cache_dir", lambda: Path("/cache")
+        )
+        monkeypatch.setattr(retention, "due_for_cleanup", lambda cache_dir, **k: due)
+
+        marks: list = []
+        monkeypatch.setattr(
+            retention,
+            "mark_cleanup_run",
+            lambda cache_dir, **k: marks.append(cache_dir),
+        )
+
+        calls: list = []
+
+        class MockRepo:
+            """Simulates a Repository for testing cleanup behavior."""
+
+            def __init__(self, catalog=None) -> None:
+                """Initialises the MockRepo with an optional catalog.
+
+                Args:
+                    catalog: The catalog to use for the repository.
+                """
+                calls.append("init")
+
+            async def cleanup_packages(self) -> tuple[list, list]:
+                """Simulates the cleanup_packages method, returning any cleanup results.
+
+                Returns:
+                    The cleanup results.
+                """
+                calls.append("cleanup")
+
+                return cleanup() if cleanup is not None else ([], [])
+
+        monkeypatch.setattr("brewery.core.repo.Repository", MockRepo)
+
+        return calls, marks
+
+    async def test_skips_when_not_due(self, monkeypatch, empty_catalog) -> None:
+        """Tests that not due -> Repository never constructed, stamp untouched."""
+        calls, marks = self._patch(monkeypatch, due=False)
+        await cr._maybe_cleanup(empty_catalog)
+        assert calls == []
+        assert marks == []
+
+    async def test_runs_and_stamps_when_due(self, monkeypatch, empty_catalog) -> None:
+        """Tests that due -> sweep runs and the stamp is written after a clean run."""
+        calls, marks = self._patch(
+            monkeypatch, due=True, cleanup=lambda: (["wget 1.0"], [])
+        )
+        await cr._maybe_cleanup(empty_catalog)
+        assert "cleanup" in calls
+        assert marks == [Path("/cache")]
+
+    async def test_failure_isolated_and_not_stamped(
+        self, monkeypatch, empty_catalog
+    ) -> None:
+        """Tests that a sweep failure is swallowed (no raise) and NOT stamped, so it retries."""
+
+        def boom() -> None:
+            """Raises OSError to simulate a failure.
+
+            Raises:
+                OSError: Always raised to simulate a failure."""
+            raise OSError("permission denied")
+
+        calls, marks = self._patch(monkeypatch, due=True, cleanup=boom)
+        await cr._maybe_cleanup(empty_catalog)  # Should not raise
+        assert "cleanup" in calls
+        assert marks == []

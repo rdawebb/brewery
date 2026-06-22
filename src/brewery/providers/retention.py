@@ -111,3 +111,51 @@ def cleanup_candidates(
         pass
 
     return candidates
+
+
+def _stamp_path(cache_dir: Path) -> Path:
+    """Fetch the path to the Brewery cleanup stamp file.
+
+    Args:
+        cache_dir: Brewery cache directory holding the last-run stamp.
+
+    Returns:
+        Path to the stamp file.
+    """
+    return cache_dir / ".brewery_cleanup_stamp"
+
+
+def due_for_cleanup(
+    cache_dir: Path, *, interval_days: int = 1, now: int | None = None
+) -> bool:
+    """Whether a cleanup sweep is due (last run older than interval, or never).
+
+    Args:
+        cache_dir: Brewery cache directory holding the last-run stamp.
+        interval_days: Minimum days between sweeps.
+        now: Unix epoch seconds; defaults to now.
+
+    Returns:
+        True if no stamp exists or it predates the interval.
+    """
+    at = now if now is not None else int(time.time())
+    try:
+        last = int(_stamp_path(cache_dir).read_text())
+
+    except (OSError, ValueError):
+        return True
+
+    return at - last >= interval_days * 86400
+
+
+def mark_cleanup_run(cache_dir: Path, *, at: int | None = None) -> None:
+    """Record that a cleanup sweep just ran.
+
+    Args:
+        cache_dir: Brewery cache directory.
+        at: Unix epoch seconds; defaults to now.
+    """
+    stamp = _stamp_path(cache_dir)
+    tmp = stamp.with_name(stamp.name + ".tmp")
+    tmp.write_text(str(at if at is not None else int(time.time())))
+    os.replace(tmp, stamp)
