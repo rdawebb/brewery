@@ -1,4 +1,4 @@
-# Install project & fix entry point
+# Install project
 install:
     uv sync
 

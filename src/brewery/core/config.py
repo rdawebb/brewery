@@ -122,3 +122,19 @@ def get_brewery_env() -> BreweryENV:
     )
 
     return _env_cache
+
+
+def get_config_dir() -> Path:
+    """Resolve the brewery config directory (XDG, overridable for tests).
+
+    Returns:
+        $BREWERY_CONFIG_HOME, else $XDG_CONFIG_HOME/brewery, else ~/.config/brewery.
+    """
+    override = os.environ.get("BREWERY_CONFIG_HOME")
+    if override:
+        return Path(override)
+
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".config"
+
+    return base / "brewery"

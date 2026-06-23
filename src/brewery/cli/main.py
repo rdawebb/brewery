@@ -412,8 +412,8 @@ def outdated(
         with _repository() as repo:
             pkgs: list[Package]
 
+            app.echo()
             if check:
-                app.echo()
                 with console.status(
                     status="[bold yellow]Checking for updates...[/bold yellow]",
                     refresh_per_second=5,
@@ -428,10 +428,10 @@ def outdated(
                 pkgs = repo.get_outdated()
 
             if not pkgs:
-                console.print("\n✓ All packages are up to date!\n", style="bold green")
+                console.print("✓ All packages are up to date!\n", style="bold green")
                 return
 
-            console.print(f"\n• {len(pkgs)} outdated package(s)\n", style="bold yellow")
+            console.print(f"• {len(pkgs)} outdated package(s)\n", style="bold yellow")
             for pkg in pkgs:
                 latest = pkg.metadata.get("latest_version")
                 console.print(f"  [dim]-[/dim] {pkg.name} → {latest}")
