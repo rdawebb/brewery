@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import orjson
@@ -351,6 +352,32 @@ class TestLinkExplosion:
         assert _points_to(x11 / "Xlib.h", b / "include/X11/Xlib.h")  # B linked
         assert "include/X11/Xlib.h" in res.linked
 
+    def test_explosion_relinks_valid_under_symlinked_prefix(self, tmp_path) -> None:
+        """The displaced keg is relinked correctly even when a prefix ancestor is a
+        symlink that redirects to a different depth (like macOS /var ->
+        /private/var): the relink must not dangle."""
+        real = tmp_path / "private" / "var"
+        real.mkdir(parents=True)
+        linkroot = tmp_path / "var"
+        linkroot.symlink_to(real)  # var -> private/var: an extra level, like macOS
+        prefix = linkroot / "prefix"
+        prefix.mkdir()
+
+        cellar = prefix / "Cellar"
+        a = cellar / "xorgproto/2025.1"
+        _mk(a, "include/X11/Xfuncproto.h", "AAA")
+        b = cellar / "libx11/1.8.13"
+        _mk(b, "include/X11/Xlib.h", "BBB")
+
+        link_keg(a, prefix=prefix, name="xorgproto")
+        link_keg(b, prefix=prefix, name="libx11")  # Explodes, relinking A
+
+        x11 = prefix / "include/X11"
+        assert x11.is_dir() and not x11.is_symlink()
+        # read_text() raises if the relative symlink dangles (the bug)
+        assert (x11 / "Xfuncproto.h").read_text() == "AAA"  # Displaced keg
+        assert (x11 / "Xlib.h").read_text() == "BBB"  # New keg
+
     def test_third_keg_descends_real_dir(self, tmp_path, prefix) -> None:
         """Test that a third keg correctly descends an already-exploded real directory."""
         cellar = tmp_path / "Cellar"
@@ -490,6 +517,67 @@ class TestLinkExplosion:
         assert (
             linker._merge_collisions(Path("/prefix/objs"), a / "objs", b / "objs") == []
         )
+
+
+class TestLinkConcurrency:
+    """The structure lock keeps concurrent links from clobbering shared dirs."""
+
+    def test_plan_routes_whole_dir_and_leaf_links_separately(
+        self, tmp_path, prefix
+    ) -> None:
+        """A whole-dir link lands in dir_links (serialised); leaf files in links."""
+        keg = tmp_path / "Cellar" / "libx11" / "1.8"
+        _mk(keg, "include/X11/Xlib.h")  # include/X11 -> whole-dir symlink
+        _mk(keg, "bin/xtool")  # leaf file -> lock-free
+
+        plan = linker._build_plan(keg, prefix)
+        dir_dsts = {dst for dst, _ in plan.dir_links}
+        leaf_dsts = {dst for dst, _ in plan.links}
+
+        assert prefix / "include/X11" in dir_dsts
+        assert prefix / "bin/xtool" in leaf_dsts
+        assert dir_dsts.isdisjoint(leaf_dsts)
+
+    def test_concurrent_links_sharing_a_dir_dont_clobber(
+        self, tmp_path, prefix
+    ) -> None:
+        """Many kegs sharing a whole-dir directory link without losing any keg.
+
+        All plans are built against the empty prefix (so each independently wants
+        to own include/X11), then applied from threads released together. Without
+        the structure lock the whole-dir symlinks race and clobber; with it the
+        first owns it and the rest explode/descend into a merged real directory.
+        """
+        cellar = tmp_path / "Cellar"
+        n = 8
+        kegs = [(cellar / f"lib{i}" / "1.0", f"lib{i}") for i in range(n)]
+        for i, (keg, _) in enumerate(kegs):
+            _mk(keg, f"include/X11/h{i}.h")  # shared whole-dir directory
+            _mk(keg, f"bin/tool{i}")  # distinct leaf file
+
+        barrier = threading.Barrier(n)
+        errors: list[Exception] = []
+
+        def worker(keg: Path, name: str) -> None:
+            barrier.wait()  # Maximise overlap of the apply phase
+            try:
+                link_keg(keg, prefix=prefix, name=name)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=kv) for kv in kegs]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, errors
+
+        x11 = prefix / "include/X11"
+        assert x11.is_dir() and not x11.is_symlink()  # Merged into a real dir
+        for i, (keg, _) in enumerate(kegs):
+            assert _points_to(x11 / f"h{i}.h", keg / f"include/X11/h{i}.h")
+            assert _points_to(prefix / "bin" / f"tool{i}", keg / "bin" / f"tool{i}")
 
 
 class TestUnlink:
@@ -682,7 +770,11 @@ def test_plan_matches_brew_links() -> None:
     plan = linker._build_plan(keg, prefix)
 
     # Against an already-linked keg, every target lands in `already`, not `links`
-    brewery_links = {str(dst) for dst, _ in plan.links} | {str(p) for p in plan.already}
+    brewery_links = (
+        {str(dst) for dst, _ in plan.links}
+        | {str(dst) for dst, _ in plan.dir_links}
+        | {str(p) for p in plan.already}
+    )
 
     # brew's real links into this keg, restricted to the eligible roots.
     keg_real = os.path.realpath(keg)
