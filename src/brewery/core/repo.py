@@ -382,17 +382,21 @@ class Repository:
         from brewery.providers.cellar import rmtree
         from brewery.providers.retention import cleanup_candidates
 
+        s = load_settings().retention
+        age = s.age_days if max_age_days is None else max_age_days
+
         env = self.cache_mgr.env or get_brewery_env()
         installed = self.cache_mgr.installed_packages(kind=PackageKind.FORMULA)
         active = {Path(p.path) for p in installed if p.path}
 
-        if max_age_days is None:
-            max_age_days = load_settings().retention.age_days
-
         removed: list[str] = []
         failures: list[tuple[str, str]] = []
         for c in cleanup_candidates(
-            env.cellar, active=active, max_age_days=max_age_days
+            env.cellar,
+            active=active,
+            max_age_days=age,
+            max_versions=s.max_versions,
+            max_cellar_mb=s.max_cellar_mb,
         ):
             label = f"{c.name} {c.version}"
             try:

@@ -701,7 +701,7 @@ class TestUpgrade:
         # Old keg retained as a stale version and stamped for cleanup
         old = brew.cellar / "wget" / "1.0"
         assert old.exists()
-        sidecar = orjson.loads((old / ".brewery_replaced.json").read_text())
+        sidecar = orjson.loads((old / ".brewery_replaced.json").read_bytes())
         assert sidecar["replaced_by"] == "2.0"
 
         # The rescan resolves the active version to 2.0 (1.0 is now a stale version)

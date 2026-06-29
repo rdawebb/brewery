@@ -885,7 +885,7 @@ def unlink_keg(keg_dir: Path, *, prefix: Path, name: str) -> UnlinkResult:
     result = UnlinkResult()
 
     try:
-        manifest = orjson.loads((keg_dir / _LINK_MANIFEST).read_text())
+        manifest = orjson.loads((keg_dir / _LINK_MANIFEST).read_bytes())
         candidates: list[str] = manifest["linked"]
         prune_targets: set[str] = set(manifest.get("created_dirs", []))
 

@@ -305,7 +305,7 @@ class Orchestrator:
         tab_fetcher: TabFetcher,
         brew: BrewPort,
         config: InstallConfig,
-        install_concurrency: int = 1,
+        install_concurrency: int = 4,
         tab_concurrency: int = 8,
     ) -> None:
         """Initialises the orchestrator.

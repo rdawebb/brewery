@@ -590,7 +590,7 @@ class TestUnlink:
         _mk(keg, "bin/tool", "x")
         _mk(keg, "lib/libfoo.dylib", "y")
         link_keg(keg, prefix=prefix, name="tool")
-        data = orjson.loads((keg / _LINK_MANIFEST).read_text())
+        data = orjson.loads((keg / _LINK_MANIFEST).read_bytes())
         assert set(data["linked"]) == {"bin/tool", "lib/libfoo.dylib"}
 
     def test_unlink_removes_recorded_links(self, tmp_path, prefix) -> None:
