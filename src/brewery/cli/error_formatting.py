@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+from rich.console import Console
+
 from brewery.core.errors import (
+    EXIT_SYSTEM_ERROR,
+    EXIT_TRANSIENT_ERROR,
+    EXIT_USER_ERROR,
     AlreadyInstalledWarning,
     BrewCommandError,
     BrewError,
@@ -14,6 +19,11 @@ from brewery.core.errors import (
     TransientError,
     UserError,
 )
+from brewery.core.logging import BreweryLogger, get_logger
+
+log: BreweryLogger = get_logger(name=__name__)
+
+console = Console(emoji=False, highlighter=None)
 
 ERROR_TEMPLATES: dict[type[BrewError], str] = {
     AlreadyInstalledWarning: (
@@ -89,3 +99,48 @@ def suggest_search(package_name: str) -> str:
         "   • Check for spelling and try again\n"
         "   • Visit https://formulae.brew.sh/ to browse available packages\n"
     )
+
+
+def handle_error(error: Exception) -> int:
+    """Handle errors and return appropriate exit codes.
+
+    Args:
+        error: The exception to handle.
+
+    Returns:
+        An integer exit code.
+    """
+    if isinstance(error, BrewError):
+        try:
+            log.error(
+                event="cli_error",
+                error_type=type(error).__name__,
+                message=error.message,
+                context=getattr(error, "context", {}),
+                exc_info=True,
+            )
+        except Exception:
+            pass
+
+        console.print(f"\n{format_error_message(error)}\n", style="bold red")
+
+        if isinstance(error, PackageNotFoundError):
+            package: str = getattr(error, "context", {}).get("package", "")
+            console.print(suggest_search(package_name=package), style="dim")
+
+        if isinstance(error, TransientError):
+            return EXIT_TRANSIENT_ERROR
+
+        elif isinstance(error, UserError):
+            return EXIT_USER_ERROR
+
+        elif isinstance(error, SysError):
+            return EXIT_SYSTEM_ERROR
+
+        else:
+            return EXIT_USER_ERROR
+
+    else:
+        log.error(event="unexpected_error", error=str(object=error), exc_info=True)
+        console.print(f"\n⚠ Unexpected error occurred: {error}\n", style="bold red")
+        return EXIT_SYSTEM_ERROR

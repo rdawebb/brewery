@@ -11,18 +11,12 @@ from typing import Any, Coroutine, Optional
 from rich.console import Console
 from typer_extensions import ExtendedTyper
 
-from brewery.cli.error_formatting import format_error_message, suggest_search
+from brewery.cli.config import config_app
+from brewery.cli.error_formatting import handle_error
 from brewery.core.errors import (
     EXIT_SYSTEM_ERROR,
-    EXIT_TRANSIENT_ERROR,
-    EXIT_USER_ERROR,
     AlreadyInstalledWarning,
-    BrewError,
-    PackageNotFoundError,
     PinnedPackageWarning,
-    SysError,
-    TransientError,
-    UserError,
 )
 from brewery.core.logging import BreweryLogger, configure_logging, get_logger
 from brewery.core.models import Package, PackageKind
@@ -39,6 +33,13 @@ app.add_typer(
     aliases=["d"],
     help="Manage the Brewery background refresh daemon.",
 )
+app.add_typer(
+    config_app,
+    name="config",
+    aliases=["cfg"],
+    help="View and manage brewery configuration.",
+)
+
 
 console = Console(emoji=False, highlight=False)
 
@@ -61,7 +62,7 @@ KNOWN_COMMANDS: set[str] = {
     # Uninstall commands/aliases
     "uninstall",
     "rm",
-    "remove",
+    "del",
     # Outdated commands/aliases
     "outdated",
     "o",
@@ -77,52 +78,10 @@ KNOWN_COMMANDS: set[str] = {
     # Daemon commands/aliases
     "daemon",
     "d",
+    # Config commands/aliases
+    "config",
+    "cfg",
 }
-
-
-def handle_error(error: Exception) -> int:
-    """Handle errors and return appropriate exit codes.
-
-    Args:
-        error: The exception to handle.
-
-    Returns:
-        An integer exit code.
-    """
-    if isinstance(error, BrewError):
-        try:
-            log.error(
-                event="cli_error",
-                error_type=type(error).__name__,
-                message=error.message,
-                context=getattr(error, "context", {}),
-                exc_info=True,
-            )
-        except Exception:
-            pass
-
-        console.print(f"\n{format_error_message(error)}\n", style="bold red")
-
-        if isinstance(error, PackageNotFoundError):
-            package: str = getattr(error, "context", {}).get("package", "")
-            console.print(suggest_search(package_name=package), style="dim")
-
-        if isinstance(error, TransientError):
-            return EXIT_TRANSIENT_ERROR
-
-        elif isinstance(error, UserError):
-            return EXIT_USER_ERROR
-
-        elif isinstance(error, SysError):
-            return EXIT_SYSTEM_ERROR
-
-        else:
-            return EXIT_USER_ERROR
-
-    else:
-        log.error(event="unexpected_error", error=str(object=error), exc_info=True)
-        console.print(f"\n⚠ Unexpected error occurred: {error}\n", style="bold red")
-        return EXIT_SYSTEM_ERROR
 
 
 def _brew_passthrough(argv: list[str]) -> int:
@@ -331,7 +290,7 @@ def install(
         sys.exit(handle_error(error=e))
 
 
-@app.command(aliases=["rm", "remove"])
+@app.command(aliases=["rm", "del"])
 def uninstall(
     names: list[str],
     kind: Optional[PackageKind] = app.Option(

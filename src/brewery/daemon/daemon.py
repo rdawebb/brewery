@@ -1,4 +1,4 @@
-"""Daemon CLI sub app for managing the brewery background daemon."""
+"""Daemon CLI subcommand for managing the brewery background daemon."""
 
 import os
 import shutil
