@@ -147,14 +147,18 @@ class Repository:
             p.name: p for p in self.cache_mgr.installed_packages(kind=kind)
         }
 
+        resolved: dict[str, str] = {n: self.catalog.resolve_alias(n) for n in names}
+
         installed: list[Package] = [
-            installed_by_name[n] for n in names if n in installed_by_name
+            installed_by_name[resolved[n]]
+            for n in names
+            if resolved[n] in installed_by_name
         ]
 
         failures: list[tuple[str, str]] = [
             (n, "install failed or not found")
             for n in names
-            if n not in installed_by_name
+            if resolved[n] not in installed_by_name
         ]
 
         return installed, failures
@@ -175,25 +179,35 @@ class Repository:
         Raises:
             BrewCommandError: Propagated from provider.
         """
+        resolved: dict[str, str] = {n: self.catalog.resolve_alias(n) for n in names}
+
         if kind is None:
             # Resolve kinds and split into two lists
             all_pkgs: list[Package] = self.get_all_installed()
             kind_map: dict[str, PackageKind] = {p.name: p.kind for p in all_pkgs}
             formula_names: list[str] = [
-                n for n in names if kind_map.get(n) == PackageKind.FORMULA
+                resolved[n]
+                for n in names
+                if kind_map.get(resolved[n]) == PackageKind.FORMULA
             ]
 
             cask_names: list[str] = [
-                n for n in names if kind_map.get(n) == PackageKind.CASK
+                resolved[n]
+                for n in names
+                if kind_map.get(resolved[n]) == PackageKind.CASK
             ]
 
             failures: list[tuple[str, str]] = [
-                (n, "not found") for n in names if n not in kind_map
+                (n, "not found") for n in names if resolved[n] not in kind_map
             ]
 
         else:
-            formula_names: list[str] = names if kind == PackageKind.FORMULA else []
-            cask_names: list[str] = names if kind == PackageKind.CASK else []
+            formula_names: list[str] = (
+                [resolved[n] for n in names] if kind == PackageKind.FORMULA else []
+            )
+            cask_names: list[str] = (
+                [resolved[n] for n in names] if kind == PackageKind.CASK else []
+            )
             failures: list = []
 
         blocked = self._blocking_dependents(set(formula_names))
@@ -298,10 +312,10 @@ class Repository:
 
         Returns:
             Details of upgraded packages, already up-to-date packages, and any failures.
+            Pinned packages are reported in failures as "pinned - skipped", not upgraded.
 
         Raises:
             BrewCommandError: Propagated from provider.
-            PackagePinnedWarning: If any packages are pinned.
         """
         installed: list[Package] = self.cache_mgr.installed_packages()
         by_name: dict[str, Package] = {p.name: p for p in installed}
@@ -318,8 +332,17 @@ class Repository:
 
         # Upgrade specified
         else:
-            targets = [by_name[n] for n in names if n in by_name]
-            failures = [(n, "not found") for n in names if n not in by_name]
+            resolved: dict[str, str] = {n: self.catalog.resolve_alias(n) for n in names}
+            targets = [by_name[resolved[n]] for n in names if resolved[n] in by_name]
+            failures = [(n, "not found") for n in names if resolved[n] not in by_name]
+
+            # Named upgrades must honour pins
+            failures += [
+                (p.name, "pinned - skipped")
+                for p in targets
+                if PackageStatus.PINNED in p.status
+            ]
+            targets = [p for p in targets if PackageStatus.PINNED not in p.status]
 
         if kind is not None:
             targets = [p for p in targets if p.kind == kind]

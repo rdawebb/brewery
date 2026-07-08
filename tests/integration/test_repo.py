@@ -77,6 +77,20 @@ def _repo_with_providers(catalog, *, formula=None, cask=None) -> Repository:
     )
 
 
+def _add_alias(catalog, alias: str, name: str) -> None:
+    """Register an alias -> canonical name mapping in the catalog.
+
+    Args:
+        catalog: The catalog to write to.
+        alias: The alias a user might type.
+        name: The canonical formula name it resolves to.
+    """
+    with catalog._conn:
+        catalog._conn.execute(
+            "INSERT OR REPLACE INTO alias (alias, name) VALUES (?, ?)", (alias, name)
+        )
+
+
 def _install_formula(cellar, name, version="1.0", deps=()) -> Path:
     """Write a minimal installed keg + receipt so the scan derives used_by.
 
@@ -322,6 +336,19 @@ class TestInstall:
         assert [p.name for p in installed] == ["ripgrep"]
         assert failures == []
 
+    async def test_install_via_alias_verified_by_canonical_name(self, repo) -> None:
+        """Test that an installed alias verifies against its canonical name.
+
+        Requesting "yazi-cli" (an alias for the present "yazi") must report the
+        canonical package as installed.
+        """
+        _add_alias(repo.catalog, "yazi-cli", "yazi")
+        installed, failures = await repo.install_packages(
+            ["yazi-cli"], kind=PackageKind.FORMULA
+        )
+        assert [p.name for p in installed] == ["yazi"]
+        assert failures == []
+
 
 class TestUninstall:
     """Tests for Repository.uninstall_packages."""
@@ -395,6 +422,20 @@ class TestUninstall:
         removed, failures = await repo.uninstall_packages(["ripgrep"])
         assert removed == []
         assert failures == [("ripgrep", "not found")]
+
+    async def test_uninstall_via_alias_resolves_to_canonical(
+        self, catalog, mock_env
+    ) -> None:
+        """Test that an alias is resolved before kind routing and verification.
+
+        Uninstalling "yazi-cli" (an alias for installed "yazi") must route the
+        canonical name to the backend and verify its keg, reporting "yazi" removed.
+        """
+        _add_alias(catalog, "yazi-cli", "yazi")
+        repo = _repo_with_providers(catalog)
+        removed, failures = await repo.uninstall_packages(["yazi-cli"])
+        assert removed == ["yazi"]
+        assert failures == []
 
     async def test_uninstall_routes_formula_native_and_cask_providers(
         self, repo, mock_brew, mock_env
@@ -512,6 +553,21 @@ class TestUpgrade:
         upgraded, current, failures = await repo.upgrade_packages()
         assert ("act", "pinned - skipped") in failures
         assert all(p.name != "act" for p in upgraded)
+
+    async def test_pinned_named_package_skipped_on_upgrade(
+        self, repo, mock_brew, mock_env
+    ) -> None:
+        """Test that an explicitly named pinned package is refused, not upgraded."""
+        pinned_dir = mock_env.prefix / "var" / "homebrew" / "pinned"
+        pinned_dir.mkdir(parents=True, exist_ok=True)
+        (pinned_dir / "act").touch()
+
+        upgraded, current, failures = await repo.upgrade_packages(["act"])
+        assert ("act", "pinned - skipped") in failures
+        assert all(p.name != "act" for p in upgraded)
+
+        flat = [arg for call in _provider_calls(mock_brew, "upgrade") for arg in call]
+        assert "act" not in flat
 
     async def test_upgrade_detects_version_change(
         self, mock_brew, catalog, mock_env
