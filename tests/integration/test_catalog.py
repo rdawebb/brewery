@@ -242,6 +242,17 @@ class TestCaskReadWrite:
         result = empty_catalog.get_casks(["a", "missing"])
         assert set(result) == {"a"}
 
+    def test_omitted_casks_are_pruned(self, empty_catalog) -> None:
+        """Test that a full-feed write drops casks absent from the new feed.
+
+        A cask removed/renamed upstream must disappear from both the table and
+        the FTS index rather than linger with a dead URL.
+        """
+        empty_catalog.write_casks([cask_dict("oldcask")])
+        empty_catalog.write_casks([cask_dict("newcask")])
+        assert empty_catalog.get_cask("oldcask") is None
+        assert empty_catalog.search("oldcask") == []
+
 
 class TestDepsAndAliases:
     """Tests for dependency edges and alias resolution."""
@@ -386,12 +397,17 @@ class TestSearch:
         empty_catalog.write_formulae([formula_dict("newname")], [], [])
         assert [r.name for r in empty_catalog.search("newname")] == ["newname"]
 
-    def test_omitted_rows_are_not_pruned(self, empty_catalog) -> None:
-        """Test that a write omitting a previously-written formula leaves it intact."""
+    def test_omitted_rows_are_pruned(self, empty_catalog) -> None:
+        """Test that a full-feed write drops formulae absent from the new feed.
+
+        Each load is the whole feed, so a formula removed/renamed upstream must
+        disappear from both the table and the FTS index rather than linger with
+        a dead bottle URL.
+        """
         empty_catalog.write_formulae([formula_dict("oldname")], [], [])
         empty_catalog.write_formulae([formula_dict("newname")], [], [])
-        assert empty_catalog.get_formula("oldname") is not None
-        assert [r.name for r in empty_catalog.search("oldname")] == ["oldname"]
+        assert empty_catalog.get_formula("oldname") is None
+        assert empty_catalog.search("oldname") == []
 
 
 class TestMetaAndLifecycle:

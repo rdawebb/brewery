@@ -550,6 +550,8 @@ class Catalog:
         """
         formula_sql: str = _upsert_sql("formula", _FORMULA_COLUMNS)
         with self._conn:
+            # Full-feed load: drop rows absent from the new feed
+            self._conn.execute("DELETE FROM formula")
             self._conn.executemany(formula_sql, formulae)
             self._conn.execute("DELETE FROM deps")
             self._conn.executemany(
@@ -579,6 +581,8 @@ class Catalog:
         """
         cask_sql: str = _upsert_sql("cask", _CASK_COLUMNS)
         with self._conn:
+            # Full-feed load: drop rows absent from the new feed
+            self._conn.execute("DELETE FROM cask")
             self._conn.executemany(cask_sql, casks)
             self._conn.execute("INSERT INTO cask_fts(cask_fts) VALUES('rebuild')")
 
