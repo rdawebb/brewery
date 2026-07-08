@@ -358,16 +358,20 @@ class RelocationError(SysError):
         super().__init__(f"{path}: {reason}")
 
 
-class BrewCommandError(TransientError):
+class BrewCommandError(SysError):
     """Brew command returned a non-zero exit code.
 
-    Typically indicates:
-        - Network issues
-        - Brew service outages
-        - Rate limiting
-        - Corrupted local Brew installation
+    Typically indicates a deterministic failure that will not change on a
+    retry:
+        - Formula/cask not found or ambiguous
+        - Link/install conflicts
+        - Missing dependencies or an unsupported flag
+        - A corrupted local Brew installation
 
-    This will be retried automatically by the caller.
+    Genuinely transient causes (network, service outages, rate limiting) are
+    possible but indistinguishable from the deterministic majority via the
+    exit code, so this is NOT retried automatically. It instead drives the
+    native fallback path where callers catch it explicitly.
     """
 
     def __init__(

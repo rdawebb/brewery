@@ -76,13 +76,14 @@ def _patch(monkeypatch, proc, *, have_brew=True) -> dict[str, Any]:
     )
     calls = {}
 
-    async def mock_exec(*cmd, stdout=None, stderr=None) -> MockProc:
+    async def mock_exec(*cmd, stdout=None, stderr=None, env=None) -> MockProc:
         """Mocks the execution of a subprocess.
 
         Args:
             cmd: The command to execute.
             stdout: The standard output stream.
             stderr: The standard error stream.
+            env: The environment mapping passed to the child.
 
         Returns:
             A mock process with the specified output.
@@ -90,6 +91,7 @@ def _patch(monkeypatch, proc, *, have_brew=True) -> dict[str, Any]:
         calls["cmd"] = cmd
         calls["stdout"] = stdout
         calls["stderr"] = stderr
+        calls["env"] = env
 
         return proc
 
@@ -108,6 +110,10 @@ async def test_capture_returns_decoded_output(monkeypatch) -> None:
     assert calls["stdout"] is not None and calls["stderr"] is not None
     assert calls["cmd"][0] == "brew"
 
+    # CAPTURE forces a stable locale / no colour so output parsing is robust
+    assert calls["env"]["LANG"] == "C"
+    assert calls["env"]["HOMEBREW_NO_COLOR"] == "1"
+
 
 async def test_inherit_does_not_pipe(monkeypatch) -> None:
     """Test that INHERIT mode leaves stdio as None so the child inherits the terminal."""
@@ -117,6 +123,9 @@ async def test_inherit_does_not_pipe(monkeypatch) -> None:
     # INHERIT leaves stdio as None so the child inherits the terminal
     assert calls["stdout"] is None and calls["stderr"] is None
     assert res.stdout == "" and res.stderr == "" and res.returncode == 0
+
+    # INHERIT keeps the user's environment (colour/locale) untouched
+    assert calls["env"] is None
 
 
 async def test_check_raises_on_nonzero(monkeypatch) -> None:

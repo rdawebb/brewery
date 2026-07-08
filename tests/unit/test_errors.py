@@ -56,7 +56,7 @@ class TestExceptionHierarchy:
     @pytest.mark.parametrize(
         ("exc", "base"),
         [
-            pytest.param(BrewCommandError(), TransientError, id="command_is_transient"),
+            pytest.param(BrewCommandError(), SysError, id="command_is_sys"),
             pytest.param(BrewTimeoutError(), TransientError, id="timeout_is_transient"),
             pytest.param(PackageNotFoundError(), UserError, id="not_found_is_user"),
             pytest.param(

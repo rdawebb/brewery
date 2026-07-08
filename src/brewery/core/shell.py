@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 from dataclasses import dataclass
 from enum import Enum
 
-from brewery.core.decorators import retry_on_transient
 from brewery.core.errors import (
     BrewCommandError,
     BrewTimeoutError,
@@ -34,7 +34,6 @@ class BrewResult:
     returncode: int
 
 
-@retry_on_transient()
 async def run_brew(
     args: list[str],
     *,
@@ -71,10 +70,15 @@ async def run_brew(
     cmd = ["brew", *args]
     capture = output is BrewOutput.CAPTURE
 
+    # Only force LANG=C / no-color when we parse the output ourselves; INHERIT
+    # runs stream to the terminal and should keep the user's locale and colour.
+    env = {**os.environ, **ENV_OVERRIDES} if capture else None
+
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE if capture else None,
         stderr=asyncio.subprocess.PIPE if capture else None,
+        env=env,
     )
 
     try:

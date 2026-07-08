@@ -31,8 +31,8 @@ class TestHandleError:
             pytest.param(TransientError("boom"), EXIT_TRANSIENT_ERROR, id="transient"),
             pytest.param(
                 BrewCommandError(returncode=1),
-                EXIT_TRANSIENT_ERROR,
-                id="brew_command_is_transient",
+                EXIT_SYSTEM_ERROR,
+                id="brew_command_is_system",
             ),
             pytest.param(UserError("bad input"), EXIT_USER_ERROR, id="user"),
             pytest.param(
