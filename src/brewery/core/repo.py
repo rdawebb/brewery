@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
 from brewery.core.cache import Cache, CacheManager
@@ -169,7 +170,7 @@ class Repository:
             kind: Kind of the package(s) (formula or cask).
 
         Returns:
-            Number of successes, and list of failures
+            List of successfully removed package names, and list of (name, reason) failures
 
         Raises:
             BrewCommandError: Propagated from provider.
@@ -329,12 +330,18 @@ class Repository:
             p.name: (p.versions[0] if p.versions else None) for p in targets
         }
 
-        for pkg_names, provider in [
-            (formula_names, self.formula),
-            (cask_names, self.cask),
-        ]:
-            if pkg_names:
-                await provider.upgrade(names=pkg_names)
+        if formula_names:
+            from brewery.providers.upgrade_service import run_upgrade
+
+            old_kegs = {
+                p.name: Path(p.path)
+                for p in targets
+                if p.kind == PackageKind.FORMULA and p.path
+            }
+            await run_upgrade(self, formula_names, old_kegs, run_brew=run_brew)
+
+        if cask_names:
+            await self.cask.upgrade(names=cask_names)
 
         self.cache_mgr.invalidate()
 
@@ -356,3 +363,50 @@ class Repository:
                 current.append(pkg)
 
         return upgraded, current, failures
+
+    @log_operation(event_prefix="cleanup")
+    async def cleanup_packages(
+        self, max_age_days: int | None = None
+    ) -> tuple[list[str], list[tuple[str, str]]]:
+        """Remove stale kegs replaced more than max_age_days ago.
+
+        Args:
+            max_age_days: Age threshold in days, defaults to 30.
+
+        Returns:
+            Tuple of (removed "name version" strings, (label, reason) failures).
+        """
+        import asyncio
+
+        from brewery.core.settings import load_settings
+        from brewery.providers.cellar import rmtree
+        from brewery.providers.retention import cleanup_candidates
+
+        s = load_settings().retention
+        age = s.age_days if max_age_days is None else max_age_days
+
+        env = self.cache_mgr.env or get_brewery_env()
+        installed = self.cache_mgr.installed_packages(kind=PackageKind.FORMULA)
+        active = {Path(p.path) for p in installed if p.path}
+
+        removed: list[str] = []
+        failures: list[tuple[str, str]] = []
+        for c in cleanup_candidates(
+            env.cellar,
+            active=active,
+            max_age_days=age,
+            max_versions=s.max_versions,
+            max_cellar_mb=s.max_cellar_mb,
+        ):
+            label = f"{c.name} {c.version}"
+            try:
+                await asyncio.to_thread(rmtree, c.keg)
+                removed.append(label)
+
+            except OSError as e:
+                failures.append((label, str(e)))
+
+        if removed:
+            self.cache_mgr.invalidate()
+
+        return removed, failures

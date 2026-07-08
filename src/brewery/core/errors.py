@@ -590,3 +590,43 @@ class PinnedPackageWarning(UserError):
             message=f"'{package or 'unknown'}' is pinned and cannot be upgraded",
             context=ctx,
         )
+
+
+class SettingsError(UserError):
+    """Invalid config key, invalid value, or an unreadable file on write.
+
+    Typically indicates:
+        - An unknown or misspelled config key
+        - A value that fails validation for its key
+        - A corrupt config file (not valid JSON or not a JSON object)
+        - An existing config file that cannot be read before a write
+
+    Do not retry without correcting the key, value, or config file.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        key: str | None = None,
+        value: str | None = None,
+        path: Path | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> None:
+        """Initialise SettingsError with detailed context.
+
+        Args:
+            message: Description of the settings failure.
+            key: The dotted config key involved in the error.
+            value: The raw value that failed validation.
+            path: The config file involved in the error.
+            context: Additional context information.
+        """
+        ctx: dict[str, Any] = context or {}
+        if key:
+            ctx["key"] = key
+        if value:
+            ctx["value"] = value
+        if path is not None:
+            ctx["path"] = path
+        super().__init__(message, context=ctx)

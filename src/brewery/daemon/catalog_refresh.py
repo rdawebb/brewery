@@ -60,9 +60,36 @@ async def _refresh(catalog: Catalog, client: _HttpClient) -> None:
         api.store_validators(catalog=catalog, result=result)
 
 
+async def _maybe_cleanup(catalog: Catalog) -> None:
+    """Run a retention sweep if one is due, isolating any failure from the refresh.
+
+    Args:
+        catalog: The catalog to clean up.
+    """
+    from brewery.core.config import ensure_cache_dir
+    from brewery.core.repo import Repository
+    from brewery.providers.retention import due_for_cleanup, mark_cleanup_run
+
+    cache_dir = ensure_cache_dir()
+    if not due_for_cleanup(cache_dir):
+        return
+
+    try:
+        repo = Repository(catalog=catalog)
+        removed, _failures = await repo.cleanup_packages()
+        mark_cleanup_run(cache_dir)
+        if removed:
+            log.info(event="daemon_cleanup", removed=len(removed))
+
+    except Exception as e:
+        log.warning(event="daemon_cleanup_failed", error=str(e))
+
+
 async def background_refresh() -> None:
-    """Refresh the default catalog store."""
-    await refresh_catalog(catalog=Catalog())
+    """Refresh the default catalog store and run cleanup if necessary."""
+    catalog = Catalog()
+    await refresh_catalog(catalog)
+    await _maybe_cleanup(catalog)
 
 
 def main() -> None:

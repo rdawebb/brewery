@@ -7,8 +7,10 @@ from pathlib import Path
 
 import pytest
 
+import brewery.providers.orchestrator as orch_mod
 from brewery.core.errors import DownloadError, ManifestError
 from brewery.providers.downloader import BottleRef
+from brewery.providers.linker import link_keg
 from brewery.providers.manifest import BottleTabInfo
 from brewery.providers.orchestrator import (
     InstallConfig,
@@ -62,15 +64,15 @@ class MockFormula:
             has_bottle: Whether the formula has a bottle.
         """
         self.name = name
-        self.tap = "homebrew/core"
+        self.tap: str | None = "homebrew/core"
         self.version = "1.0"
         self.revision = 0
         self.version_scheme = 0
         self.keg_only = keg_only
         self.post_install = post_install
-        self.bottle_url = f"https://ghcr.io/{name}" if has_bottle else None
-        self.bottle_sha256 = f"sha_{name}" if has_bottle else None
-        self.bottle_cellar = ":any"
+        self.bottle_url = f"https://ghcr.io/{name}" if has_bottle else ""
+        self.bottle_sha256 = f"sha_{name}" if has_bottle else ""
+        self.bottle_cellar: str | None = ":any"
         self.bottle_rebuild = 0
 
 
@@ -246,6 +248,18 @@ class MockBrew:
         self.calls.append(("install", name))
         return self.install_ok
 
+    async def upgrade(self, name) -> bool:
+        """Upgrades a formula.
+
+        Args:
+            name: The name of the formula.
+
+        Returns:
+            True if the upgrade succeeded, False otherwise.
+        """
+        self.calls.append(("upgrade", name))
+        return self.install_ok
+
     async def link(self, name) -> bool:
         """Links a formula.
 
@@ -291,7 +305,7 @@ def _make(cat, dl, tabf, brew, native=None, order=None) -> Orchestrator:
     if native is not None:
 
         def mock_native(
-            name, fr, bottle_path, tab, on_request, aliases, rt_deps
+            name, fr, bottle_path, tab, on_request, aliases, rt_deps, old_keg
         ) -> Orchestrator:
             """Mock native installation function.
 
@@ -303,6 +317,7 @@ def _make(cat, dl, tabf, brew, native=None, order=None) -> Orchestrator:
                 on_request: The request callback.
                 aliases: Aliases for the formula.
                 rt_deps: Runtime dependencies for the formula.
+                old_kegs: Optional path of the old keg to be removed.
 
             Returns:
                 The result of the native installation.
@@ -505,7 +520,9 @@ class TestKegOnlyPostInstall:
             config=CFG,
         )
 
-        def mock_native(name, fr, bottle_path, tab, on_request, aliases, rt_deps):
+        def mock_native(
+            name, fr, bottle_path, tab, on_request, aliases, rt_deps, old_keg
+        ):
             seen["native_thread"] = threading.get_ident()
             seen["aliases_arg"] = aliases
             seen["rt_deps_arg"] = rt_deps
@@ -633,3 +650,233 @@ class TestPartialCleanup:
         o._cleanup_partial(failed, "foo")
         assert not failed.exists()
         assert opt.is_symlink() and opt.exists()  # Still valid -> kept
+
+
+class TestUpgradeForceGate:
+    """Test the upgrade force gate."""
+
+    async def test_satisfied_target_forced_dep_skipped(self) -> None:
+        """Test that a satisfied target with a forced dep is skipped."""
+        cat = MockCatalog(
+            {"wget": MockFormula("wget"), "openssl": MockFormula("openssl")},
+            {"wget": ["openssl"]},
+            satisfied={"wget", "openssl"},
+        )
+        o = _make(cat, MockDownloader(), MockTab(), MockBrew(), native={})
+        report = await o.upgrade(["wget"], {})  # No old keg -> plain forced pour
+
+        assert report.outcomes["wget"] is Outcome.NATIVE  # Forced despite satisfied
+        assert "openssl" not in report.outcomes  # Satisfied dep skipped
+
+
+class TestUpgradeMarking:
+    """Test upgrade marking."""
+
+    def _row(self, version="2.0") -> MockFormula:
+        """Return a mock formula with the given version.
+
+        Args:
+            version: The version to set on the formula.
+
+        Returns:
+            A mock formula with the given version.
+        """
+        f = MockFormula("wget")
+        f.version = version
+
+        return f
+
+    def _patch_mark(self, monkeypatch) -> list:
+        """Patch mark_replaced to record marks.
+
+        Args:
+            monkeypatch: The monkeypatch fixture to use for patching.
+
+        Returns:
+            A list to record marks.
+        """
+        marks: list = []
+        monkeypatch.setattr(
+            orch_mod,
+            "mark_replaced",
+            lambda keg, *, by=None, at=None: marks.append((keg, by)),
+        )
+
+        return marks
+
+    async def test_marks_old_on_native_success(self, monkeypatch) -> None:
+        """Test that old version is marked when native upgrade succeeds."""
+        old = Path("/hb/Cellar/wget/1.0")
+        cat = MockCatalog({"wget": self._row("2.0")}, {"wget": []}, satisfied={"wget"})
+        o = _make(
+            cat,
+            MockDownloader(),
+            MockTab(),
+            MockBrew(),
+            native={
+                "wget": _NativeResult(stage=None, dest=Path("/hb/Cellar/wget/2.0"))
+            },
+        )
+        marks = self._patch_mark(monkeypatch)
+        report = await o.upgrade(["wget"], {"wget": old})
+
+        assert report.outcomes["wget"] is Outcome.NATIVE
+        assert marks == [(old, "2.0")]
+
+    async def test_no_mark_when_pour_falls_back_to_brew(self, monkeypatch) -> None:
+        """Test that no mark is recorded when pour falls back to brew."""
+        old = Path("/hb/Cellar/wget/1.0")
+        cat = MockCatalog({"wget": self._row()}, {"wget": []}, satisfied={"wget"})
+        brew = MockBrew()
+        o = _make(
+            cat,
+            MockDownloader(),
+            MockTab(),
+            brew,
+            native={"wget": _NativeResult(stage="install", error="boom")},
+        )
+        marks = self._patch_mark(monkeypatch)
+        report = await o.upgrade(["wget"], {"wget": old})
+
+        assert marks == []  # brew owns the old keg
+        assert report.outcomes["wget"] is Outcome.BREW_UPGRADE
+        assert ("upgrade", "wget") in brew.calls
+
+    async def test_marks_old_when_link_stage_falls_back(self, monkeypatch) -> None:
+        """Test that old version is marked when link stage falls back."""
+        old = Path("/hb/Cellar/wget/1.0")
+        cat = MockCatalog({"wget": self._row("2.0")}, {"wget": []}, satisfied={"wget"})
+        o = _make(
+            cat,
+            MockDownloader(),
+            MockTab(),
+            MockBrew(link_ok=True),
+            native={"wget": _NativeResult(stage="link", dest=Path("/d"), error="x")},
+        )
+        marks = self._patch_mark(monkeypatch)
+        report = await o.upgrade(["wget"], {"wget": old})
+
+        assert report.outcomes["wget"] is Outcome.BREW_LINK
+        assert marks == [(old, "2.0")]
+
+
+class TestUpgradeOnRequest:
+    """installed_on_request is inherited from the superseded keg's receipt."""
+
+    def _capture_orch(self, monkeypatch, captured) -> Orchestrator:
+        """Capture the on_request value and return a dummy _NativeResult."""
+
+        def cap_native(
+            name, fr, bottle_path, tab, on_request, aliases, rt_deps, old_keg=None
+        ) -> _NativeResult:
+            """Capture the on_request value and return a dummy _NativeResult.
+
+            Args:
+                name: The formula name.
+                fr: The formula reference.
+                bottle_path: The path to the bottle.
+                tab: The tab.
+                on_request: The on_request value.
+                aliases: The aliases.
+                rt_deps: The runtime dependencies.
+                old_keg: The old keg.
+
+            Returns:
+                A dummy _NativeResult.
+            """
+            captured["on_request"] = on_request
+
+            return _NativeResult(stage=None, dest=Path("/d"))
+
+        cat = MockCatalog(
+            {"wget": MockFormula("wget")}, {"wget": []}, satisfied={"wget"}
+        )
+        o = Orchestrator(
+            catalog=cat,
+            downloader=MockDownloader(),
+            tab_fetcher=MockTab(),
+            brew=MockBrew(),
+            config=CFG,
+        )
+        o._native_install = cap_native  # ty: ignore[invalid-assignment]
+        monkeypatch.setattr(orch_mod, "mark_replaced", lambda *a, **k: None)
+
+        return o
+
+    async def test_inherits_false_even_when_named(self, monkeypatch) -> None:
+        """Test dependency-installed formula upgraded by name stays not-on-request."""
+        captured: dict = {}
+        o = self._capture_orch(monkeypatch, captured)
+        monkeypatch.setattr(
+            orch_mod, "read_receipt", lambda keg: {"installed_on_request": False}
+        )
+        await o.upgrade(["wget"], {"wget": Path("/old")})
+        assert captured["on_request"] is False  # Inherited, not flipped by naming
+
+    async def test_falls_back_to_requested_when_no_old_receipt(
+        self, monkeypatch
+    ) -> None:
+        """Test with no readable old receipt, on_request falls back to the request set."""
+        captured: dict = {}
+        o = self._capture_orch(monkeypatch, captured)
+        monkeypatch.setattr(orch_mod, "read_receipt", lambda keg: None)
+        await o.upgrade(["wget"], {"wget": Path("/old")})
+        assert captured["on_request"] is True  # Named + no old flag -> default
+
+
+class TestUpgradeSwap:
+    """Test upgrade swap behavior."""
+
+    @pytest.mark.integration
+    async def test_unlinks_old_before_linking_new(self, tmp_path, monkeypatch) -> None:
+        """Test that old version is unlinked before linking new version."""
+        prefix = tmp_path / "prefix"
+        cellar = prefix / "Cellar"
+        cfg = InstallConfig(
+            prefix=prefix,
+            repository=prefix / "Library",
+            api_path="/api",
+            staging_root=prefix / "var" / "staging",
+        )
+
+        # Existing v1: real keg, opt -> v1, bin/foo -> v1 (real link_keg)
+        old = cellar / "wget" / "1.0"
+        (old / "bin").mkdir(parents=True)
+        (old / "bin" / "foo").write_text("v1")
+        (prefix / "opt").mkdir(parents=True)
+        (prefix / "opt" / "wget").symlink_to(Path("..") / "Cellar" / "wget" / "1.0")
+        link_keg(old, prefix=prefix, name="wget")
+        assert (prefix / "bin" / "foo").read_text() == "v1"
+
+        # Staged v2 that extract_bottle would have produced
+        staged = tmp_path / "staged"
+        (staged / "bin").mkdir(parents=True)
+        (staged / "bin" / "foo").write_text("v2")
+
+        # Stub only the bottle-handling stages; install_to_cellar/unlink/link run for real
+        monkeypatch.setattr(orch_mod, "extract_bottle", lambda bp, st: staged)
+        monkeypatch.setattr(orch_mod, "relocate_keg", lambda *a, **k: None)
+        monkeypatch.setattr(orch_mod, "write_receipt", lambda d, r: None)
+
+        fr = MockFormula("wget")
+        fr.version = "2.0"
+        fr.bottle_cellar = ":any_skip_relocation"  # Avoid the relocate path entirely
+        tab = _tab("wget")
+        o = Orchestrator(
+            catalog=MockCatalog({}, {}),
+            downloader=MockDownloader(),
+            tab_fetcher=MockTab(),
+            brew=MockBrew(),
+            config=cfg,
+        )
+
+        res = o._native_install(
+            "wget", fr, Path("bottle"), tab, True, [], [], old_keg=old
+        )
+
+        new = cellar / "wget" / "2.0"
+        assert res.stage is None
+        assert (prefix / "bin" / "foo").read_text() == "v2"  # Links swapped
+        assert Path((prefix / "bin" / "foo").resolve()) == new / "bin" / "foo"
+        assert Path((prefix / "opt" / "wget").resolve()) == new  # opt -> v2
+        assert old.exists()  # Retained, no rmtree

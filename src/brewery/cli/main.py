@@ -11,18 +11,12 @@ from typing import Any, Coroutine, Optional
 from rich.console import Console
 from typer_extensions import ExtendedTyper
 
-from brewery.cli.error_formatting import format_error_message, suggest_search
+from brewery.cli.config import config_app
+from brewery.cli.error_formatting import handle_error
 from brewery.core.errors import (
     EXIT_SYSTEM_ERROR,
-    EXIT_TRANSIENT_ERROR,
-    EXIT_USER_ERROR,
     AlreadyInstalledWarning,
-    BrewError,
-    PackageNotFoundError,
     PinnedPackageWarning,
-    SysError,
-    TransientError,
-    UserError,
 )
 from brewery.core.logging import BreweryLogger, configure_logging, get_logger
 from brewery.core.models import Package, PackageKind
@@ -36,8 +30,16 @@ app = ExtendedTyper(help="Brewery: A package management CLI tool")
 app.add_typer(
     daemon_app,
     name="daemon",
+    aliases=["d"],
     help="Manage the Brewery background refresh daemon.",
 )
+app.add_typer(
+    config_app,
+    name="config",
+    aliases=["cfg"],
+    help="View and manage brewery configuration.",
+)
+
 
 console = Console(emoji=False, highlight=False)
 
@@ -60,7 +62,7 @@ KNOWN_COMMANDS: set[str] = {
     # Uninstall commands/aliases
     "uninstall",
     "rm",
-    "remove",
+    "del",
     # Outdated commands/aliases
     "outdated",
     "o",
@@ -69,54 +71,17 @@ KNOWN_COMMANDS: set[str] = {
     "upgrade",
     "u",
     "up",
+    # Cleanup commands/aliases
+    "cleanup",
+    "c",
+    "clean",
     # Daemon commands/aliases
     "daemon",
+    "d",
+    # Config commands/aliases
+    "config",
+    "cfg",
 }
-
-
-def handle_error(error: Exception) -> int:
-    """Handle errors and return appropriate exit codes.
-
-    Args:
-        error: The exception to handle.
-
-    Returns:
-        An integer exit code.
-    """
-    if isinstance(error, BrewError):
-        try:
-            log.error(
-                event="cli_error",
-                error_type=type(error).__name__,
-                message=error.message,
-                context=getattr(error, "context", {}),
-                exc_info=True,
-            )
-        except Exception:
-            pass
-
-        console.print(f"\n{format_error_message(error)}\n", style="bold red")
-
-        if isinstance(error, PackageNotFoundError):
-            package: str = getattr(error, "context", {}).get("package", "")
-            console.print(suggest_search(package_name=package), style="dim")
-
-        if isinstance(error, TransientError):
-            return EXIT_TRANSIENT_ERROR
-
-        elif isinstance(error, UserError):
-            return EXIT_USER_ERROR
-
-        elif isinstance(error, SysError):
-            return EXIT_SYSTEM_ERROR
-
-        else:
-            return EXIT_USER_ERROR
-
-    else:
-        log.error(event="unexpected_error", error=str(object=error), exc_info=True)
-        console.print(f"\n⚠ Unexpected error occurred: {error}\n", style="bold red")
-        return EXIT_SYSTEM_ERROR
 
 
 def _brew_passthrough(argv: list[str]) -> int:
@@ -178,7 +143,7 @@ def setup() -> None:
     configure_logging(level="INFO", enable_console=True)
 
 
-@app.command_with_aliases(name="list", aliases=["ls", "l"])
+@app.command(name="list", aliases=["ls", "l"])
 def list_pkgs(
     kind: Optional[PackageKind] = app.Option(
         None, "--kind", "-k", help="formula | cask | all"
@@ -219,7 +184,7 @@ def list_pkgs(
         sys.exit(handle_error(error=e))
 
 
-@app.command_with_aliases(aliases=["i", "in"])
+@app.command(aliases=["i", "in"])
 def info(
     name: str,
     kind: Optional[PackageKind] = app.Option(
@@ -244,7 +209,7 @@ def info(
         sys.exit(handle_error(error=e))
 
 
-@app.command_with_aliases(aliases=["s", "find"])
+@app.command(aliases=["s", "find"])
 def search(term: str) -> None:
     """Search for packages by name or description.
 
@@ -262,7 +227,7 @@ def search(term: str) -> None:
         sys.exit(handle_error(error=e))
 
 
-@app.command_with_aliases(aliases=["add"])
+@app.command(aliases=["add"])
 def install(
     names: list[str] = app.Argument(...),
     kind: Optional[PackageKind] = app.Option(
@@ -314,11 +279,18 @@ def install(
     except AlreadyInstalledWarning as e:
         console.print(f"\n⚠ {e.message}\n", style="bold yellow")
 
+    except KeyboardInterrupt:
+        console.print(
+            "\n⚠ Interrupted. Re-run [bold]brewery install <name>[/bold] to complete it\n",
+            style="bold yellow",
+        )
+        sys.exit(130)
+
     except Exception as e:
         sys.exit(handle_error(error=e))
 
 
-@app.command_with_aliases(aliases=["rm", "remove"])
+@app.command(aliases=["rm", "del"])
 def uninstall(
     names: list[str],
     kind: Optional[PackageKind] = app.Option(
@@ -367,11 +339,18 @@ def uninstall(
 
             app.echo()
 
+    except KeyboardInterrupt:
+        console.print(
+            "\n⚠ Interrupted. Re-run [bold]brewery uninstall <name>[/bold] to complete it\n",
+            style="bold yellow",
+        )
+        sys.exit(130)
+
     except Exception as e:
         sys.exit(handle_error(error=e))
 
 
-@app.command_with_aliases(aliases=["o", "out"])
+@app.command(aliases=["o", "out"])
 def outdated(
     check: bool = app.Option(
         False,
@@ -392,8 +371,8 @@ def outdated(
         with _repository() as repo:
             pkgs: list[Package]
 
+            app.echo()
             if check:
-                app.echo()
                 with console.status(
                     status="[bold yellow]Checking for updates...[/bold yellow]",
                     refresh_per_second=5,
@@ -408,10 +387,10 @@ def outdated(
                 pkgs = repo.get_outdated()
 
             if not pkgs:
-                console.print("\n✓ All packages are up to date!\n", style="bold green")
+                console.print("✓ All packages are up to date!\n", style="bold green")
                 return
 
-            console.print(f"\n• {len(pkgs)} outdated package(s)\n", style="bold yellow")
+            console.print(f"• {len(pkgs)} outdated package(s)\n", style="bold yellow")
             for pkg in pkgs:
                 latest = pkg.metadata.get("latest_version")
                 console.print(f"  [dim]-[/dim] {pkg.name} → {latest}")
@@ -426,7 +405,7 @@ def outdated(
         sys.exit(handle_error(error=e))
 
 
-@app.command_with_aliases(aliases=["u", "up"])
+@app.command(aliases=["u", "up"])
 def upgrade(
     names: Optional[list[str]] = app.Argument(
         None, help="Package(s) to upgrade (leave empty to upgrade all)"
@@ -453,17 +432,22 @@ def upgrade(
                         return
 
                 else:
-                    outdated: list[Package] = repo.get_outdated(live=False)
+                    outdated: list[Package] = repo.get_outdated()
                     if not outdated:
                         console.print(
                             "\n✓ All packages are up to date!\n", style="bold green"
                         )
                         return
 
-                    from brewery.cli.renderers import package_table
+                    console.print(
+                        f"\n• {len(outdated)} outdated package(s)\n",
+                        style="bold yellow",
+                    )
+                    for pkg in outdated:
+                        latest = pkg.metadata.get("latest_version")
+                        console.print(f"  [dim]-[/dim] {pkg.name} → {latest}")
 
-                    console.print(package_table(pkgs=outdated))
-
+                    app.echo()
                     if not app.confirm(
                         text=f"Upgrade {len(outdated)} outdated package(s)?",
                         default=True,
@@ -508,6 +492,47 @@ def upgrade(
 
     except PinnedPackageWarning as e:
         console.print(f"\n[bold yellow]⚠ {e.message}[/bold yellow]\n")
+
+    except KeyboardInterrupt:
+        console.print(
+            "\n⚠ Interrupted. Re-run [bold]brewery upgrade <name>[/bold] to complete it\n",
+            style="bold yellow",
+        )
+        sys.exit(130)
+
+    except Exception as e:
+        sys.exit(handle_error(error=e))
+
+
+@app.command(name="cleanup", aliases=["c", "clean"])
+def cleanup() -> None:
+    """Remove old package versions."""
+    try:
+        with _repository() as repo:
+            app.echo()
+            with console.status(
+                status="[bold yellow]Cleaning up...[/bold yellow]", refresh_per_second=5
+            ):
+                removed, failures = _async_run(coro=repo.cleanup_packages())
+
+            if not removed and not failures:
+                console.print("✓ Nothing to clean up\n", style="bold green")
+                return
+
+            console.print(
+                f"✓ Removed {len(removed)} old version(s)\n", style="bold green"
+            )
+            for label in removed:
+                console.print(f"  [dim]-[/dim] {label}")
+
+            if failures:
+                console.print(
+                    f"\n✗ {len(failures)} could not be removed:", style="bold red"
+                )
+                for label, reason in failures:
+                    console.print(f"  [dim]-[/dim] {label} - {reason}")
+
+            app.echo()
 
     except Exception as e:
         sys.exit(handle_error(error=e))

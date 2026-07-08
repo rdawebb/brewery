@@ -16,6 +16,45 @@ from brewery.providers.orchestrator import InstallConfig, InstallReport, Orchest
 RunBrew = Callable[[list[str]], Awaitable[object]]
 
 
+def build_orchestrator(
+    repo,
+    *,
+    client: httpx.AsyncClient,
+    env: BreweryENV,
+    run_brew: RunBrew,
+    install_concurrency: int = 1,
+) -> Orchestrator:
+    """Assemble an Orchestrator bound to an open client and the repo's ports.
+
+    Shared by the install and upgrade services.
+
+    Args:
+        repo: The Repository providing catalog/cache/formula-backend ports.
+        client: An open httpx.AsyncClient.
+        env: Brewery environment (paths).
+        run_brew: Async `brew <args>` runner for link/postinstall fallback.
+        install_concurrency: Concurrent filesystem installs.
+
+    Returns:
+        A configured Orchestrator.
+    """
+    config = InstallConfig(
+        prefix=env.prefix,
+        repository=env.repository,
+        api_path=str(env.api_path),  # <cache>/api/formula.jws.json
+        staging_root=env.prefix / "var" / "homebrew" / ".staging",
+    )
+
+    return Orchestrator(
+        catalog=RepositoryCatalogAdapter(repo),
+        downloader=Downloader(cache_dir=env.bottle_cache, client=client),
+        tab_fetcher=functools.partial(fetch_bottle_tab, client),
+        brew=BrewAdapter(repo.formula, run_brew),
+        config=config,
+        install_concurrency=install_concurrency,
+    )
+
+
 async def run_install(
     repo,
     names: list[str],
@@ -24,37 +63,27 @@ async def run_install(
     env: BreweryENV | None = None,
     install_concurrency: int = 1,
 ) -> InstallReport:
-    """Install ``names`` via the native pipeline, brew-falling-back per formula.
+    """Install `names` via the native pipeline, brew-falling-back per formula.
 
     Args:
         repo: The Repository.
         names: Formula names to install (deps resolved from the catalog).
         run_brew: Async `brew <args>` runner for link/postinstall fallback.
-        env: Brewery environment (paths), resolved if omitted.
+        env: Brewery environment, resolved if omitted.
         install_concurrency: Concurrent filesystem installs (downloads are
-            always fully concurrent; default 1 serializes the install stages).
+            always fully concurrent; default 1 serialises the install stages).
 
     Returns:
         The InstallReport (per-formula outcomes).
     """
     env = env or get_brewery_env()
 
-    config = InstallConfig(
-        prefix=env.prefix,
-        repository=env.repository,
-        api_path=str(env.api_path),  # <cache>/api/formula.jws.json
-        staging_root=env.prefix / "var" / "homebrew" / ".staging",
-    )
-
     async with httpx.AsyncClient() as client:
-        downloader = Downloader(cache_dir=env.bottle_cache, client=client)
-        tab_fetcher = functools.partial(fetch_bottle_tab, client)
-        orchestrator = Orchestrator(
-            catalog=RepositoryCatalogAdapter(repo),
-            downloader=downloader,
-            tab_fetcher=tab_fetcher,
-            brew=BrewAdapter(repo.formula, run_brew),
-            config=config,
+        orchestrator = build_orchestrator(
+            repo,
+            client=client,
+            env=env,
+            run_brew=run_brew,
             install_concurrency=install_concurrency,
         )
 

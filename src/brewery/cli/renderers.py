@@ -10,7 +10,9 @@ import orjson
 import readchar
 from rich import box
 from rich.console import Console
+from rich.layout import Layout
 from rich.table import Table
+from rich.text import Text
 
 from brewery.core.config import ensure_cache_dir
 from brewery.core.models import Package, PackageStatus
@@ -219,7 +221,12 @@ def package_table(pkgs: Iterable[Package]) -> Table:
 
 
 def _populate_rows(table: Table, pkgs: list[Package]) -> None:
-    """Add all package rows to the table."""
+    """Add all package rows to the table.
+
+    Args:
+        table: The table to populate.
+        pkgs: The list of packages to add to the table.
+    """
     for p in pkgs:
         installed: str = p.versions[0] if p.versions else ""
         latest = p.metadata.get("latest_version") or (
@@ -248,25 +255,77 @@ def paginate(pkgs: list[Package], page_size: int, console: Console) -> None:
     page = 0
     total_pages = -(-len(pkgs) // page_size)
 
-    with console.screen():
+    with console.screen() as screen:
         while True:
             start = page * page_size
-            console.print(package_table(pkgs[start : start + page_size]))
-            console.print(
+            table = package_table(pkgs[start : start + page_size])
+            nav_text = Text.from_markup(
                 f"\n[dim]Page {page + 1}/{total_pages} · "
-                f"[bold]n[/bold] next  [bold]p[/bold] prev  [bold]q[/bold] quit[/dim]"
+                f"[bold]n[/bold] next  [bold]p[/bold] prev  [bold]q[/bold] quit[/dim]",
+                justify="center",
             )
 
+            layout = Layout()
+            layout.split_column(
+                Layout(table, name="table"),
+                Layout(nav_text, name="nav", size=2),
+            )
+            screen.update(layout)
+
             key = readchar.readkey()
+
             if (
                 key in ("n", readchar.key.RIGHT, readchar.key.SPACE)
                 and page < total_pages - 1
             ):
                 page += 1
+
             elif key in ("p", readchar.key.LEFT) and page > 0:
                 page -= 1
+
             elif key in ("q", readchar.key.ENTER, readchar.key.ESC):
                 break
+
+
+def _version_cell(pkg: Package, installed: bool) -> str:
+    """Build the Version cell for the package details table.
+
+    Args:
+        pkg: The package to display the version for.
+        installed: Whether the package is installed.
+
+    Returns:
+        A Rich-markup string for the Version cell.
+    """
+    latest: str = pkg.metadata.get("latest_version") or ""
+
+    if not installed:
+        version: str = pkg.versions[0] if pkg.versions else latest
+        return f"{version} [bold red]✗[/bold red]"
+
+    version = pkg.versions[0] if pkg.versions else ""
+    if PackageStatus.OUTDATED in pkg.status:
+        return f"{version} [bold yellow]↑[/bold yellow] {latest}"
+
+    return f"{version} [bold green]✓[/bold green]"
+
+
+def _status_cell(pkg: Package) -> str:
+    """Build the Status cell from keg flags.
+
+    Args:
+        pkg: The package to display the status for.
+
+    Returns:
+        A Rich-markup string for the Status cell, or "" when nothing to show.
+    """
+    bits: list[str] = [
+        label
+        for flag, label in STATUS_LABELS.items()
+        if flag is not PackageStatus.OUTDATED and flag in pkg.status
+    ]
+
+    return ", ".join(bits)
 
 
 def package_details(pkg: Package) -> Table:
@@ -278,18 +337,20 @@ def package_details(pkg: Package) -> Table:
     Returns:
         A Rich Table displaying detailed information about the package.
     """
+    installed: bool = pkg.path is not None
+
     t = Table(box=box.MINIMAL, show_header=False)
     t.add_row("Name", pkg.name, style="bold blue")
     t.add_row("Kind", pkg.kind.value)
     t.add_row("Description", pkg.desc or "")
+    t.add_row("Version", _version_cell(pkg, installed))
 
-    latest = pkg.metadata.get("latest_version") or ""
-    installed_display = [v for v in pkg.versions if v != latest] or pkg.versions
+    if installed:
+        t.add_row("Size (MB)", f"{(pkg.size_kb or 0) / 1024:.2f}")
 
-    t.add_row("Installed Versions", ", ".join(installed_display))
-    t.add_row("Latest", latest)
-    t.add_row("Status", status_to_str(pkg.status))
-    t.add_row("Size (MB)", f"{(pkg.size_kb or 0) / 1024:.2f}")
+    status: str = _status_cell(pkg)
+    if status:
+        t.add_row("Status", status)
 
     if pkg.deps:
         t.add_row("Depends on", ", ".join(d.name for d in pkg.deps), style="dim")

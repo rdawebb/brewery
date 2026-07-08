@@ -502,6 +502,7 @@ def _process_file(
     subs: dict[bytes, bytes],
     keg_root: str,
     allowed_text: frozenset[str] | None,
+    skip_macho: bool = False,
 ) -> tuple[bool, str | None]:
     """Relocate one regular (non-symlink) file via a single mmap.
 
@@ -511,6 +512,8 @@ def _process_file(
         keg_root: The keg directory as a string, for computing relative paths.
         allowed_text: The manifest's changed_files set (relative POSIX), or None
             to substitute any marker-bearing text file.
+        skip_macho: When True, leave Mach-O install names untouched, text
+            substitution still runs.
 
     Returns:
         (macho_modified, text_rel): `macho_modified` True if a Mach-O file was
@@ -541,6 +544,8 @@ def _process_file(
                     raise RelocationError(path, "static archive contains a placeholder")
 
                 if kind is _Kind.MACHO:
+                    if skip_macho:
+                        return False, None  # :any_skip_relocation: no linkage rewrite
                     macho_args = _build_macho_args(_collect_names(mm), subs)
 
                 else:
@@ -632,7 +637,8 @@ def relocate_keg(
     """Relocate an extracted keg in place.
 
     `skip_relocation` should be set from the catalog bottle's `cellar` value
-    being `:any_skip_relocation` - when true this is a no-op.
+    being `:any_skip_relocation`. When true the Mach-O install-name rewrite is skipped
+    but text and symlink placeholder substitution still run.
 
     `text_files` is the manifest tab's `changed_files` (relative POSIX paths).
     When provided, only those files are text-substituted and the result's
@@ -662,16 +668,14 @@ def relocate_keg(
         RelocationError: If the relocation fails, or a listed text file is
             missing from the keg.
     """
-    if skip_relocation:
-        return RelocationResult([], 0, 0)
-
     subs = build_substitutions(prefix, cellar, repository, extra=extra_tokens)
     keg_root = str(keg_dir)
 
     allowed_text: frozenset[str] | None = None
     if text_files is not None:
         allowed_text = frozenset(text_files)
-        # Fail fast on a manifest/extract mismatch.
+
+        # Fail fast on a manifest/extract mismatch
         for rel in text_files:
             if not (keg_dir / rel).is_file():
                 raise RelocationError(
@@ -690,7 +694,9 @@ def relocate_keg(
     if regular:
         executor = ThreadPoolExecutor(max_workers=_RELOCATE_WORKERS)
         futures = [
-            executor.submit(_process_file, p, subs, keg_root, allowed_text)
+            executor.submit(
+                _process_file, p, subs, keg_root, allowed_text, skip_relocation
+            )
             for p in regular
         ]
         try:

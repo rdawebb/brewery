@@ -159,7 +159,7 @@ def build_receipt(
     }
 
 
-def dumps(receipt: dict) -> str:
+def dumps_bytes(receipt: dict) -> bytes:
     """Serialise exactly as brew does: 2-space indent, key order preserved,
     no trailing newline (Ruby JSON.pretty_generate).
 
@@ -167,9 +167,23 @@ def dumps(receipt: dict) -> str:
         receipt: The receipt dict produced by build_receipt().
 
     Returns:
+        UTF-8 JSON bytes matching brew's output format.
+    """
+    return orjson.dumps(receipt, option=orjson.OPT_INDENT_2)
+
+
+def dumps(receipt: dict) -> str:
+    """Serialise a receipt to a UTF-8 JSON string matching brew's output.
+
+    The string form of `dumps_bytes` for brew fidelity testing.
+
+    Args:
+        receipt: The receipt dict produced by build_receipt().
+
+    Returns:
         A UTF-8 JSON string matching brew's output format.
     """
-    return orjson.dumps(receipt, option=orjson.OPT_INDENT_2).decode("utf-8")
+    return dumps_bytes(receipt).decode("utf-8")
 
 
 def write_receipt(keg_dir: Path, receipt: dict) -> Path:
@@ -182,12 +196,13 @@ def write_receipt(keg_dir: Path, receipt: dict) -> Path:
     Returns:
         The path to the written receipt file.
     """
-    text = dumps(receipt)
+    data = dumps_bytes(receipt)
     dest = keg_dir / RECEIPT_NAME
     fd, tmp = tempfile.mkstemp(dir=keg_dir, suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+
         os.chmod(tmp, 0o644)
         os.replace(tmp, dest)
 
@@ -196,6 +211,26 @@ def write_receipt(keg_dir: Path, receipt: dict) -> Path:
             os.unlink(tmp)
 
     return dest
+
+
+def read_receipt(keg_dir: Path) -> dict | None:
+    """Read INSTALL_RECEIPT.json from a keg, tolerating absence or corruption.
+
+    The inverse of write_receipt, used to inherit fields from a superseded keg during an upgrade.
+
+    Args:
+        keg_dir: The keg directory to read the receipt from.
+
+    Returns:
+        The parsed receipt dict, or None if missing or unreadable.
+    """
+    try:
+        data = orjson.loads((keg_dir / RECEIPT_NAME).read_bytes())
+
+    except (OSError, orjson.JSONDecodeError):
+        return None
+
+    return data if isinstance(data, dict) else None
 
 
 def current_arch() -> str:

@@ -11,7 +11,7 @@ from brewery.daemon import daemon as daemon_mod
 from brewery.daemon.daemon import (
     PLIST_LABEL,
     _gui_domain,
-    _patch_executable_paths,
+    _patch_plist,
     _service_target,
 )
 
@@ -61,7 +61,7 @@ class TestPatchExecutablePaths:
                 name
             ],
         )
-        _patch_executable_paths(plist)
+        _patch_plist(plist)
 
         data = plistlib.loads(plist.read_bytes())
         assert data["ProgramArguments"][0] == "/new/python3"
@@ -77,7 +77,7 @@ class TestPatchExecutablePaths:
             "which",
             lambda name: None if name == "brew" else "/new/python3",
         )
-        _patch_executable_paths(plist)
+        _patch_plist(plist)
         assert plist.read_bytes() == before
 
     def test_falls_back_to_sys_executable(self, tmp_path, monkeypatch) -> None:
@@ -90,7 +90,7 @@ class TestPatchExecutablePaths:
             lambda name: "/opt/homebrew/bin/brew" if name == "brew" else None,
         )
         monkeypatch.setattr(daemon_mod.sys, "executable", "/fallback/python")
-        _patch_executable_paths(plist)
+        _patch_plist(plist)
 
         data = plistlib.loads(plist.read_bytes())
         assert data["ProgramArguments"][0] == "/fallback/python"
