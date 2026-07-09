@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from rich.console import Console
-
 from brewery.core.errors import (
     EXIT_SYSTEM_ERROR,
     EXIT_TRANSIENT_ERROR,
@@ -21,9 +19,9 @@ from brewery.core.errors import (
 )
 from brewery.core.logging import BreweryLogger, get_logger
 
-log: BreweryLogger = get_logger(name=__name__)
+from .context import console
 
-console = Console(emoji=False, highlighter=None)
+log: BreweryLogger = get_logger(name=__name__)
 
 ERROR_TEMPLATES: dict[type[BrewError], str] = {
     AlreadyInstalledWarning: (
@@ -74,6 +72,7 @@ def format_error_message(error: BrewError) -> str:
         if issubclass(cls, BrewError) and cls in ERROR_TEMPLATES:
             template = ERROR_TEMPLATES[cls]
             break
+
     else:
         template = ERROR_TEMPLATES[BrewError]
 

@@ -125,6 +125,7 @@ def _build_table(widths: tuple[int, ...] | None = None) -> Table:
         col: dict = dict(col)
         if widths is not None:
             col["width"] = widths[i]
+
         table.add_column(**col)
 
     return table

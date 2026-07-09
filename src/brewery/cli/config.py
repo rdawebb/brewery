@@ -5,12 +5,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from rich.console import Console
 from typer_extensions import Context, ExtendedTyper
 
-config_app = ExtendedTyper(help="View brewery configuration and settings.")
+from .context import console
 
-console = Console(emoji=False, highlight=False)
+config_app = ExtendedTyper(help="View brewery configuration and settings.")
 
 
 def _fmt_count(value: int | None, unit: str) -> str:

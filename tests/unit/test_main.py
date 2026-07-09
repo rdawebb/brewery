@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from brewery.cli.main import handle_error
+from brewery.cli.error_formatting import handle_error
 from brewery.core.errors import (
     EXIT_SYSTEM_ERROR,
     EXIT_TRANSIENT_ERROR,
