@@ -26,7 +26,7 @@ log: BreweryLogger = get_logger(name=__name__)
 ERROR_TEMPLATES: dict[type[BrewError], str] = {
     AlreadyInstalledWarning: (
         "⚠️ Already installed: {package}\n"
-        "   Suggestion: Try 'brewery update {package}' to update the package"
+        "   Suggestion: Try 'brewery upgrade {package}' to update the package"
     ),
     PinnedPackageWarning: (
         "⚠️ Package is pinned: {package}\n"
@@ -46,7 +46,7 @@ ERROR_TEMPLATES: dict[type[BrewError], str] = {
     CacheError: (
         "⚠️ Cache error: {error}\n"
         "   Location: {path}\n"
-        "   Fix: Check file permissions or clear cache with 'brewery cache clear'"
+        "   Fix: Check file permissions, or delete {path} to rebuild the cache"
     ),
     TransientError: (
         "⚠️ Temporary failure: {message}\n   This may resolve itself - try again in a moment"

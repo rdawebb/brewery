@@ -56,7 +56,7 @@ def _patch_plist(plist_path: Path) -> None:
     Args:
         plist_path: The path to the plist file to patch.
     """
-    python = shutil.which("python3") or sys.executable
+    python = sys.executable or shutil.which("python3")
     brew = shutil.which("brew")
     if not brew:
         console.print(
@@ -80,7 +80,7 @@ def _patch_plist(plist_path: Path) -> None:
     )
 
     interval_mins = load_settings().daemon.catalog_refresh_interval_mins
-    data["RefreshInterval"] = interval_mins * 60
+    data["StartInterval"] = interval_mins * 60
 
     plist_path.write_bytes(plistlib.dumps(data))
 

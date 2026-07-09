@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from brewery.core.settings import load_settings
 from brewery.daemon import daemon as daemon_mod
 from brewery.daemon.daemon import (
     PLIST_LABEL,
@@ -54,18 +55,61 @@ class TestPatchExecutablePaths:
         """Test that arg[0] becomes the resolved python and PATH includes brew dir."""
         plist = tmp_path / "d.plist"
         self._write_plist(plist)
+        monkeypatch.setattr(daemon_mod.sys, "executable", "/venv/bin/python3")
         monkeypatch.setattr(
             daemon_mod.shutil,
             "which",
-            lambda name: {"python3": "/new/python3", "brew": "/opt/homebrew/bin/brew"}[
-                name
-            ],
+            lambda name: {
+                "python3": "/usr/bin/python3",
+                "brew": "/opt/homebrew/bin/brew",
+            }[name],
         )
         _patch_plist(plist)
 
         data = plistlib.loads(plist.read_bytes())
-        assert data["ProgramArguments"][0] == "/new/python3"
+        # sys.executable must win: the system python3 cannot import brewery
+        assert data["ProgramArguments"][0] == "/venv/bin/python3"
         assert data["EnvironmentVariables"]["PATH"].startswith("/opt/homebrew/bin")
+
+    def test_falls_back_to_path_python_without_sys_executable(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Test that a missing sys.executable falls back to python3 on PATH."""
+        plist = tmp_path / "d.plist"
+        self._write_plist(plist)
+        monkeypatch.setattr(daemon_mod.sys, "executable", "")
+        monkeypatch.setattr(
+            daemon_mod.shutil,
+            "which",
+            lambda name: {
+                "python3": "/usr/bin/python3",
+                "brew": "/opt/homebrew/bin/brew",
+            }[name],
+        )
+        _patch_plist(plist)
+
+        data = plistlib.loads(plist.read_bytes())
+        assert data["ProgramArguments"][0] == "/usr/bin/python3"
+
+    def test_writes_start_interval_not_refresh_interval(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Test that the patched plist uses launchd's StartInterval key, in seconds."""
+        plist = tmp_path / "d.plist"
+        self._write_plist(plist)
+        monkeypatch.setattr(
+            daemon_mod.shutil,
+            "which",
+            lambda name: {
+                "python3": "/usr/bin/python3",
+                "brew": "/opt/homebrew/bin/brew",
+            }[name],
+        )
+        _patch_plist(plist)
+
+        data = plistlib.loads(plist.read_bytes())
+        mins = load_settings().daemon.catalog_refresh_interval_mins
+        assert data["StartInterval"] == mins * 60
 
     def test_no_brew_leaves_plist_unchanged(self, tmp_path, monkeypatch) -> None:
         """Test that a missing brew aborts patching without modifying the plist."""

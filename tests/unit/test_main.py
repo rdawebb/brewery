@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
-from brewery.cli.error_formatting import handle_error
+from brewery.cli.error_formatting import ERROR_TEMPLATES, handle_error, suggest_search
+from brewery.cli.main import KNOWN_COMMANDS
 from brewery.core.errors import (
     EXIT_SYSTEM_ERROR,
     EXIT_TRANSIENT_ERROR,
@@ -64,3 +67,36 @@ class TestHandleError:
     def test_handle_error(self, error, expected) -> None:
         """Test the handle_error function."""
         assert handle_error(error) == expected
+
+
+# Commands a suggestion may name that brewery does not register itself; these
+# resolve through the brew passthrough in main(). Drop entries as they go native.
+PASSTHROUGH_SUGGESTIONS: frozenset[str] = frozenset({"unpin"})
+
+_SUGGESTED_COMMAND = re.compile(r"brewery ([a-z][a-z-]*)")
+
+
+def _suggested_commands(text: str) -> set[str]:
+    """Extract every 'brewery <command>' named in a suggestion string."""
+    return set(_SUGGESTED_COMMAND.findall(text))
+
+
+class TestSuggestedCommandsExist:
+    """Suggestions must name a command the user can actually run."""
+
+    @pytest.mark.parametrize(
+        "template",
+        [pytest.param(t, id=cls.__name__) for cls, t in ERROR_TEMPLATES.items()],
+    )
+    def test_error_template_commands_are_runnable(self, template: str) -> None:
+        """Every command named in an error template is registered or passes through."""
+        for command in _suggested_commands(template):
+            assert command in KNOWN_COMMANDS | PASSTHROUGH_SUGGESTIONS, (
+                f"error template suggests 'brewery {command}', which is neither a "
+                f"registered brewery command nor a known brew passthrough"
+            )
+
+    def test_suggest_search_commands_are_runnable(self) -> None:
+        """The missing-package suggestion names only runnable commands."""
+        for command in _suggested_commands(suggest_search(package_name="wget")):
+            assert command in KNOWN_COMMANDS | PASSTHROUGH_SUGGESTIONS
