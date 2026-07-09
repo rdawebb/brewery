@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
-import sys
-
-from brewery.cli.context import _repository, app, console, run_async
-from brewery.cli.error_formatting import handle_error
+from brewery.cli.context import _repository, app, run_async
+from brewery.cli.error_formatting import command_error
+from brewery.cli.output import (
+    confirm_or_cancel,
+    pkg_line,
+    print_failures,
+    print_result,
+    spinner,
+)
 from brewery.core.errors import AlreadyInstalledWarning
 from brewery.core.models import PackageKind
 
 
 @app.command(aliases=["add"])
+@command_error(
+    warnings=(AlreadyInstalledWarning,), interrupt_hint="brewery install <name>"
+)
 def install(
     names: list[str] = app.Argument(...),
     kind: PackageKind | None = app.Option(
@@ -25,47 +33,24 @@ def install(
         kind: Kind of the package(s) (formula or cask).
         yes: If true, skip confirmation prompt.
     """
-    try:
-        kind: PackageKind = kind or PackageKind.FORMULA
-        if not yes:
-            pkg_str: str = ", ".join(names)
-            if not app.confirm(text=f"Install {kind.value}: {pkg_str}?", default=True):
-                console.print("\nInstallation cancelled\n", style="dim")
-                return
+    target: PackageKind = kind or PackageKind.FORMULA
 
-        with _repository() as repo:
-            app.echo()
-            with console.status(
-                status="[bold green]Installing...[/bold green]", refresh_per_second=5
-            ):
-                installed, failures = run_async(coro=repo.install_packages(names, kind))
+    if not confirm_or_cancel(
+        f"Install {target.value}: {', '.join(names)}?", yes=yes, default=True
+    ):
+        return
 
-            console.print(
-                f"✓ Installed {len(installed)} package(s)\n", style="bold green"
-            )
-            for pkg in installed:
-                console.print(
-                    f"  [dim]→[/dim] {pkg.name} {pkg.versions[0] if pkg.versions else ''}"
-                )
+    with _repository() as repo:
+        app.echo()
+        with spinner("Installing...", style="green"):
+            installed, failures = run_async(coro=repo.install_packages(names, target))
 
-            if failures:
-                console.print(
-                    f"✗ Failed to install {len(failures)} package(s)", style="bold red"
-                )
-                for name, reason in failures:
-                    console.print(f"  [dim]-[/dim] {name} - {reason}")
-
-            app.echo()
-
-    except AlreadyInstalledWarning as e:
-        console.print(f"\n⚠ {e.message}\n", style="bold yellow")
-
-    except KeyboardInterrupt:
-        console.print(
-            "\n⚠ Interrupted. Re-run [bold]brewery install <name>[/bold] to complete it\n",
-            style="bold yellow",
+        print_result(
+            f"✓ Installed {len(installed)} package(s)\n",
+            map(pkg_line, installed),
+            style="bold green",
+            bullet="→",
         )
-        sys.exit(130)
+        print_failures(f"✗ Failed to install {len(failures)} package(s)", failures)
 
-    except Exception as e:
-        sys.exit(handle_error(error=e))
+        app.echo()

@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import sys
-
 from brewery.cli.context import _repository, app, console, run_async
-from brewery.cli.error_formatting import handle_error
+from brewery.cli.error_formatting import command_error
+from brewery.cli.output import print_result, spinner
 from brewery.core.models import Package
 
 
 @app.command(aliases=["o", "out"])
+@command_error()
 def outdated(
     check: bool = app.Option(
         False,
@@ -26,39 +26,33 @@ def outdated(
     Args:
         check: If True, performs a live brew outdated check and updates cache.
     """
-    try:
-        with _repository() as repo:
-            pkgs: list[Package]
+    with _repository() as repo:
+        pkgs: list[Package]
 
-            app.echo()
-            if check:
-                with console.status(
-                    status="[bold yellow]Checking for updates...[/bold yellow]",
-                    refresh_per_second=5,
-                ):
-                    from brewery.daemon.catalog_refresh import refresh_catalog
+        app.echo()
+        if check:
+            with spinner("Checking for updates..."):
+                from brewery.daemon.catalog_refresh import refresh_catalog
 
-                    run_async(coro=refresh_catalog(catalog=repo.catalog))
-                    repo.cache_mgr.invalidate()
-                    pkgs = repo.get_outdated()
-
-            else:
+                run_async(coro=refresh_catalog(catalog=repo.catalog))
+                repo.cache_mgr.invalidate()
                 pkgs = repo.get_outdated()
 
-            if not pkgs:
-                console.print("✓ All packages are up to date!\n", style="bold green")
-                return
+        else:
+            pkgs = repo.get_outdated()
 
-            console.print(f"• {len(pkgs)} outdated package(s)\n", style="bold yellow")
-            for pkg in pkgs:
-                latest = pkg.metadata.get("latest_version")
-                console.print(f"  [dim]-[/dim] {pkg.name} → {latest}")
+        if not pkgs:
+            console.print("✓ All packages are up to date!\n", style="bold green")
+            return
 
-            console.print(
-                "\n  Run [bold]brewery upgrade[/bold] to update all outdated packages, "
-                "\n  or [bold]brewery upgrade <packages>[/bold] to update specific packages\n",
-                style="dim",
-            )
+        print_result(
+            f"• {len(pkgs)} outdated package(s)\n",
+            (f"{pkg.name} → {pkg.metadata.get('latest_version')}" for pkg in pkgs),
+            style="bold yellow",
+        )
 
-    except Exception as e:
-        sys.exit(handle_error(error=e))
+        console.print(
+            "\n  Run [bold]brewery upgrade[/bold] to update all outdated packages, "
+            "\n  or [bold]brewery upgrade <packages>[/bold] to update specific packages\n",
+            style="dim",
+        )

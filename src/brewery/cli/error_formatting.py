@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import functools
+import sys
+from typing import Callable, ParamSpec
+
 from brewery.core.errors import (
     EXIT_SYSTEM_ERROR,
     EXIT_TRANSIENT_ERROR,
@@ -20,6 +24,10 @@ from brewery.core.errors import (
 from brewery.core.logging import BreweryLogger, get_logger
 
 from .context import console
+
+P = ParamSpec("P")
+
+EXIT_INTERRUPTED = 130
 
 log: BreweryLogger = get_logger(name=__name__)
 
@@ -143,3 +151,47 @@ def handle_error(error: Exception) -> int:
         log.error(event="unexpected_error", error=str(object=error), exc_info=True)
         console.print(f"\n⚠ Unexpected error occurred: {error}\n", style="bold red")
         return EXIT_SYSTEM_ERROR
+
+
+def command_error(
+    *,
+    interrupt_hint: str | None = None,
+    warnings: tuple[type[BrewError], ...] = (),
+) -> Callable[[Callable[P, None]], Callable[P, None]]:
+    """Wrap a CLI command body with standard error handling.
+
+    Args:
+        interrupt_hint: Command to suggest re-running after a Ctrl-C, e.g.
+            "brewery install <name>". Omit for commands with nothing to resume.
+        warnings: Error types that are advisory rather than failures. These print
+            their message and exit 0. Checked before the catch-all.
+
+    Returns:
+        A decorator wrapping the command body.
+    """
+
+    def decorate(fn: Callable[P, None]) -> Callable[P, None]:
+        @functools.wraps(fn)
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
+            try:
+                return fn(*args, **kwargs)
+
+            # An empty `warnings` tuple never matches, so this is a no-op by default
+            except warnings as e:
+                console.print(f"\n⚠ {e.message}\n", style="bold yellow")
+
+            except KeyboardInterrupt:
+                if interrupt_hint:
+                    console.print(
+                        f"\n⚠ Interrupted. Re-run [bold]{interrupt_hint}[/bold] "
+                        "to complete it\n",
+                        style="bold yellow",
+                    )
+                sys.exit(EXIT_INTERRUPTED)
+
+            except Exception as e:
+                sys.exit(handle_error(error=e))
+
+        return wrapper
+
+    return decorate

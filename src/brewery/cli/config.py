@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 from typer_extensions import Context, ExtendedTyper
 
 from .context import console
+from .error_formatting import command_error
 
 config_app = ExtendedTyper(help="View brewery configuration and settings.")
 
@@ -116,6 +116,7 @@ def config_path() -> None:
 
 
 @config_app.command(name="set")
+@command_error()
 def config_set(
     key: str = config_app.Argument(..., help="Dotted key, e.g. retention.age_days"),
     value: str = config_app.Argument(
@@ -123,33 +124,22 @@ def config_set(
     ),
 ) -> None:
     """Set a configuration value."""
-    from brewery.cli.error_formatting import handle_error
-    from brewery.core.errors import BrewError
     from brewery.core.settings import write_setting
 
-    try:
-        written = write_setting(key, value)
-
-    except BrewError as e:
-        sys.exit(handle_error(error=e))
+    written = write_setting(key, value)
 
     shown = "unlimited" if written is None else written
     console.print(f"\n✓ Set [bold]{key}[/bold] to {shown}\n", style="bold green")
 
 
 @config_app.command(name="get")
+@command_error()
 def config_get(
     key: str = config_app.Argument(..., help="Dotted key, e.g. retention.age_days"),
 ) -> None:
     """Print one configuration value (resolved, with defaults applied)."""
-    from brewery.cli.error_formatting import handle_error
-    from brewery.core.errors import BrewError
     from brewery.core.settings import get_setting
 
-    try:
-        value = get_setting(key)
-
-    except BrewError as e:
-        sys.exit(handle_error(error=e))
+    value = get_setting(key)
 
     print("unlimited" if value is None else value)  # Bare stdout, pipe-friendly
