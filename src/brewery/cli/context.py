@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any, Coroutine
@@ -22,7 +23,7 @@ console = Console(emoji=False, highlight=False)
 @app.callback()
 def setup() -> None:
     """Set up the CLI environment"""
-    configure_logging(level="INFO", enable_console=True)
+    configure_logging(console_level=os.environ.get("BREWERY_LOG_CONSOLE"))
 
 
 @contextmanager

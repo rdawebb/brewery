@@ -11,9 +11,9 @@ from brewery.cli.commands import (  # noqa: F401  (registration side effects)
     uninstall,
     upgrade,
 )
-from brewery.cli.config import config_app
+from brewery.cli.commands.config import config_app
+from brewery.cli.commands.daemon import daemon_app
 from brewery.cli.context import app
-from brewery.daemon.daemon import daemon_app
 
 app.add_typer(
     daemon_app,

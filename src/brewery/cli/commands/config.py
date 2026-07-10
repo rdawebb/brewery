@@ -6,8 +6,8 @@ from pathlib import Path
 
 from typer_extensions import Context, ExtendedTyper
 
-from .context import console
-from .error_formatting import command_error
+from brewery.cli.context import console
+from brewery.cli.error_formatting import command_error
 
 config_app = ExtendedTyper(help="View brewery configuration and settings.")
 

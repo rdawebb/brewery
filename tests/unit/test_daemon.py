@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import plistlib
+import subprocess
 from pathlib import Path
 
 import pytest
 
+from brewery.core.errors import SysError, UserError
 from brewery.core.settings import load_settings
-from brewery.daemon import daemon as daemon_mod
-from brewery.daemon.daemon import (
+from brewery.daemon import launchd as daemon_mod
+from brewery.daemon.launchd import (
     PLIST_LABEL,
     _gui_domain,
-    _patch_plist,
     _service_target,
+    patch_plist,
 )
 
 pytestmark = pytest.mark.unit
@@ -34,7 +36,7 @@ class TestTargets:
 
 
 class TestPatchExecutablePaths:
-    """Tests for _patch_executable_paths plist rewriting."""
+    """Tests for patch_plist plist rewriting."""
 
     def _write_plist(self, path: Path) -> None:
         """Write a sample plist file for testing.
@@ -64,7 +66,7 @@ class TestPatchExecutablePaths:
                 "brew": "/opt/homebrew/bin/brew",
             }[name],
         )
-        _patch_plist(plist)
+        patch_plist(plist)
 
         data = plistlib.loads(plist.read_bytes())
         # sys.executable must win: the system python3 cannot import brewery
@@ -86,7 +88,7 @@ class TestPatchExecutablePaths:
                 "brew": "/opt/homebrew/bin/brew",
             }[name],
         )
-        _patch_plist(plist)
+        patch_plist(plist)
 
         data = plistlib.loads(plist.read_bytes())
         assert data["ProgramArguments"][0] == "/usr/bin/python3"
@@ -105,7 +107,7 @@ class TestPatchExecutablePaths:
                 "brew": "/opt/homebrew/bin/brew",
             }[name],
         )
-        _patch_plist(plist)
+        patch_plist(plist)
 
         data = plistlib.loads(plist.read_bytes())
         mins = load_settings().daemon.catalog_refresh_interval_mins
@@ -121,7 +123,7 @@ class TestPatchExecutablePaths:
             "which",
             lambda name: None if name == "brew" else "/new/python3",
         )
-        _patch_plist(plist)
+        patch_plist(plist)
         assert plist.read_bytes() == before
 
     def test_falls_back_to_sys_executable(self, tmp_path, monkeypatch) -> None:
@@ -134,7 +136,90 @@ class TestPatchExecutablePaths:
             lambda name: "/opt/homebrew/bin/brew" if name == "brew" else None,
         )
         monkeypatch.setattr(daemon_mod.sys, "executable", "/fallback/python")
-        _patch_plist(plist)
+        patch_plist(plist)
 
         data = plistlib.loads(plist.read_bytes())
         assert data["ProgramArguments"][0] == "/fallback/python"
+
+    def test_no_brew_returns_an_advisory_rather_than_printing(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """Test that the launchd layer reports advisories instead of writing to stdout."""
+        plist = tmp_path / "d.plist"
+        self._write_plist(plist)
+        monkeypatch.setattr(
+            daemon_mod.shutil,
+            "which",
+            lambda name: None if name == "brew" else "/new/python3",
+        )
+
+        warnings = patch_plist(plist)
+
+        assert len(warnings) == 1
+        assert "brew" in warnings[0]
+        assert capsys.readouterr().out == ""
+
+    def test_successful_patch_returns_no_advisories(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Test that a fully patched plist yields no advisories."""
+        plist = tmp_path / "d.plist"
+        self._write_plist(plist)
+        monkeypatch.setattr(
+            daemon_mod.shutil,
+            "which",
+            lambda name: {
+                "python3": "/usr/bin/python3",
+                "brew": "/opt/homebrew/bin/brew",
+            }[name],
+        )
+
+        assert patch_plist(plist) == []
+
+
+class TestServiceControl:
+    """The launchd layer raises instead of calling sys.exit, and never prints."""
+
+    def test_stop_raises_when_not_installed(self, tmp_path, monkeypatch) -> None:
+        """Test that stopping an uninstalled daemon is a UserError (exit 1 at the CLI)."""
+        monkeypatch.setattr(daemon_mod, "PLIST_DEST", tmp_path / "absent.plist")
+
+        with pytest.raises(UserError, match="not installed"):
+            daemon_mod.stop()
+
+    def test_start_raises_when_bootstrap_fails(self, tmp_path, monkeypatch) -> None:
+        """Test that a non-zero `launchctl bootstrap` surfaces as a SysError."""
+        monkeypatch.setattr(daemon_mod, "PLIST_DEST", tmp_path / "d.plist")
+        monkeypatch.setattr(daemon_mod, "LAUNCH_AGENTS", tmp_path)
+        monkeypatch.setattr(daemon_mod, "is_running", lambda: False)
+
+        source = tmp_path / "src.plist"
+        source.write_bytes(plistlib.dumps({"Label": PLIST_LABEL}))
+        monkeypatch.setattr(daemon_mod, "_plist_source", lambda: source)
+        monkeypatch.setattr(daemon_mod, "patch_plist", lambda _: [])
+        monkeypatch.setattr(
+            daemon_mod.subprocess,
+            "run",
+            lambda *a, **kw: subprocess.CompletedProcess(a[0], returncode=5),
+        )
+
+        with pytest.raises(SysError, match="bootstrap failed") as exc:
+            daemon_mod.start()
+
+        assert exc.value.context["returncode"] == 5
+
+    def test_is_running_reflects_launchctl_returncode(self, monkeypatch) -> None:
+        """Test that is_running is a pure predicate over `launchctl print`."""
+        monkeypatch.setattr(
+            daemon_mod.subprocess,
+            "run",
+            lambda *a, **kw: subprocess.CompletedProcess(a[0], returncode=0),
+        )
+        assert daemon_mod.is_running() is True
+
+        monkeypatch.setattr(
+            daemon_mod.subprocess,
+            "run",
+            lambda *a, **kw: subprocess.CompletedProcess(a[0], returncode=1),
+        )
+        assert daemon_mod.is_running() is False
