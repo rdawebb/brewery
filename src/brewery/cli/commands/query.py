@@ -8,7 +8,7 @@ from brewery.cli.output import spinner
 from brewery.core.models import Package, PackageKind
 
 
-@app.command(name="list", aliases=["ls", "l"])
+@app.command(name="list", aliases=["l", "ls"])
 @command_error()
 def list_pkgs(
     kind: PackageKind | None = app.Option(
@@ -39,6 +39,7 @@ def list_pkgs(
 
         if len(pkgs) > page_size:
             paginate(pkgs=pkgs, page_size=page_size, console=console)
+
         else:
             console.print(package_table(pkgs), emoji=False)
 

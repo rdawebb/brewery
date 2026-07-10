@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from brewery.cli.context import _repository, app, console, run_async
-from brewery.cli.error_formatting import command_error
+from brewery.cli.error_formatting import CommandFailed, command_error
 from brewery.cli.output import print_failures, print_result, spinner
 
 
@@ -26,3 +26,5 @@ def cleanup() -> None:
         print_failures(f"\n✗ {len(failures)} could not be removed:", failures)
 
         app.echo()
+        if failures:
+            raise CommandFailed

@@ -113,3 +113,16 @@ def print_failures(header: str, failures: Sequence[tuple[str, str]]) -> None:
 
     for name, reason in failures:
         console.print(f"  [dim]-[/dim] {name} - {reason}")
+
+
+def print_advisories(advisories: Sequence[tuple[str, str]]) -> None:
+    """Print advisory (name, reason) pairs. No-op when empty.
+
+    Advisories are conditions brew warns about but does not fail on, e.g. pinning
+    an already-pinned formula.
+
+    Args:
+        advisories: Pairs of item name and the advice about it.
+    """
+    for name, reason in advisories:
+        console.print(f"⚠ {name} - {reason}", style="yellow")

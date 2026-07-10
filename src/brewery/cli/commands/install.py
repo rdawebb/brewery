@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from brewery.cli.context import _repository, app, run_async
-from brewery.cli.error_formatting import command_error
+from brewery.cli.error_formatting import CommandFailed, command_error
 from brewery.cli.output import (
     confirm_or_cancel,
     pkg_line,
@@ -54,3 +54,5 @@ def install(
         print_failures(f"✗ Failed to install {len(failures)} package(s)", failures)
 
         app.echo()
+        if failures:
+            raise CommandFailed

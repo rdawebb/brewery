@@ -6,7 +6,9 @@ from __future__ import annotations
 from brewery.cli.commands import (  # noqa: F401  (registration side effects)
     cleanup,
     install,
+    link,
     outdated,
+    pin,
     query,
     uninstall,
     upgrade,

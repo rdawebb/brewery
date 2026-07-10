@@ -15,6 +15,7 @@ from brewery.core.errors import (
     BrewError,
     BrewTimeoutError,
     CacheError,
+    LinkError,
     PackageNotFoundError,
     PinnedPackageWarning,
     SysError,
@@ -30,6 +31,17 @@ P = ParamSpec("P")
 EXIT_INTERRUPTED = 130
 
 log: BreweryLogger = get_logger(name=__name__)
+
+
+class CommandFailed(Exception):
+    """Signal that a command hard-failed on one or more items.
+
+    Raised after the command has already printed its own failure report, so it
+    carries no message. `command_error` maps it to `EXIT_USER_ERROR`, matching
+    brew's `ofail` semantics: the command does its valid work, reports what
+    failed, and exits non-zero.
+    """
+
 
 ERROR_TEMPLATES: dict[type[BrewError], str] = {
     AlreadyInstalledWarning: (
@@ -55,6 +67,10 @@ ERROR_TEMPLATES: dict[type[BrewError], str] = {
         "⚠️ Cache error: {error}\n"
         "   Location: {path}\n"
         "   Fix: Check file permissions, or delete {path} to rebuild the cache"
+    ),
+    LinkError: (
+        "❌ {message}\n"
+        "   Suggestion: Try 'brewery link --overwrite <name>' to replace the existing files"
     ),
     TransientError: (
         "⚠️ Temporary failure: {message}\n   This may resolve itself - try again in a moment"
@@ -179,6 +195,9 @@ def command_error(
             # An empty `warnings` tuple never matches, so this is a no-op by default
             except warnings as e:
                 console.print(f"\n⚠ {e.message}\n", style="bold yellow")
+
+            except CommandFailed:
+                sys.exit(EXIT_USER_ERROR)
 
             except KeyboardInterrupt:
                 if interrupt_hint:

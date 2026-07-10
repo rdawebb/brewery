@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from brewery.core.cache import Cache, CacheManager
 from brewery.core.catalog import Catalog
@@ -13,6 +13,9 @@ from brewery.core.errors import PackageNotFoundError
 from brewery.core.models import Package, PackageKind, PackageStatus
 from brewery.core.shell import run_brew
 from brewery.providers import brew
+
+if TYPE_CHECKING:
+    from brewery.providers.linker import LinkResult, UnlinkResult
 
 
 class Repository:
@@ -303,28 +306,34 @@ class Repository:
     @log_operation(event_prefix="upgrade_packages", log_args=["names", "kind"])
     async def upgrade_packages(
         self, names: list[str] | None = None, kind: PackageKind | None = None
-    ) -> tuple[list[Package], list[Package], list[tuple[str, str]]]:
-        """Upgrade packages and report upgraded, already up-to-date, and failures.
+    ) -> tuple[
+        list[Package], list[Package], list[tuple[str, str]], list[tuple[str, str]]
+    ]:
+        """Upgrade packages and report upgraded, up-to-date, advisories, and failures.
 
         Args:
             names: Name(s) of the package(s) to upgrade.
             kind: Kind of the package(s) (formula, cask, auto (default))
 
         Returns:
-            Details of upgraded packages, already up-to-date packages, and any failures.
-            Pinned packages are reported in failures as "pinned - skipped", not upgraded.
+            Tuple of (upgraded packages, already up-to-date packages, (name, reason)
+            advisories, (name, reason) failures).
 
         Raises:
             BrewCommandError: Propagated from provider.
         """
         installed: list[Package] = self.cache_mgr.installed_packages()
         by_name: dict[str, Package] = {p.name: p for p in installed}
+        advisories: list[tuple[str, str]] = []
 
         # Resolve the target set and any pinned skips
         if names is None:
             targets = [p for p in installed if PackageStatus.OUTDATED in p.status]
-            failures = [
-                (p.name, "pinned - skipped")
+            failures: list[tuple[str, str]] = []
+
+            # A bulk upgrade skips pins without failing
+            advisories += [
+                (p.name, "pinned - not upgraded")
                 for p in targets
                 if PackageStatus.PINNED in p.status
             ]
@@ -336,7 +345,7 @@ class Repository:
             targets = [by_name[resolved[n]] for n in names if resolved[n] in by_name]
             failures = [(n, "not found") for n in names if resolved[n] not in by_name]
 
-            # Named upgrades must honour pins
+            # Naming a pinned package explicitly is a failure
             failures += [
                 (p.name, "pinned - skipped")
                 for p in targets
@@ -385,7 +394,7 @@ class Repository:
             else:
                 current.append(pkg)
 
-        return upgraded, current, failures
+        return upgraded, current, advisories, failures
 
     @log_operation(event_prefix="cleanup")
     async def cleanup_packages(
@@ -433,3 +442,159 @@ class Repository:
             self.cache_mgr.invalidate()
 
         return removed, failures
+
+    def _resolve_installed_formulae(
+        self, names: list[str]
+    ) -> tuple[list[Package], list[tuple[str, str]]]:
+        """Resolve user-supplied names to installed formulae.
+
+        Args:
+            names: Name(s) or alias(es) of the formulae.
+
+        Returns:
+            The resolved packages, and (name, reason) pairs for those not installed.
+        """
+        found: list[Package] = []
+        failures: list[tuple[str, str]] = []
+
+        for name in names:
+            pkg: Optional[Package] = self.cache_mgr.find_installed(
+                self.catalog.resolve_alias(name), PackageKind.FORMULA
+            )
+            if pkg is None:
+                failures.append((name, "not installed"))
+
+            else:
+                found.append(pkg)
+
+        return found, failures
+
+    @log_operation(event_prefix="pin_packages", log_args=["names"])
+    def pin_packages(
+        self, names: list[str]
+    ) -> tuple[list[str], list[tuple[str, str]], list[tuple[str, str]]]:
+        """Pin formulae at their active keg, preventing upgrades.
+
+        Args:
+            names: Name(s) of the formulae to pin.
+
+        Returns:
+            Tuple of (pinned names, (name, reason) advisories, (name, reason) failures).
+        """
+        from brewery.providers.pin_service import pin
+
+        env: BreweryENV = self.cache_mgr.env or get_brewery_env()
+        pkgs, failures = self._resolve_installed_formulae(names)
+
+        pinned: list[str] = []
+        advisories: list[tuple[str, str]] = []
+        for pkg in pkgs:
+            if not pkg.path:
+                failures.append((pkg.name, "no active keg"))
+
+            elif pin(prefix=env.prefix, name=pkg.name, keg=Path(pkg.path)):
+                pinned.append(pkg.name)
+
+            else:
+                advisories.append((pkg.name, "already pinned"))
+
+        if pinned:
+            self.cache_mgr.invalidate()
+
+        return pinned, advisories, failures
+
+    @log_operation(event_prefix="unpin_packages", log_args=["names"])
+    def unpin_packages(
+        self, names: list[str]
+    ) -> tuple[list[str], list[tuple[str, str]], list[tuple[str, str]]]:
+        """Unpin formulae, allowing them to be upgraded again.
+
+        Args:
+            names: Name(s) of the formulae to unpin.
+
+        Returns:
+            Tuple of (unpinned names, (name, reason) advisories, (name, reason) failures).
+        """
+        from brewery.providers.pin_service import unpin
+
+        env: BreweryENV = self.cache_mgr.env or get_brewery_env()
+        pkgs, failures = self._resolve_installed_formulae(names)
+
+        unpinned: list[str] = []
+        advisories: list[tuple[str, str]] = []
+        for pkg in pkgs:
+            if unpin(prefix=env.prefix, name=pkg.name):
+                unpinned.append(pkg.name)
+
+            else:
+                advisories.append((pkg.name, "not pinned"))
+
+        if unpinned:
+            self.cache_mgr.invalidate()
+
+        return unpinned, advisories, failures
+
+    @log_operation(event_prefix="link_packages", log_args=["names"])
+    def link_packages(
+        self,
+        names: list[str],
+        *,
+        overwrite: bool = False,
+        force: bool = False,
+        dry_run: bool = False,
+    ) -> tuple[
+        list[tuple[str, LinkResult]], list[tuple[str, str]], list[tuple[str, str]]
+    ]:
+        """Symlink formulae into the prefix.
+
+        Args:
+            names: Name(s) of the formulae to link.
+            overwrite: Delete conflicting prefix files while linking.
+            force: Allow keg-only formulae to be linked.
+            dry_run: Report what would be linked without touching the filesystem.
+
+        Returns:
+            Tuple of ((name, LinkResult) pairs, advisories, failures).
+        """
+        from brewery.providers.link_service import run_link
+
+        env: BreweryENV = self.cache_mgr.env or get_brewery_env()
+        pkgs, failures = self._resolve_installed_formulae(names)
+
+        linked, advisories, link_failures = run_link(
+            pkgs, env=env, overwrite=overwrite, force=force, dry_run=dry_run
+        )
+
+        if linked and not dry_run:
+            self.cache_mgr.invalidate()
+
+        return linked, advisories, failures + link_failures
+
+    @log_operation(event_prefix="unlink_packages", log_args=["names"])
+    def unlink_packages(
+        self, names: list[str], *, dry_run: bool = False
+    ) -> tuple[
+        list[tuple[str, UnlinkResult]], list[tuple[str, str]], list[tuple[str, str]]
+    ]:
+        """Remove formulae's symlinks from the prefix.
+
+        Args:
+            names: Name(s) of the formulae to unlink.
+            dry_run: Report what would be removed without touching the filesystem.
+
+        Returns:
+            Tuple of ((name, UnlinkResult) pairs, advisories, failures).
+        """
+        from brewery.providers.link_service import run_unlink
+
+        env: BreweryENV = self.cache_mgr.env or get_brewery_env()
+        pkgs, failures = self._resolve_installed_formulae(names)
+
+        unlinked, advisories, unlink_failures = run_unlink(
+            pkgs, env=env, dry_run=dry_run
+        )
+
+        if unlinked and not dry_run:
+            self.cache_mgr.invalidate()
+
+        return unlinked, advisories, failures + unlink_failures
