@@ -10,7 +10,11 @@ import pytest
 from typer.testing import CliRunner
 from typer_extensions import ExtendedTyper
 
-from brewery.cli.error_formatting import EXIT_INTERRUPTED, command_error
+from brewery.cli.error_formatting import (
+    EXIT_INTERRUPTED,
+    CommandFailed,
+    command_error,
+)
 from brewery.core.errors import (
     EXIT_SYSTEM_ERROR,
     EXIT_USER_ERROR,
@@ -69,6 +73,21 @@ def app() -> ExtendedTyper:
     @command_error()
     def clean() -> None:
         """Clean command."""
+        print("did the thing")
+
+    @app.command()
+    @command_error()
+    def failing() -> None:
+        """Command that raises CommandFailed after reporting, as pin/link do."""
+        raise CommandFailed
+
+    @app.command()
+    @command_error()
+    def succeeding() -> None:
+        """Command whose failure list is empty, so it never raises."""
+        failures: list[tuple[str, str]] = []
+        if failures:
+            raise CommandFailed
         print("did the thing")
 
     return app
@@ -183,3 +202,44 @@ class TestSignatureTransparency:
         def some_command() -> None: ...
 
         assert some_command.__name__ == "some_command"
+
+
+class TestCommandFailed:
+    """`CommandFailed` maps to the user-error exit code without reprinting."""
+
+    def test_command_failed_exits_user_error(self, app) -> None:
+        """A hard failure exits 1, matching brew's `ofail` semantics."""
+        result = runner.invoke(app, ["failing"])
+
+        assert result.exit_code == EXIT_USER_ERROR
+
+    def test_command_failed_prints_nothing_itself(self, app) -> None:
+        """The sentinel is silent; the command owns its own failure report."""
+        result = runner.invoke(app, ["failing"])
+
+        assert "CommandFailed" not in result.output
+        assert "Unexpected error" not in result.output
+
+    def test_no_failures_exits_clean(self, app) -> None:
+        """A command that never raises the sentinel runs to completion."""
+        result = runner.invoke(app, ["succeeding"])
+
+        assert result.exit_code == 0
+        assert "did the thing" in result.output
+
+    def test_typer_exit_would_be_swallowed_by_the_boundary(self) -> None:
+        """Guards why partial failures use CommandFailed, not ExtendedTyper.Exit.
+
+        `click.exceptions.Exit` subclasses RuntimeError, so `command_error`'s
+        catch-all treats it as an unexpected error and remaps it to exit 2. A
+        dedicated sentinel caught before the catch-all avoids that.
+        """
+        app = ExtendedTyper()
+
+        @app.command()
+        @command_error()
+        def raises_typer_exit() -> None:
+            raise app.Exit(EXIT_USER_ERROR)
+
+        assert isinstance(app.Exit(EXIT_USER_ERROR), Exception)
+        assert runner.invoke(app, []).exit_code == EXIT_SYSTEM_ERROR

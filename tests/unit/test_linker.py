@@ -736,6 +736,162 @@ class TestUnlink:
         assert (prefix / "opt" / "openssl@3").is_symlink()  # Untouched
 
 
+def _tree(root: Path) -> set[tuple[str, str]]:
+    """Snapshot every path under `root` as (relative path, symlink target or kind).
+
+    Args:
+        root: The directory to snapshot.
+
+    Returns:
+        A set describing the tree, comparable across a supposedly inert operation.
+    """
+    out: set[tuple[str, str]] = set()
+    for path in root.rglob("*"):
+        rel = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            out.add((rel, os.readlink(path)))
+
+        else:
+            out.add((rel, "dir" if path.is_dir() else "file"))
+
+    return out
+
+
+class TestDryRun:
+    """A dry run reports what would happen and touches nothing."""
+
+    def test_link_dry_run_mutates_nothing(self, keg_and_prefix) -> None:
+        """The prefix tree is byte-identical before and after a dry-run link."""
+        keg, prefix = keg_and_prefix
+        before = _tree(prefix)
+
+        result = link_keg(keg, prefix=prefix, name="openssl@3", dry_run=True)
+
+        assert result.linked  # It did plan real work
+        assert _tree(prefix) == before
+
+    def test_link_dry_run_writes_no_record_or_manifest(self, keg_and_prefix) -> None:
+        """Neither the linked-keg pointer nor the unlink manifest is written."""
+        keg, prefix = keg_and_prefix
+        link_keg(keg, prefix=prefix, name="openssl@3", dry_run=True)
+
+        assert not (prefix / "var" / "homebrew" / "linked" / "openssl@3").exists()
+        assert not (keg / _LINK_MANIFEST).exists()
+
+    def test_link_dry_run_previews_the_same_paths_it_would_link(
+        self, keg_and_prefix
+    ) -> None:
+        """Every path the preview names is one a real link goes on to create."""
+        keg, prefix = keg_and_prefix
+        preview = link_keg(keg, prefix=prefix, name="openssl@3", dry_run=True)
+        actual = link_keg(keg, prefix=prefix, name="openssl@3")
+
+        assert set(preview.linked) <= set(actual.linked)
+        assert "bin/openssl" in preview.linked
+
+    def test_link_dry_run_reports_conflicts_instead_of_raising(
+        self, keg_and_prefix
+    ) -> None:
+        """Conflicts land on the result, so --overwrite --dry-run can show them."""
+        keg, prefix = keg_and_prefix
+        _mk(prefix, "bin/openssl", "a real file in the way")
+
+        result = link_keg(keg, prefix=prefix, name="openssl@3", dry_run=True)
+
+        assert [dst for dst, _ in result.conflicts] == [str(prefix / "bin" / "openssl")]
+        assert (prefix / "bin" / "openssl").read_text() == "a real file in the way"
+
+    def test_link_without_dry_run_still_raises_on_conflict(
+        self, keg_and_prefix
+    ) -> None:
+        """The dry-run carve-out must not disarm the real conflict guard."""
+        keg, prefix = keg_and_prefix
+        _mk(prefix, "bin/openssl", "a real file in the way")
+
+        with pytest.raises(LinkError):
+            link_keg(keg, prefix=prefix, name="openssl@3")
+
+    def test_unlink_dry_run_lists_without_removing(self, keg_and_prefix) -> None:
+        """The paths a real unlink would remove are reported but left in place."""
+        keg, prefix = keg_and_prefix
+        link_keg(keg, prefix=prefix, name="openssl@3")
+        before = _tree(prefix)
+
+        result = unlink_keg(keg, prefix=prefix, name="openssl@3", dry_run=True)
+
+        assert "bin/openssl" in result.removed
+        assert _tree(prefix) == before
+
+    def test_unlink_dry_run_keeps_opt_and_linked_record(self, keg_and_prefix) -> None:
+        """The opt link and linked-keg pointer survive a dry run."""
+        keg, prefix = keg_and_prefix
+        (prefix / "opt").mkdir(parents=True, exist_ok=True)
+        (prefix / "opt" / "openssl@3").symlink_to(keg)
+        link_keg(keg, prefix=prefix, name="openssl@3")
+
+        unlink_keg(keg, prefix=prefix, name="openssl@3", dry_run=True)
+
+        assert (prefix / "opt" / "openssl@3").is_symlink()
+        assert (prefix / "var" / "homebrew" / "linked" / "openssl@3").is_symlink()
+
+    def test_unlink_dry_run_matches_what_unlink_removes(self, keg_and_prefix) -> None:
+        """The preview names exactly the paths the real unlink goes on to remove."""
+        keg, prefix = keg_and_prefix
+        link_keg(keg, prefix=prefix, name="openssl@3")
+
+        preview = unlink_keg(keg, prefix=prefix, name="openssl@3", dry_run=True)
+        actual = unlink_keg(keg, prefix=prefix, name="openssl@3")
+
+        assert sorted(preview.removed) == sorted(actual.removed)
+
+
+class TestOptLink:
+    """`opt/<name>` is brew's stable path; link must restore what unlink removes."""
+
+    def test_link_creates_the_opt_record(self, keg_and_prefix) -> None:
+        """Brew's Keg#link optlinks before linking; so must ours."""
+        keg, prefix = keg_and_prefix
+        link_keg(keg, prefix=prefix, name="openssl@3")
+
+        opt = prefix / "opt" / "openssl@3"
+        assert opt.is_symlink()
+        assert _readlink(opt) == "../Cellar/openssl@3/3.0"
+        assert _points_to(opt, keg)
+
+    def test_unlink_then_link_restores_opt(self, keg_and_prefix) -> None:
+        """`unlink && link` must leave the prefix as it found it.
+
+        unlink_keg drops opt/<name>, so a link that did not rewrite it would
+        leave every `$(brew --prefix)/opt/<name>` reference dangling.
+        """
+        keg, prefix = keg_and_prefix
+        link_keg(keg, prefix=prefix, name="openssl@3")
+        unlink_keg(keg, prefix=prefix, name="openssl@3")
+        assert not (prefix / "opt" / "openssl@3").exists()
+
+        link_keg(keg, prefix=prefix, name="openssl@3")
+        assert _points_to(prefix / "opt" / "openssl@3", keg)
+
+    def test_link_dry_run_writes_no_opt_record(self, keg_and_prefix) -> None:
+        """Brew skips optlink on a dry run (`unless dry_run`); so do we."""
+        keg, prefix = keg_and_prefix
+        link_keg(keg, prefix=prefix, name="openssl@3", dry_run=True)
+
+        assert not (prefix / "opt" / "openssl@3").exists()
+
+    def test_link_repoints_a_stale_opt_record(self, keg_and_prefix) -> None:
+        """An opt link left pointing at an older keg is re-pointed, not left stale."""
+        keg, prefix = keg_and_prefix
+        old = prefix / "Cellar" / "openssl@3" / "2.0"
+        old.mkdir(parents=True)
+        (prefix / "opt").mkdir(parents=True, exist_ok=True)
+        (prefix / "opt" / "openssl@3").symlink_to(old)
+
+        link_keg(keg, prefix=prefix, name="openssl@3")
+
+        assert _points_to(prefix / "opt" / "openssl@3", keg)
+
+
 _CANDIDATES = ["gettext", "python@3.13", "python@3.14", "node", "openssl@3"]
 
 

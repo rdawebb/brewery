@@ -104,15 +104,46 @@ class Brew:
 
         return token_dir
 
+    def _bookkeeping_record(self, subdir: str, name: str) -> None:
+        """Write a `var/homebrew/<subdir>/<name>` record the way brew does.
+
+        Brew's linked and pinned records are relative symlinks into the Cellar.
+        Names with no keg on disk get a dangling one, which is what brew leaves
+        behind after a botched uninstall and is still read as present.
+
+        Args:
+            subdir: The bookkeeping directory under `var/homebrew`.
+            name: The name of the formula.
+        """
+        d = self.prefix / "var" / "homebrew" / subdir
+        d.mkdir(parents=True, exist_ok=True)
+        (d / name).symlink_to(os.path.relpath(self._active_keg(name), d))
+
+    def _active_keg(self, name: str) -> Path:
+        """Resolve a formula's active keg, opt link first, newest keg otherwise.
+
+        Args:
+            name: The name of the formula.
+
+        Returns:
+            The keg path, which need not exist.
+        """
+        opt = self.prefix / "opt" / name
+        if opt.is_symlink():
+            return Path(os.path.realpath(opt))
+
+        rack = self.cellar / name
+        kegs = [p for p in rack.iterdir() if p.is_dir()] if rack.is_dir() else []
+
+        return max(kegs, key=lambda p: p.stat().st_mtime) if kegs else rack / "0"
+
     def link(self, name: str) -> None:
         """Mark a formula linked in brew's bookkeeping directory.
 
         Args:
             name: The name of the formula.
         """
-        d = self.prefix / "var" / "homebrew" / "linked"
-        d.mkdir(parents=True, exist_ok=True)
-        (d / name).touch()
+        self._bookkeeping_record("linked", name)
 
     def pin(self, name: str) -> None:
         """Mark a formula pinned in brew's bookkeeping directory.
@@ -120,9 +151,7 @@ class Brew:
         Args:
             name: The name of the formula.
         """
-        d = self.prefix / "var" / "homebrew" / "pinned"
-        d.mkdir(parents=True, exist_ok=True)
-        (d / name).touch()
+        self._bookkeeping_record("pinned", name)
 
 
 def _by_name(records) -> dict:

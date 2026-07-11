@@ -20,6 +20,10 @@ EXPECTED_KNOWN_COMMANDS = {
     "outdated", "o", "out",
     "upgrade", "u", "up",
     "cleanup", "c", "clean",
+    "pin", "p",
+    "unpin", "unp",
+    "link", "ln",
+    "unlink", "ul",
     "daemon", "d",
     "config", "cfg",
 }  # fmt: skip

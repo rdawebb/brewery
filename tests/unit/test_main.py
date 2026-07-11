@@ -71,7 +71,7 @@ class TestHandleError:
 
 # Commands a suggestion may name that brewery does not register itself; these
 # resolve through the brew passthrough in main(). Drop entries as they go native.
-PASSTHROUGH_SUGGESTIONS: frozenset[str] = frozenset({"unpin"})
+PASSTHROUGH_SUGGESTIONS: frozenset[str] = frozenset()
 
 _SUGGESTED_COMMAND = re.compile(r"brewery ([a-z][a-z-]*)")
 

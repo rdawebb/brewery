@@ -74,6 +74,12 @@ class TestRouting:
             pytest.param(["ls"], "app", id="alias"),
             pytest.param(["config", "show"], "app", id="subapp"),
             pytest.param(["daemon"], "app", id="subapp_bare"),
+            # Formerly passed through to brew; native since pin/link landed
+            pytest.param(["pin", "wget"], "app", id="pin"),
+            pytest.param(["unpin", "wget"], "app", id="unpin"),
+            pytest.param(["link", "wget"], "app", id="link"),
+            pytest.param(["ln", "wget"], "app", id="link_alias"),
+            pytest.param(["unlink", "wget"], "app", id="unlink"),
             pytest.param(["doctor"], "brew", id="unknown_command"),
             pytest.param(["bogus", "x"], "brew", id="unknown_with_args"),
             pytest.param(["--help"], "app", id="flag_first"),

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Sequence
 
 import pytest
 
@@ -57,6 +57,39 @@ def build_keg() -> Callable[[Path], Path]:
         The _build_keg callable, for constructing additional kegs in a test.
     """
     return _build_keg
+
+
+@pytest.fixture
+def make_keg() -> Callable[..., Path]:
+    """Return a factory that creates a keg dir at `cellar/name/version`.
+
+    The factory signature is `make_keg(cellar, name, version="1.0", *,
+    executables=())`. With no executables it just creates the (empty) version
+    directory; otherwise it populates `bin/<exe>` with a trivial shell script
+    for each name given.
+
+    Returns:
+        A callable producing the created keg version directory.
+    """
+
+    def _make(
+        cellar: Path,
+        name: str,
+        version: str = "1.0",
+        *,
+        executables: Sequence[str] = (),
+    ) -> Path:
+        keg = cellar / name / version
+        if executables:
+            (keg / "bin").mkdir(parents=True)
+            for exe in executables:
+                (keg / "bin" / exe).write_text("#!/bin/sh\n")
+        else:
+            keg.mkdir(parents=True)
+
+        return keg
+
+    return _make
 
 
 @pytest.fixture
