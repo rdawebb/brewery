@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from typer_extensions import Context, ExtendedTyper
@@ -63,7 +64,7 @@ def _render_config() -> None:
     status, ok = _config_status(path)
     s = load_settings()
 
-    config_app.echo()
+    sys.stdout.write("\n")
     console.print("[bold]Configuration[/bold]\n")
     console.print(f"  File   {path}")
     console.print(f"         {status}", style="dim" if ok else "bold yellow")
@@ -90,7 +91,7 @@ def _render_config() -> None:
 
     console.print("\n[bold]Display[/bold]")
     console.print(f"  Format            {s.display.format}")
-    config_app.echo()
+    sys.stdout.write("\n")
 
 
 @config_app.callback(invoke_without_command=True)

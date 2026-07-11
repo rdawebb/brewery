@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 from brewery.cli.context import _repository, app, console, run_async
 from brewery.cli.error_formatting import CommandFailed, command_error
 from brewery.cli.output import print_failures, print_result, spinner
@@ -12,7 +14,7 @@ from brewery.cli.output import print_failures, print_result, spinner
 def cleanup() -> None:
     """Remove old package versions."""
     with _repository() as repo:
-        app.echo()
+        sys.stdout.write("\n")
         with spinner("Cleaning up..."):
             removed, failures = run_async(coro=repo.cleanup_packages())
 
@@ -25,6 +27,6 @@ def cleanup() -> None:
         )
         print_failures(f"\n✗ {len(failures)} could not be removed:", failures)
 
-        app.echo()
+        sys.stdout.write("\n")
         if failures:
             raise CommandFailed

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 from brewery.cli.context import _repository, app, console, run_async
 from brewery.cli.error_formatting import command_error
 from brewery.cli.output import print_result, spinner
@@ -29,7 +31,7 @@ def outdated(
     with _repository() as repo:
         pkgs: list[Package]
 
-        app.echo()
+        sys.stdout.write("\n")
         if check:
             with spinner("Checking for updates..."):
                 from brewery.daemon.catalog_refresh import refresh_catalog

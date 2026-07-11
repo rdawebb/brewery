@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING
 
 from brewery.cli.context import _repository, app
@@ -60,7 +61,7 @@ def link(
         force: Allow keg-only formulae to be linked.
     """
     with _repository() as repo:
-        app.echo()
+        sys.stdout.write("\n")
         linked, advisories, failures = repo.link_packages(
             names, overwrite=overwrite, force=force, dry_run=dry_run
         )
@@ -82,7 +83,7 @@ def link(
 
         print_failures(f"✗ Failed to link {len(failures)} package(s)", failures)
 
-        app.echo()
+        sys.stdout.write("\n")
         if failures:
             raise CommandFailed
 
@@ -102,7 +103,7 @@ def unlink(
         dry_run: Report what would be removed without touching the filesystem.
     """
     with _repository() as repo:
-        app.echo()
+        sys.stdout.write("\n")
         unlinked, advisories, failures = repo.unlink_packages(names, dry_run=dry_run)
 
         print_advisories(advisories)
@@ -127,6 +128,6 @@ def unlink(
 
         print_failures(f"✗ Failed to unlink {len(failures)} package(s)", failures)
 
-        app.echo()
+        sys.stdout.write("\n")
         if failures:
             raise CommandFailed

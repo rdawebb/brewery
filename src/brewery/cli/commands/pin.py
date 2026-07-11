@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 from brewery.cli.context import _repository, app
 from brewery.cli.error_formatting import CommandFailed, command_error
 from brewery.cli.output import (
@@ -74,12 +76,12 @@ def pin(
     _reject_casks(cask=cask, command="pin", names=names)
 
     with _repository() as repo:
-        app.echo()
+        sys.stdout.write("\n")
         pinned, advisories, failures = repo.pin_packages(names)
 
         _report("pin", pinned, advisories, failures)
 
-        app.echo()
+        sys.stdout.write("\n")
         if failures:
             raise CommandFailed
 
@@ -99,11 +101,11 @@ def unpin(
     _reject_casks(cask=cask, command="unpin", names=names)
 
     with _repository() as repo:
-        app.echo()
+        sys.stdout.write("\n")
         unpinned, advisories, failures = repo.unpin_packages(names)
 
         _report("unpin", unpinned, advisories, failures)
 
-        app.echo()
+        sys.stdout.write("\n")
         if failures:
             raise CommandFailed

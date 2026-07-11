@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 from brewery.cli.context import _repository, app, console, run_async
 from brewery.cli.error_formatting import CommandFailed, command_error
 from brewery.cli.output import (
@@ -59,13 +61,13 @@ def upgrade(
                     style="bold yellow",
                 )
 
-                app.echo()
+                sys.stdout.write("\n")
                 if not confirm_or_cancel(
                     f"Upgrade {len(outdated)} outdated package(s)?", yes=False
                 ):
                     return
 
-        app.echo()
+        sys.stdout.write("\n")
         with spinner("Upgrading..."):
             upgraded, current, advisories, failures = run_async(
                 coro=repo.upgrade_packages(names, kind)
@@ -94,6 +96,6 @@ def upgrade(
 
         print_failures(f"\n✗ {len(failures)} failed:", failures)
 
-        app.echo()
+        sys.stdout.write("\n")
         if failures:
             raise CommandFailed

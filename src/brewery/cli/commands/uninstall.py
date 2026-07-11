@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 from brewery.cli.context import _repository, app, run_async
 from brewery.cli.error_formatting import CommandFailed, command_error
 from brewery.cli.output import (
@@ -33,7 +35,7 @@ def uninstall(
         return
 
     with _repository() as repo:
-        app.echo()
+        sys.stdout.write("\n")
         with spinner("Uninstalling..."):
             removed, failures = run_async(coro=repo.uninstall_packages(names, kind))
 
@@ -42,6 +44,6 @@ def uninstall(
         )
         print_failures(f"✗ Failed to uninstall {len(failures)} package(s)", failures)
 
-        app.echo()
+        sys.stdout.write("\n")
         if failures:
             raise CommandFailed
