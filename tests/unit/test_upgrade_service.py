@@ -47,7 +47,7 @@ def patched(monkeypatch) -> tuple[MockClient, dict]:
     built: dict = {}
 
     def _build(
-        repo, *, client, env, run_brew, install_concurrency=1
+        repo, *, client, env, run_brew, install_concurrency=1, progress=None
     ) -> MockOrchestrator:
         """Record the build call and return a mock orchestrator.
 
@@ -57,6 +57,7 @@ def patched(monkeypatch) -> tuple[MockClient, dict]:
             env: The environment variables to use.
             run_brew: The brew run command to use.
             install_concurrency: The number of concurrent install jobs to run.
+            progress: The optional progress sink.
 
         Returns:
             A mock orchestrator.
@@ -67,6 +68,7 @@ def patched(monkeypatch) -> tuple[MockClient, dict]:
             env=env,
             run_brew=run_brew,
             install_concurrency=install_concurrency,
+            progress=progress,
         )
 
         return MockOrchestrator()

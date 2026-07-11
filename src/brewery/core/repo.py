@@ -16,6 +16,7 @@ from brewery.providers import brew
 
 if TYPE_CHECKING:
     from brewery.providers.linker import LinkResult, UnlinkResult
+    from brewery.providers.orchestrator import ProgressPort
 
 
 class Repository:
@@ -123,13 +124,18 @@ class Repository:
 
     @log_operation(event_prefix="install_package", log_args=["name", "kind"])
     async def install_packages(
-        self, names: list[str], kind: PackageKind = PackageKind.FORMULA
+        self,
+        names: list[str],
+        kind: PackageKind = PackageKind.FORMULA,
+        *,
+        progress: ProgressPort | None = None,
     ) -> tuple[list[Package], list[tuple[str, str]]]:
         """Install a package or packages and return details.
 
         Args:
             names: Name of the package(s) to install.
             kind: Kind of the package(s) - formula (default or cask).
+            progress: Optional progress sink for the native pipeline.
 
         Returns:
             Package(s) details on success.
@@ -143,7 +149,7 @@ class Repository:
         else:
             from brewery.providers.install_service import run_install
 
-            await run_install(self, names, run_brew=run_brew)
+            await run_install(self, names, run_brew=run_brew, progress=progress)
 
         self.cache_mgr.invalidate()
         installed_by_name: dict[str, Package] = {
@@ -305,7 +311,11 @@ class Repository:
 
     @log_operation(event_prefix="upgrade_packages", log_args=["names", "kind"])
     async def upgrade_packages(
-        self, names: list[str] | None = None, kind: PackageKind | None = None
+        self,
+        names: list[str] | None = None,
+        kind: PackageKind | None = None,
+        *,
+        progress: ProgressPort | None = None,
     ) -> tuple[
         list[Package], list[Package], list[tuple[str, str]], list[tuple[str, str]]
     ]:
@@ -314,6 +324,7 @@ class Repository:
         Args:
             names: Name(s) of the package(s) to upgrade.
             kind: Kind of the package(s) (formula, cask, auto (default))
+            progress: Optional progress sink for the native pipeline.
 
         Returns:
             Tuple of (upgraded packages, already up-to-date packages, (name, reason)
@@ -370,7 +381,9 @@ class Repository:
                 for p in targets
                 if p.kind == PackageKind.FORMULA and p.path
             }
-            await run_upgrade(self, formula_names, old_kegs, run_brew=run_brew)
+            await run_upgrade(
+                self, formula_names, old_kegs, run_brew=run_brew, progress=progress
+            )
 
         if cask_names:
             await self.cask.upgrade(names=cask_names)

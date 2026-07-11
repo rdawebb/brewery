@@ -693,11 +693,12 @@ class TestUpgrade:
                 """Initialise the mock downloader with a cache directory and client."""
                 pass
 
-            async def fetch(self, ref) -> Path:
+            async def fetch(self, ref, *, on_progress=None) -> Path:
                 """Return a mock Path for the wget tarball.
 
                 Args:
                     ref: The reference to fetch (unused).
+                    on_progress: Optional progress callback (unused).
 
                 Returns:
                     A Path object pointing to the fake wget tarball.

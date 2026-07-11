@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import sys
 
-from brewery.cli.context import _repository, app, run_async
+from brewery.cli.context import _repository, app, console, run_async
 from brewery.cli.error_formatting import CommandFailed, command_error
 from brewery.cli.output import (
     confirm_or_cancel,
     pkg_line,
     print_failures,
     print_result,
-    spinner,
 )
+from brewery.cli.progress import make_reporter
 from brewery.core.errors import AlreadyInstalledWarning
 from brewery.core.models import PackageKind
 
@@ -44,8 +44,9 @@ def install(
 
     with _repository() as repo:
         sys.stdout.write("\n")
-        with spinner("Installing...", style="green"):
-            installed, failures = run_async(coro=repo.install_packages(names, target))
+        installed, failures = run_async(
+            coro=repo.install_packages(names, target, progress=make_reporter(console))
+        )
 
         print_result(
             f"✓ Installed {len(installed)} package(s)\n",

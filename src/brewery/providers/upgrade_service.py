@@ -9,7 +9,7 @@ import httpx
 
 from brewery.core.config import BreweryENV, get_brewery_env
 from brewery.providers.install_service import build_orchestrator
-from brewery.providers.orchestrator import InstallReport
+from brewery.providers.orchestrator import InstallReport, ProgressPort
 
 RunBrew = Callable[[list[str]], Awaitable[object]]
 
@@ -22,6 +22,7 @@ async def run_upgrade(
     run_brew: RunBrew,
     env: BreweryENV | None = None,
     install_concurrency: int = 1,
+    progress: ProgressPort | None = None,
 ) -> InstallReport:
     """Upgrade `names` via the native pipeline, brew-falling-back per formula.
 
@@ -32,6 +33,7 @@ async def run_upgrade(
         run_brew: Async `brew <args>` runner for link/postinstall fallback.
         env: Brewery environment, resolved if omitted.
         install_concurrency: Concurrent filesystem installs.
+        progress: Optional progress sink forwarded to the Orchestrator.
 
     Returns:
         The InstallReport (per-formula outcomes).
@@ -44,5 +46,6 @@ async def run_upgrade(
             env=env,
             run_brew=run_brew,
             install_concurrency=install_concurrency,
+            progress=progress,
         )
         return await orch.upgrade(names, old_kegs)

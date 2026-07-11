@@ -12,8 +12,8 @@ from brewery.cli.output import (
     print_advisories,
     print_failures,
     print_result,
-    spinner,
 )
+from brewery.cli.progress import make_reporter
 from brewery.core.errors import PinnedPackageWarning
 from brewery.core.models import Package, PackageKind
 
@@ -68,10 +68,9 @@ def upgrade(
                     return
 
         sys.stdout.write("\n")
-        with spinner("Upgrading..."):
-            upgraded, current, advisories, failures = run_async(
-                coro=repo.upgrade_packages(names, kind)
-            )
+        upgraded, current, advisories, failures = run_async(
+            coro=repo.upgrade_packages(names, kind, progress=make_reporter(console))
+        )
 
         if not upgraded and not advisories and not failures and not current:
             console.print("✓ All packages are up to date!\n", style="bold green")

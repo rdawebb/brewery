@@ -11,7 +11,12 @@ from brewery.core.config import BreweryENV, get_brewery_env
 from brewery.providers.downloader import Downloader
 from brewery.providers.install_adapters import BrewAdapter, RepositoryCatalogAdapter
 from brewery.providers.manifest import fetch_bottle_tab
-from brewery.providers.orchestrator import InstallConfig, InstallReport, Orchestrator
+from brewery.providers.orchestrator import (
+    InstallConfig,
+    InstallReport,
+    Orchestrator,
+    ProgressPort,
+)
 
 RunBrew = Callable[[list[str]], Awaitable[object]]
 
@@ -23,6 +28,7 @@ def build_orchestrator(
     env: BreweryENV,
     run_brew: RunBrew,
     install_concurrency: int = 1,
+    progress: ProgressPort | None = None,
 ) -> Orchestrator:
     """Assemble an Orchestrator bound to an open client and the repo's ports.
 
@@ -34,6 +40,7 @@ def build_orchestrator(
         env: Brewery environment (paths).
         run_brew: Async `brew <args>` runner for link/postinstall fallback.
         install_concurrency: Concurrent filesystem installs.
+        progress: Optional progress sink forwarded to the Orchestrator.
 
     Returns:
         A configured Orchestrator.
@@ -52,6 +59,7 @@ def build_orchestrator(
         brew=BrewAdapter(repo.formula, run_brew),
         config=config,
         install_concurrency=install_concurrency,
+        progress=progress,
     )
 
 
@@ -62,6 +70,7 @@ async def run_install(
     run_brew: RunBrew,
     env: BreweryENV | None = None,
     install_concurrency: int = 1,
+    progress: ProgressPort | None = None,
 ) -> InstallReport:
     """Install `names` via the native pipeline, brew-falling-back per formula.
 
@@ -72,6 +81,7 @@ async def run_install(
         env: Brewery environment, resolved if omitted.
         install_concurrency: Concurrent filesystem installs (downloads are
             always fully concurrent; default 1 serialises the install stages).
+        progress: Optional progress sink forwarded to the Orchestrator.
 
     Returns:
         The InstallReport (per-formula outcomes).
@@ -85,6 +95,7 @@ async def run_install(
             env=env,
             run_brew=run_brew,
             install_concurrency=install_concurrency,
+            progress=progress,
         )
 
         return await orchestrator.install(names)

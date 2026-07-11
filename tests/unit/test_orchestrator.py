@@ -161,17 +161,20 @@ class MockDownloader:
         self.delays = delays or {}
         self.done_order = []
 
-    async def fetch(self, ref: BottleRef) -> Path:
+    async def fetch(self, ref: BottleRef, *, on_progress=None) -> Path:
         """Fetches a bottle file.
 
         Args:
             ref: The bottle reference.
+            on_progress: Optional (downloaded, total) progress callback.
 
         Returns:
             The path to the downloaded bottle file.
         """
         await asyncio.sleep(self.delays.get(ref.name, 0))
         self.done_order.append(ref.name)
+        if on_progress is not None:
+            on_progress(1, 1)
 
         return Path(f"/Mock/{ref.name}.tar.gz")
 
@@ -179,11 +182,12 @@ class MockDownloader:
 class FailingDownloader:
     """Mock downloader class that always fails."""
 
-    async def fetch(self, ref: BottleRef) -> Path:
+    async def fetch(self, ref: BottleRef, *, on_progress=None) -> Path:
         """Fetch function that always fails.
 
         Args:
             ref: The bottle reference.
+            on_progress: Optional (downloaded, total) progress callback (unused).
 
         Raises:
             DownloadError: Mocked download error.
@@ -880,3 +884,60 @@ class TestUpgradeSwap:
         assert Path((prefix / "bin" / "foo").resolve()) == new / "bin" / "foo"
         assert Path((prefix / "opt" / "wget").resolve()) == new  # opt -> v2
         assert old.exists()  # Retained, no rmtree
+
+
+class _RecordingProgress:
+    """A mock ProgressPort that records the sequence of calls it receives."""
+
+    def __init__(self) -> None:
+        """Initialise with an empty event list."""
+        self.events: list[tuple] = []
+
+    def begin(self, total: int) -> None:
+        """Record the begin event with the total."""
+        self.events.append(("begin", total))
+
+    def update(self, name, stage, done=None, total=None) -> None:
+        """Record the update event with the name, stage, and optional done/total."""
+        self.events.append(("update", name, stage))
+
+    def finish(self, name, outcome) -> None:
+        """Record the finish event with the name and outcome."""
+        self.events.append(("finish", name, outcome))
+
+    def end(self) -> None:
+        """Record the end event."""
+        self.events.append(("end",))
+
+
+class TestProgressEvents:
+    """The orchestrator drives the ProgressPort in the expected order."""
+
+    async def test_single_install_emits_ordered_events(self) -> None:
+        """Test a single install emits the expected progress events."""
+        cat = MockCatalog({"x": MockFormula("x")}, {"x": []})
+        progress = _RecordingProgress()
+        o = _make(cat, MockDownloader(), MockTab(), MockBrew(), native={})
+        o.progress = progress
+
+        report = await o.install(["x"])
+
+        assert report.outcomes["x"] is Outcome.NATIVE
+        assert progress.events == [
+            ("begin", 1),
+            ("update", "x", "download"),
+            ("update", "x", "install"),
+            ("finish", "x", Outcome.NATIVE.value),
+            ("end",),
+        ]
+
+    async def test_end_emitted_even_when_nothing_to_install(self) -> None:
+        """Test begin/end not emitted on already-satisfied request."""
+        cat = MockCatalog({"x": MockFormula("x")}, {"x": []}, satisfied={"x"})
+        progress = _RecordingProgress()
+        o = _make(cat, MockDownloader(), MockTab(), MockBrew(), native={})
+        o.progress = progress
+
+        await o.install(["x"])
+
+        assert progress.events == []  # Empty transaction stays silent
