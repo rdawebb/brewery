@@ -3,15 +3,77 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
+from typing import TYPE_CHECKING
 
 from rich.console import Console
 from rich.filesize import decimal
-from rich.progress import BarColumn, Progress, SpinnerColumn, TaskID, TextColumn
+from rich.progress import (
+    BarColumn,
+    Column,
+    Progress,
+    ProgressColumn,
+    TaskID,
+    TextColumn,
+)
+from rich.spinner import Spinner
+from rich.text import Text
+
+if TYPE_CHECKING:
+    from rich.console import RenderableType
+    from rich.progress import Task
 
 # Outcome values (Outcome.<...>.value) that mean the package did not install
 _FAILED_OUTCOMES = frozenset({"failed", "skipped_dep_failed"})
 
-_REVEAL_DELAY = 0.5  # seconds before the live display appears
+_REVEAL_DELAY = 0.5  # Seconds before the live display appears
+
+# Cap the visible rows to the download/installation concurrency
+_MAX_VISIBLE = 8
+
+_NAME_WIDTH = 22  # Formula-name column; truncates with an ellipsis rather than wraps
+_STATUS_WIDTH = 20  # Holds "↓ 999.9 MB/999.9 MB"; keeps the activity column aligned
+
+
+class _ActivityColumn(ProgressColumn):
+    """Trailing indicator cell: a determinate bar when the total is known,
+    an animated spinner when it is not, and nothing once the row has finished.
+
+    A single column keeps the indicator in one aligned position across every row,
+    delegates the bar to an internal `BarColumn` so Rich's rendering is reused.
+    """
+
+    def __init__(
+        self, *, bar_width: int | None = None, spinner_name: str = "dots"
+    ) -> None:
+        """Initialise the activity column.
+
+        Args:
+            bar_width: Fixed bar width, or None to flex into the remaining space.
+            spinner_name: The `rich.spinner` name used while a total is unknown.
+        """
+        super().__init__()
+        self._bar = BarColumn(bar_width=bar_width)
+        self._spinner = Spinner(spinner_name)
+
+    def render(self, task: Task) -> RenderableType:
+        """Render the indicator for `task`, keyed off its `activity` field.
+
+        Args:
+            task: The Rich task to render.
+
+        Returns:
+            A determinate bar for `bar`, an animated spinner for `spinner`,
+            or a blank cell (finished row) for anything else.
+        """
+        activity = task.fields.get("activity")
+        if activity == "bar":  # Download with a Content-Length
+            return self._bar.render(task)
+
+        if activity == "spinner":  # Install, or download with no length
+            return self._spinner.render(task.get_time())
+
+        return Text("")  # Finished row: only the glyph is shown
 
 
 def make_reporter(console: Console) -> ProgressReporter | None:
@@ -42,15 +104,32 @@ class ProgressReporter:
             console: The console to render the progress display through.
         """
         self._progress = Progress(
-            SpinnerColumn(finished_text=" "),
-            TextColumn("{task.description}"),
-            BarColumn(bar_width=None),
+            TextColumn(
+                "{task.fields[glyph]}", table_column=Column(width=1, no_wrap=True)
+            ),
+            TextColumn(
+                "{task.fields[name]}",
+                table_column=Column(
+                    width=_NAME_WIDTH, no_wrap=True, overflow="ellipsis"
+                ),
+            ),
+            TextColumn(
+                "{task.fields[status]}",
+                style="dim",
+                table_column=Column(
+                    width=_STATUS_WIDTH, no_wrap=True, overflow="ellipsis"
+                ),
+            ),
+            _ActivityColumn(bar_width=None),
             console=console,
             transient=True,
             refresh_per_second=10,
         )
         self._overall: TaskID | None = None
+        self._total = 0
+        self._done = 0
         self._tasks: dict[str, TaskID] = {}
+        self._finished: deque[TaskID] = deque()  # finished rows, oldest first
         self._reveal_handle: asyncio.TimerHandle | None = None
         self._started = False
 
@@ -64,7 +143,15 @@ class ProgressReporter:
             total: The number of packages that will be installed.
         """
         if total > 1:
-            self._overall = self._progress.add_task("Installing", total=total)
+            self._total = total
+            self._overall = self._progress.add_task(
+                "",
+                total=total,
+                name="Installing",
+                status=f"0/{total}",
+                glyph=" ",
+                activity="bar",
+            )
 
         loop = asyncio.get_running_loop()
         self._reveal_handle = loop.call_later(_REVEAL_DELAY, self._reveal)
@@ -87,8 +174,11 @@ class ProgressReporter:
         """
         tid = self._tasks.get(name)
         if tid is None:
-            tid = self._progress.add_task(name, total=None)
+            tid = self._progress.add_task(
+                "", total=None, name=name, status="", glyph=" ", activity="spinner"
+            )
             self._tasks[name] = tid
+            self._trim()
 
         return tid
 
@@ -113,15 +203,14 @@ class ProgressReporter:
             size = f"/{decimal(total)}" if total is not None else ""
             self._progress.update(
                 tid,
-                description=f"{name}  [dim]downloading {got}{size}[/dim]",
+                status=f"↓ {got}{size}",
                 total=total,
                 completed=done or 0,
+                activity="bar" if total is not None else "spinner",
             )
 
         elif stage == "install":
-            self._progress.update(
-                tid, description=f"{name}  [dim]installing[/dim]", total=None
-            )
+            self._progress.update(tid, status="installing", activity="spinner")
 
     def finish(self, name: str, outcome: str) -> None:
         """Mark `name` done: freeze its row with a glyph, advance the overall bar.
@@ -134,14 +223,28 @@ class ProgressReporter:
         glyph = "[red]✗[/red]" if failed else "[green]✓[/green]"
         tid = self._tasks.get(name)
         if tid is not None:
-            # completed == total freezes the spinner to its finished_text
-            self._progress.update(
-                tid, description=f"{glyph} {name}", total=1, completed=1
-            )
+            # activity="" blanks the indicator, stop_task freezes the row
+            self._progress.update(tid, glyph=glyph, status="", activity="")
             self._progress.stop_task(tid)
+            self._finished.append(tid)
+            self._trim()
 
         if self._overall is not None:
-            self._progress.advance(self._overall, 1)
+            self._done += 1
+            self._progress.update(
+                self._overall, advance=1, status=f"{self._done}/{self._total}"
+            )
+
+    def _trim(self) -> None:
+        """Drop the oldest finished rows so the region fits the screen.
+
+        Keeps the visible package rows at or below `_MAX_VISIBLE`, removing
+        only finished rows -- oldest first -- so the live region never scrolls
+        and the transient stop can clear it fully.
+        """
+        anchor = 1 if self._overall is not None else 0
+        while len(self._progress.tasks) - anchor > _MAX_VISIBLE and self._finished:
+            self._progress.remove_task(self._finished.popleft())
 
     def end(self) -> None:
         """Cancel a pending reveal and stop the live display (clears it)."""

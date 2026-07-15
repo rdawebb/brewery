@@ -76,7 +76,7 @@ def _patch(monkeypatch, proc, *, have_brew=True) -> dict[str, Any]:
     )
     calls = {}
 
-    async def mock_exec(*cmd, stdout=None, stderr=None, env=None) -> MockProc:
+    async def mock_exec(*cmd, stdout=None, stderr=None, env=None, **kwargs) -> MockProc:
         """Mocks the execution of a subprocess.
 
         Args:
@@ -84,6 +84,8 @@ def _patch(monkeypatch, proc, *, have_brew=True) -> dict[str, Any]:
             stdout: The standard output stream.
             stderr: The standard error stream.
             env: The environment mapping passed to the child.
+            **kwargs: Other create_subprocess_exec args (e.g. stdin,
+                start_new_session) captured for assertions.
 
         Returns:
             A mock process with the specified output.
@@ -92,6 +94,8 @@ def _patch(monkeypatch, proc, *, have_brew=True) -> dict[str, Any]:
         calls["stdout"] = stdout
         calls["stderr"] = stderr
         calls["env"] = env
+        calls["stdin"] = kwargs.get("stdin")
+        calls["start_new_session"] = kwargs.get("start_new_session")
 
         return proc
 
@@ -114,6 +118,11 @@ async def test_capture_returns_decoded_output(monkeypatch) -> None:
     assert calls["env"]["LANG"] == "C"
     assert calls["env"]["HOMEBREW_NO_COLOR"] == "1"
 
+    # CAPTURE detaches from the controlling terminal (new session, no stdin) so a
+    # child cannot write to /dev/tty and corrupt a live progress display
+    assert calls["start_new_session"] is True
+    assert calls["stdin"] == asyncio.subprocess.DEVNULL
+
 
 async def test_inherit_does_not_pipe(monkeypatch) -> None:
     """Test that INHERIT mode leaves stdio as None so the child inherits the terminal."""
@@ -126,6 +135,9 @@ async def test_inherit_does_not_pipe(monkeypatch) -> None:
 
     # INHERIT keeps the user's environment (colour/locale) untouched
     assert calls["env"] is None
+
+    # INHERIT stays attached to the terminal (interactive passthrough)
+    assert calls["start_new_session"] is None and calls["stdin"] is None
 
 
 async def test_check_raises_on_nonzero(monkeypatch) -> None:

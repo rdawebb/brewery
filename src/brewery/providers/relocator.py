@@ -413,7 +413,13 @@ def _run(cmd: list[str]) -> None:
     Raises:
         subprocess.CalledProcessError: If the command exits non-zero.
     """
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(
             proc.returncode, cmd, proc.stdout, proc.stderr

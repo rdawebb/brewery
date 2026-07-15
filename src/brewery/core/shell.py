@@ -70,15 +70,23 @@ async def run_brew(
     cmd = ["brew", *args]
     capture = output is BrewOutput.CAPTURE
 
-    # Only force LANG=C / no-color when we parse the output ourselves; INHERIT
-    # runs stream to the terminal and should keep the user's locale and colour.
+    # Only force LANG=C / no-color when BrewOutput.CAPTURE is in use
     env = {**os.environ, **ENV_OVERRIDES} if capture else None
+
+    # Detach from the terminal unless INHERIT mode is used to prevent progress
+    # display interference
+    extra = (
+        {"stdin": asyncio.subprocess.DEVNULL, "start_new_session": True}
+        if capture
+        else {}
+    )
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE if capture else None,
         stderr=asyncio.subprocess.PIPE if capture else None,
         env=env,
+        **extra,
     )
 
     try:
