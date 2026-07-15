@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from brewery.core import host as _host_module
-from brewery.core.host import Platform, current_platform
+from brewery.core.host import Platform, current_platform, preferred_perl_version
 
 pytestmark = pytest.mark.unit
 
@@ -51,3 +51,15 @@ class TestCurrentPlatform:
         )
         monkeypatch.setattr(_host_module._platform, "machine", lambda: "x86_64")
         assert current_platform() == Platform(arch="amd64", macos_major=13)
+
+
+class TestPreferredPerlVersion:
+    """Tests for the macOS -> system perl mapping (brew's MacOS.preferred_perl_version)."""
+
+    @pytest.mark.parametrize(
+        ("macos_major", "expected"),
+        [(15, "5.34"), (14, "5.34"), (13, "5.30"), (11, "5.30"), (10, "5.18")],
+    )
+    def test_preferred_perl_version_by_macos(self, macos_major, expected) -> None:
+        """Tests that each macOS major maps to the expected system perl."""
+        assert preferred_perl_version(macos_major) == expected

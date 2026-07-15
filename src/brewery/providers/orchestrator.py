@@ -36,7 +36,7 @@ from brewery.providers.receipt import (
     read_receipt,
     write_receipt,
 )
-from brewery.providers.relocator import relocate_keg
+from brewery.providers.relocator import formula_tokens, relocate_keg
 from brewery.providers.retention import mark_replaced
 
 
@@ -368,7 +368,7 @@ class Orchestrator:
         tab_fetcher: TabFetcher,
         brew: BrewPort,
         config: InstallConfig,
-        install_concurrency: int = 4,
+        install_concurrency: int = 8,
         tab_concurrency: int = 8,
         progress: ProgressPort | None = None,
     ) -> None:
@@ -380,7 +380,7 @@ class Orchestrator:
             tab_fetcher: The tab fetcher.
             brew: The brew port.
             config: The installation configuration.
-            install_concurrency: The number of concurrent installations. Defaults to 1.
+            install_concurrency: The number of concurrent installations. Defaults to 4.
             tab_concurrency: Maximum concurrent manifest tab fetches. Defaults to 8.
             progress: Optional progress sink; defaults to a no-op reporter.
         """
@@ -821,6 +821,12 @@ class Orchestrator:
                 cellar=self.cfg.cellar,
                 repository=self.cfg.repository,
                 skip_relocation=(fr.bottle_cellar == ":any_skip_relocation"),
+                extra_tokens=formula_tokens(
+                    self.cfg.prefix,
+                    name=name,
+                    runtime_deps=rt_deps,
+                    built_on=tab.built_on,
+                ),
                 text_files=tab.changed_files,
             )
             dest = install_to_cellar(

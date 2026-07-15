@@ -5,6 +5,9 @@ from __future__ import annotations
 import platform as _platform
 from dataclasses import dataclass
 
+_SONOMA = 14
+_BIG_SUR = 11
+
 
 @dataclass(frozen=True, slots=True)
 class Platform:
@@ -36,3 +39,25 @@ def current_platform() -> Platform | None:
     arch = "arm64" if _platform.machine() == "arm64" else "amd64"
 
     return Platform(arch=arch, macos_major=major)
+
+
+def preferred_perl_version(macos_major: int | None = None) -> str:
+    """The system perl for this macOS.
+
+    Args:
+        macos_major: The host's macOS major version; detected when omitted.
+
+    Returns:
+        The system perl version string.
+    """
+    if macos_major is None:
+        plat = current_platform()
+        macos_major = plat.macos_major if plat else _SONOMA
+
+    if macos_major >= _SONOMA:
+        return "5.34"
+
+    if macos_major >= _BIG_SUR:
+        return "5.30"
+
+    return "5.18"

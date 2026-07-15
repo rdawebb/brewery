@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import mmap
 import os
+import re
 import struct
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -19,6 +20,8 @@ from enum import Enum
 from pathlib import Path
 
 from brewery.core.errors import RelocationError
+from brewery.core.host import preferred_perl_version
+from brewery.providers.receipt import RuntimeDependency
 
 # Mach-O Constants
 _MH_MAGIC = 0xFEEDFACE  # 32-bit, host byte order
@@ -67,6 +70,15 @@ _MACHO_MAGICS = frozenset(
 
 _PLACEHOLDER_MARKER = b"@@HOMEBREW_"
 _AR_MAGIC = b"!<arch>\n"  # Static archive (ar) magic
+
+# Matches brew's Version.formula_optionally_versioned_regex(:openjdk)
+_OPENJDK_RE = re.compile(r"\Aopenjdk(@\d+(?:\.\d+)*)?\Z")
+
+# Guards the tab's `preferred_perl` before it is pasted into a shebang path
+_PERL_VERSION_RE = re.compile(r"\A\d+\.\d+\Z")
+
+# JAVA_HOME within an openjdk keg on macOS (brew's macOS Keg override)
+_MACOS_JAVA_HOME_SUFFIX = "libexec/openjdk.jdk/Contents/Home"
 
 # Bounded thread pool for the regular-file relocation phase
 _RELOCATE_WORKERS = min(8, os.cpu_count() or 4)
@@ -129,6 +141,101 @@ def build_substitutions(
 
     # Substitute longer tokens first so no token is a prefix-collision risk
     return dict(sorted(subs.items(), key=lambda kv: len(kv[0]), reverse=True))
+
+
+def _perl_path(prefix: Path, brewed: bool, built_on: dict[str, object] | None) -> str:
+    """Resolve the `@@HOMEBREW_PERL@@` override path.
+
+    Args:
+        prefix: The Homebrew prefix path.
+        brewed: Whether the formula depends on the brewed perl.
+        built_on: The bottle tab's `built_on` block, if any.
+
+    Returns:
+        The absolute path to the perl interpreter.
+    """
+    if brewed:
+        return str(prefix / "opt" / "perl" / "bin" / "perl")
+
+    built_version = (built_on or {}).get("preferred_perl")
+    if isinstance(built_version, str) and _PERL_VERSION_RE.match(built_version):
+        candidate = f"/usr/bin/perl{built_version}"
+        if Path(candidate).exists():
+            return candidate
+
+    return f"/usr/bin/perl{preferred_perl_version()}"
+
+
+def formula_tokens(
+    prefix: Path,
+    *,
+    name: str,
+    runtime_deps: list[RuntimeDependency],
+    built_on: dict[str, object] | None = None,
+) -> dict[str, str]:
+    """Resolve the formula-specific placeholders for one keg.
+
+    Args:
+        prefix: The Homebrew prefix path.
+        name: The formula name.
+        runtime_deps: The formula's runtime dependency entries.
+        built_on: The bottle tab's `built_on` block, if any.
+
+    Returns:
+        The formula-specific token map, suitable for `relocate_keg`'s `extra_tokens`.
+    """
+    brewed_perl = name == "perl" or any(
+        d.full_name == "perl" and d.declared_directly for d in runtime_deps
+    )
+    tokens = {"@@HOMEBREW_PERL@@": _perl_path(prefix, brewed_perl, built_on)}
+
+    openjdk = next(
+        (d.full_name for d in runtime_deps if _OPENJDK_RE.match(d.full_name)), None
+    )
+    if openjdk:
+        # On macOS the JDK sits inside the bundle, not directly under libexec
+        tokens["@@HOMEBREW_JAVA@@"] = str(
+            prefix / "opt" / openjdk / _MACOS_JAVA_HOME_SUFFIX
+        )
+
+    return tokens
+
+
+def _unresolved_token(value: bytes) -> str | None:
+    """Return the first placeholder left in `value`, or None if there is none.
+
+    Args:
+        value: The byte string to inspect, after substitution.
+
+    Returns:
+        The surviving placeholder as text, or None.
+    """
+    start = value.find(_PLACEHOLDER_MARKER)
+    if start == -1:
+        return None
+
+    end = value.find(b"@@", start + len(_PLACEHOLDER_MARKER))
+    token = value[start : end + 2] if end != -1 else value[start : start + 40]
+
+    return token.decode("utf-8", "replace")
+
+
+def _reject_unresolved(path: Path, value: bytes) -> None:
+    """Raise if a placeholder survived substitution.
+
+    Failing here aborts the native install and lets the caller fall back
+    to brew, rather than shipping a broken keg into the Cellar.
+
+    Args:
+        path: The file being relocated, for the error message.
+        value: The substituted bytes.
+
+    Raises:
+        RelocationError: If a placeholder remains.
+    """
+    token = _unresolved_token(value)
+    if token is not None:
+        raise RelocationError(path, f"unresolved placeholder {token}")
 
 
 def _apply(value: bytes, subs: dict[bytes, bytes]) -> bytes:
@@ -436,12 +543,16 @@ def relocate_text(path: Path, subs: dict[bytes, bytes]) -> bool:
 
     Returns:
         True if the file was modified, False otherwise.
+
+    Raises:
+        RelocationError: If a placeholder survived substitution.
     """
     data = path.read_bytes()
     if _PLACEHOLDER_MARKER not in data:
         return False
 
     new = _apply(data, subs)
+    _reject_unresolved(path, new)
     if new == data:
         return False
 
@@ -460,12 +571,16 @@ def relocate_symlink(link: Path, subs: dict[bytes, bytes]) -> bool:
 
     Returns:
         True if the symlink was modified, False otherwise.
+
+    Raises:
+        RelocationError: If a placeholder survived substitution.
     """
     target = os.readlink(link).encode("utf-8", "surrogateescape")
     if _PLACEHOLDER_MARKER not in target:
         return False
 
     new = _apply(target, subs)
+    _reject_unresolved(link, new)
     if new == target:
         return False
 
@@ -552,8 +667,10 @@ def _process_file(
                     rel = path.relative_to(keg_root).as_posix()
                     # In manifest mode, only substitute files brew listed
                     if allowed_text is None or rel in allowed_text:
-                        new = _apply(bytes(mm), subs)
-                        if new != bytes(mm):
+                        raw = bytes(mm)
+                        new = _apply(raw, subs)
+                        _reject_unresolved(path, new)
+                        if new != raw:
                             new_text = new
                             text_rel = rel
 

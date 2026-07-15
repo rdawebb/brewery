@@ -46,9 +46,7 @@ def patched(monkeypatch) -> tuple[MockClient, dict]:
 
     built: dict = {}
 
-    def _build(
-        repo, *, client, env, run_brew, install_concurrency=1, progress=None
-    ) -> MockOrchestrator:
+    def _build(repo, *, client, env, run_brew, progress=None) -> MockOrchestrator:
         """Record the build call and return a mock orchestrator.
 
         Args:
@@ -56,7 +54,6 @@ def patched(monkeypatch) -> tuple[MockClient, dict]:
             client: The HTTP client to use.
             env: The environment variables to use.
             run_brew: The brew run command to use.
-            install_concurrency: The number of concurrent install jobs to run.
             progress: The optional progress sink.
 
         Returns:
@@ -67,7 +64,6 @@ def patched(monkeypatch) -> tuple[MockClient, dict]:
             client=client,
             env=env,
             run_brew=run_brew,
-            install_concurrency=install_concurrency,
             progress=progress,
         )
 
@@ -99,17 +95,14 @@ async def test_client_is_closed(patched, mock_env) -> None:
 async def test_build_orchestrator_receives_client_env_and_runner(
     patched, mock_env
 ) -> None:
-    """Test that the shared assembler gets the open client, env, runner, and concurrency."""
+    """Test that the shared assembler gets the open client, env, and runner."""
     client, built = patched
     repo = MockRepo()
-    await svc.run_upgrade(
-        repo, ["wget"], {}, run_brew=_run_brew, env=mock_env, install_concurrency=2
-    )
+    await svc.run_upgrade(repo, ["wget"], {}, run_brew=_run_brew, env=mock_env)
     assert built["repo"] is repo
     assert built["client"] is client
     assert built["env"] is mock_env
     assert built["run_brew"] is _run_brew
-    assert built["install_concurrency"] == 2
 
 
 async def test_old_kegs_forwarded(patched, mock_env) -> None:

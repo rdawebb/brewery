@@ -21,7 +21,6 @@ async def run_upgrade(
     *,
     run_brew: RunBrew,
     env: BreweryENV | None = None,
-    install_concurrency: int = 1,
     progress: ProgressPort | None = None,
 ) -> InstallReport:
     """Upgrade `names` via the native pipeline, brew-falling-back per formula.
@@ -32,7 +31,6 @@ async def run_upgrade(
         old_kegs: Each target's current active keg, to unlink and stamp as replaced.
         run_brew: Async `brew <args>` runner for link/postinstall fallback.
         env: Brewery environment, resolved if omitted.
-        install_concurrency: Concurrent filesystem installs.
         progress: Optional progress sink forwarded to the Orchestrator.
 
     Returns:
@@ -45,7 +43,6 @@ async def run_upgrade(
             client=client,
             env=env,
             run_brew=run_brew,
-            install_concurrency=install_concurrency,
             progress=progress,
         )
         return await orch.upgrade(names, old_kegs)
