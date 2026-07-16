@@ -283,6 +283,10 @@ class _Plan:
             self.already.append(dst)
             return
 
+        # A keg symlink aimed at its own prefix destination links to itself
+        if not exists and src.is_symlink() and _symlink_dest(src) == dst:
+            return
+
         if is_link:
             real_dst = os.path.realpath(dst)
             if is_dir and os.path.isdir(real_dst):

@@ -215,7 +215,7 @@ class ProgressReporter:
             self._progress.update(
                 tid,
                 glyph=_GLYPH_DOWNLOADED if downloaded else _GLYPH_DOWNLOAD,
-                status=f"↓ {got}{size}",
+                status=f"{got}{size}",
                 total=total,
                 completed=done or 0,
                 activity="bar" if total is not None else "spinner",

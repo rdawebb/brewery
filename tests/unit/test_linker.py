@@ -154,6 +154,21 @@ class TestLinking:
         assert "bin/npm" not in res.linked
         assert not (prefix / "bin" / "npm").exists()
 
+    def test_skips_symlink_targeting_its_own_prefix_destination(self, tmp_path) -> None:
+        """Test that a keg symlink pointing back at its own prefix path is not linked."""
+        prefix = tmp_path / "prefix"
+        keg = prefix / "Cellar" / "hunspell" / "1.7.3"
+        (keg / "share").mkdir(parents=True)
+        os.symlink(
+            "../../../../share/hunspell", keg / "share" / "hunspell"
+        )  # share.install_symlink HOMEBREW_PREFIX/"share/hunspell"
+        _mk(keg, "share/man/man1/hunspell.1")
+
+        res = link_keg(keg, prefix=prefix, name="hunspell")
+        assert "share/hunspell" not in res.linked
+        assert not (prefix / "share" / "hunspell").is_symlink()
+        assert "share/man/man1/hunspell.1" in res.linked
+
     def test_bin_files_are_relative_symlinks(self, keg_and_prefix) -> None:
         """Test that bin files are linked as relative symlinks pointing into the Cellar."""
         keg, prefix = keg_and_prefix
