@@ -34,6 +34,13 @@ _MAX_VISIBLE = 8
 _NAME_WIDTH = 22  # Formula-name column; truncates with an ellipsis rather than wraps
 _STATUS_WIDTH = 20  # Holds "↓ 999.9 MB/999.9 MB"; keeps the activity column aligned
 
+# Per-row glyphs tracking a package through the pipeline
+_GLYPH_DOWNLOAD = "↓"  # Actively downloading
+_GLYPH_DOWNLOADED = "[grey50]•[/grey50]"  # Downloaded, waiting to install
+_GLYPH_INSTALL = "[green]•[/green]"  # Actively installing
+_GLYPH_DONE = "[green]✓[/green]"  # Successfully installed
+_GLYPH_FAILED = "[red]✗[/red]"  # Failed
+
 
 class _ActivityColumn(ProgressColumn):
     """Trailing indicator cell: a determinate bar when the total is known,
@@ -53,7 +60,9 @@ class _ActivityColumn(ProgressColumn):
             spinner_name: The `rich.spinner` name used while a total is unknown.
         """
         super().__init__()
-        self._bar = BarColumn(bar_width=bar_width)
+        self._bar = BarColumn(
+            bar_width=bar_width, complete_style="green", finished_style="green"
+        )
         self._spinner = Spinner(spinner_name)
 
     def render(self, task: Task) -> RenderableType:
@@ -63,11 +72,11 @@ class _ActivityColumn(ProgressColumn):
             task: The Rich task to render.
 
         Returns:
-            A determinate bar for `bar`, an animated spinner for `spinner`,
-            or a blank cell (finished row) for anything else.
+            A determinate green bar for `bar`, an animated spinner for
+            `spinner`, or a blank cell (finished row) otherwise.
         """
         activity = task.fields.get("activity")
-        if activity == "bar":  # Download with a Content-Length
+        if activity == "bar":  # Download/overall anchor bar
             return self._bar.render(task)
 
         if activity == "spinner":  # Install, or download with no length
@@ -105,7 +114,7 @@ class ProgressReporter:
         """
         self._progress = Progress(
             TextColumn(
-                "{task.fields[glyph]}", table_column=Column(width=1, no_wrap=True)
+                "  {task.fields[glyph]}", table_column=Column(width=3, no_wrap=True)
             ),
             TextColumn(
                 "{task.fields[name]}",
@@ -147,7 +156,7 @@ class ProgressReporter:
             self._overall = self._progress.add_task(
                 "",
                 total=total,
-                name="Installing",
+                name="[bold green]Installing[/bold green]",
                 status=f"0/{total}",
                 glyph=" ",
                 activity="bar",
@@ -201,8 +210,11 @@ class ProgressReporter:
         if stage == "download":
             got = decimal(done) if done is not None else "?"
             size = f"/{decimal(total)}" if total is not None else ""
+            downloaded = total is not None and done is not None and done >= total
+
             self._progress.update(
                 tid,
+                glyph=_GLYPH_DOWNLOADED if downloaded else _GLYPH_DOWNLOAD,
                 status=f"↓ {got}{size}",
                 total=total,
                 completed=done or 0,
@@ -210,7 +222,9 @@ class ProgressReporter:
             )
 
         elif stage == "install":
-            self._progress.update(tid, status="installing", activity="spinner")
+            self._progress.update(
+                tid, glyph=_GLYPH_INSTALL, status="installing", activity="spinner"
+            )
 
     def finish(self, name: str, outcome: str) -> None:
         """Mark `name` done: freeze its row with a glyph, advance the overall bar.
@@ -220,7 +234,7 @@ class ProgressReporter:
             outcome: The terminal `Outcome` value.
         """
         failed = outcome in _FAILED_OUTCOMES
-        glyph = "[red]✗[/red]" if failed else "[green]✓[/green]"
+        glyph = _GLYPH_FAILED if failed else _GLYPH_DONE
         tid = self._tasks.get(name)
         if tid is not None:
             # activity="" blanks the indicator, stop_task freezes the row
