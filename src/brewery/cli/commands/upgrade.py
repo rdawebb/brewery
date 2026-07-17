@@ -39,35 +39,33 @@ def upgrade(
         yes: If true, skip confirmation prompt.
     """
     with _repository() as repo:
-        if not yes:
-            if names:
-                if not confirm_or_cancel(f"Upgrade: {', '.join(names)}?", yes=False):
-                    return
+        if yes:
+            sys.stdout.write("\n")
 
-            else:
-                outdated: list[Package] = repo.get_outdated()
-                if not outdated:
-                    console.print(
-                        "\n✓ All packages are up to date!\n", style="bold green"
-                    )
-                    return
+        elif names:
+            if not confirm_or_cancel(f"Upgrade: {', '.join(names)}?", yes=False):
+                return
 
-                print_result(
-                    f"\n• {len(outdated)} outdated package(s)\n",
-                    (
-                        f"{pkg.name} → {pkg.metadata.get('latest_version')}"
-                        for pkg in outdated
-                    ),
-                    style="bold yellow",
-                )
+        else:
+            outdated: list[Package] = repo.get_outdated()
+            if not outdated:
+                console.print("\n✓ All packages are up to date!\n", style="bold green")
+                return
 
-                sys.stdout.write("\n")
-                if not confirm_or_cancel(
-                    f"Upgrade {len(outdated)} outdated package(s)?", yes=False
-                ):
-                    return
+            print_result(
+                f"\n• {len(outdated)} outdated package(s)\n",
+                (
+                    f"{pkg.name} → {pkg.metadata.get('latest_version')}"
+                    for pkg in outdated
+                ),
+                style="bold yellow",
+            )
 
-        sys.stdout.write("\n")
+            if not confirm_or_cancel(
+                f"Upgrade {len(outdated)} outdated package(s)?", yes=False
+            ):
+                return
+
         upgraded, current, advisories, failures = run_async(
             coro=repo.upgrade_packages(names, kind, progress=make_reporter(console))
         )

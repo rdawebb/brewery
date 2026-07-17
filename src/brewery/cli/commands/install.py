@@ -43,7 +43,6 @@ def install(
         return
 
     with _repository() as repo:
-        sys.stdout.write("\n")
         installed, failures = run_async(
             coro=repo.install_packages(names, target, progress=make_reporter(console))
         )

@@ -31,11 +31,12 @@ def uninstall(
         kind: Kind of the package(s) (formula or cask).
         yes: If true, skip confirmation prompt.
     """
-    if not confirm_or_cancel(f"Uninstall: {', '.join(names)}?", yes=yes, default=False):
+    if not confirm_or_cancel(
+        f"Uninstall: {', '.join(names)}?", yes=yes, default=False, style="bold yellow"
+    ):
         return
 
     with _repository() as repo:
-        sys.stdout.write("\n")
         with spinner("Uninstalling..."):
             removed, failures = run_async(coro=repo.uninstall_packages(names, kind))
 

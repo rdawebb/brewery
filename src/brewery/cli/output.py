@@ -2,14 +2,26 @@
 
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING, Iterable, Sequence
 
-from brewery.cli.context import app, console
+from rich.prompt import Confirm
+from rich.text import Text
+from rich.theme import Theme
+
+from brewery.cli.context import console
 
 if TYPE_CHECKING:
     from rich.status import Status
 
     from brewery.core.models import Package
+
+_CONFIRM_BULLET = "•"
+
+# DECSC / DECRC: save the cursor before the prompt, restore it and erase to the end
+# of the screen once answered
+_SAVE_CURSOR = "\x1b7"
+_RESTORE_AND_ERASE = "\x1b8\x1b[J"
 
 
 def spinner(message: str, *, style: str = "yellow") -> Status:
@@ -32,7 +44,8 @@ def confirm_or_cancel(
     *,
     yes: bool,
     default: bool = True,
-    cancel_msg: str = "\nCancelled\n",
+    style: str = "bold green",
+    cancel_msg: str = "• Cancelled\n",
 ) -> bool:
     """Ask for confirmation, printing a cancellation notice when declined.
 
@@ -40,15 +53,44 @@ def confirm_or_cancel(
         prompt: The question to put to the user.
         yes: When true, skip the prompt and proceed.
         default: The answer applied when the user just presses enter.
+        style: Rich colour for the prompt line, e.g. yellow for destructive commands.
         cancel_msg: Notice printed when the user declines.
 
     Returns:
         True if the command should proceed.
     """
+    sys.stdout.write("\n")  # The blank line above the prompt; outlives the erase below
+
     if yes:
         return True
 
-    if app.confirm(text=prompt, default=default):
+    erase = console.is_terminal
+    if erase:
+        console.file.write(_SAVE_CURSOR)
+        console.file.flush()
+
+    prompt_theme = Theme({"prompt.choices": style, "prompt.default": style})
+
+    try:
+        with console.use_theme(prompt_theme):
+            confirmed: bool = Confirm.ask(
+                Text(f"{_CONFIRM_BULLET} {prompt}", style=style),
+                console=console,
+                default=default,
+            )
+
+    except EOFError:
+        confirmed = False
+
+    if erase:
+        console.file.write(_RESTORE_AND_ERASE)
+        console.file.flush()
+
+    else:
+        # No terminal echoed the answer's newline, so close the line
+        sys.stdout.write("\n")
+
+    if confirmed:
         return True
 
     console.print(cancel_msg, style="dim")
