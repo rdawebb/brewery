@@ -6,6 +6,8 @@ commands, so each branch of `command_error` is exercised in isolation.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from typer.testing import CliRunner
 from typer_extensions import ExtendedTyper
@@ -26,6 +28,20 @@ from brewery.core.models import PackageKind
 pytestmark = pytest.mark.unit
 
 runner = CliRunner()
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(text: str) -> str:
+    """Strip ANSI styling so substring tests survive colorised Rich output.
+
+    Args:
+        text: The text to strip.
+
+    Returns:
+        The text with ANSI styling stripped.
+    """
+    return _ANSI.sub("", text)
 
 
 @pytest.fixture
@@ -176,7 +192,7 @@ class TestSignatureTransparency:
             """Decorated docstring."""
             print(f"names={names} kind={kind} yes={yes}")
 
-        help_out = runner.invoke(app, ["--help"]).output
+        help_out = _plain(runner.invoke(app, ["--help"]).output)
         assert "--kind" in help_out
         assert "--yes" in help_out
         assert "NAMES" in help_out
