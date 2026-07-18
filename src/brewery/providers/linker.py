@@ -120,6 +120,9 @@ class LinkResult:
     already_linked: list[str] = field(
         default_factory=list
     )  # Already pointing at this keg
+    conflicts: list[tuple[str, str]] = field(
+        default_factory=list
+    )  # (dst, existing) - only populated by a dry run
 
 
 @dataclass
@@ -278,6 +281,10 @@ class _Plan:
         # dst resolves to the same real path as src (e.g, metapackages)
         if exists and os.path.realpath(dst) == os.path.realpath(src):
             self.already.append(dst)
+            return
+
+        # A keg symlink aimed at its own prefix destination links to itself
+        if not exists and src.is_symlink() and _symlink_dest(src) == dst:
             return
 
         if is_link:
@@ -535,7 +542,7 @@ def _merge_into(dst_dir: Path, *sources: Path) -> list[Path]:
             linked.extend(_merge_into(target, *entries))
 
         else:
-            _make_relative_symlink(target, entries[0])
+            make_relative_symlink(target, entries[0])
             linked.append(target)
 
     return linked
@@ -576,8 +583,8 @@ def _explode(dst: Path, src: Path) -> list[Path]:
     return _merge_into(dst, other, src)
 
 
-def _make_relative_symlink(dst: Path, src: Path) -> None:
-    """Create a relative symlink.
+def make_relative_symlink(dst: Path, src: Path) -> None:
+    """Create a relative symlink, replacing whatever is already at `dst`.
 
     Args:
         dst: The destination path.
@@ -600,7 +607,7 @@ def _record_link(result: LinkResult, prefix: Path, dst: Path, src: Path) -> None
         dst: The prefix path of the symlink to create.
         src: The keg path the symlink points at.
     """
-    _make_relative_symlink(dst, src)
+    make_relative_symlink(dst, src)
     result.linked.append(dst.relative_to(prefix).as_posix())
 
 
@@ -623,6 +630,34 @@ def _apply_dirs_and_links(plan: _Plan, prefix: Path, result: LinkResult) -> None
         _record_link(result, prefix, dst, src)
 
 
+def _preview(plan: _Plan, prefix: Path) -> LinkResult:
+    """Project a plan into the LinkResult applying it would produce.
+
+    A whole-directory symlink counts as one entry here but expands to one entry
+    per file if a later keg forces it to explode, so `linked` is a lower bound on
+    what a real link would report.
+
+    Args:
+        plan: The plan to project.
+        prefix: The prefix being linked into.
+
+    Returns:
+        A LinkResult describing what applying `plan` would do.
+    """
+
+    def rel(path: Path) -> str:
+        return path.relative_to(prefix).as_posix()
+
+    return LinkResult(
+        linked=[
+            rel(dst) for dst, _ in (*plan.links, *plan.dir_links, *plan.explosions)
+        ],
+        created_dirs=[rel(d) for d in plan.dirs],
+        already_linked=[rel(dst) for dst in plan.already],
+        conflicts=list(plan.conflicts),
+    )
+
+
 def _write_linked_record(prefix: Path, name: str, keg: Path) -> None:
     """Write a record of the linked keg.
 
@@ -631,12 +666,7 @@ def _write_linked_record(prefix: Path, name: str, keg: Path) -> None:
         name: The name of the linked keg.
         keg: The keg path.
     """
-    record = prefix / _LINKED_RECORD_DIR / name
-    record.parent.mkdir(parents=True, exist_ok=True)
-    if record.is_symlink() or record.exists():
-        record.unlink()
-
-    record.symlink_to(os.path.relpath(keg, record.parent))
+    make_relative_symlink(prefix / _LINKED_RECORD_DIR / name, keg)
 
 
 def _write_link_manifest(keg: Path, result: LinkResult) -> None:
@@ -668,6 +698,7 @@ def link_keg(
     name: str,
     keg_only: bool = False,
     overwrite: bool = False,
+    dry_run: bool = False,
 ) -> LinkResult:
     """Symlink the keg's contents into the prefix, brew-style.
 
@@ -681,14 +712,20 @@ def link_keg(
         name: The name of the linked keg.
         keg_only: Whether to link only the keg.
         overwrite: Whether to overwrite existing links.
+        dry_run: Report what linking would do without touching the filesystem.
+            Conflicts are returned on the result rather than raised, so that
+            `--overwrite --dry-run` can show what would be deleted.
 
     Returns:
-        A LinkResult describing what was linked.
+        A LinkResult describing what was (or would be) linked.
     """
     if keg_only:
         return LinkResult()  # Keg-only formulae are never linked
 
     plan = _build_plan(keg_dir, prefix)
+
+    if dry_run:
+        return _preview(plan, prefix)
 
     if plan.conflicts and not overwrite:
         raise LinkError(plan.conflicts)
@@ -706,6 +743,8 @@ def link_keg(
 
     for dst in plan.already:
         result.already_linked.append(dst.relative_to(prefix).as_posix())
+
+    make_relative_symlink(prefix / "opt" / name, keg_dir)
 
     _write_linked_record(prefix, name, keg_dir)
     _write_link_manifest(keg_dir, result)
@@ -866,7 +905,9 @@ def _prune_dirs(prefix: Path, rels: set[str]) -> list[str]:
     return pruned
 
 
-def unlink_keg(keg_dir: Path, *, prefix: Path, name: str) -> UnlinkResult:
+def unlink_keg(
+    keg_dir: Path, *, prefix: Path, name: str, dry_run: bool = False
+) -> UnlinkResult:
     """Remove the prefix symlinks pointing into this keg.
 
     Read the keg's manifest as a candidate set and realpath-verify each entry still
@@ -877,9 +918,11 @@ def unlink_keg(keg_dir: Path, *, prefix: Path, name: str) -> UnlinkResult:
         keg_dir: The keg being unlinked.
         prefix: The prefix it was linked into.
         name: The formula name (for the linked-keg pointer).
+        dry_run: Identify the symlinks without removing them. `pruned` is left
+            empty, since which dirs empty out depends on the removals happening.
 
     Returns:
-        An UnlinkResult describing what was removed and pruned.
+        An UnlinkResult describing what was (or would be) removed and pruned.
     """
     keg_real = Path(os.path.realpath(keg_dir))
     result = UnlinkResult()
@@ -901,7 +944,8 @@ def unlink_keg(keg_dir: Path, *, prefix: Path, name: str) -> UnlinkResult:
                 dst = prefix / rel
                 if dst.is_symlink():
                     if _points_into(dst, keg_real):
-                        dst.unlink()
+                        if not dry_run:
+                            dst.unlink()
                         result.removed.append(rel)
 
                 elif dst.is_dir():
@@ -910,7 +954,8 @@ def unlink_keg(keg_dir: Path, *, prefix: Path, name: str) -> UnlinkResult:
             for d in exploded:
                 for link in _iter_symlinks(d):
                     if _points_into(link, keg_real):
-                        link.unlink()
+                        if not dry_run:
+                            link.unlink()
                         rel = link.relative_to(prefix).as_posix()
                         result.removed.append(rel)
 
@@ -921,10 +966,14 @@ def unlink_keg(keg_dir: Path, *, prefix: Path, name: str) -> UnlinkResult:
             for root in _ELIGIBLE:
                 for link in _iter_symlinks(prefix / root):
                     if _points_into(link, keg_real):
-                        link.unlink()
+                        if not dry_run:
+                            link.unlink()
                         result.removed.append(link.relative_to(prefix).as_posix())
 
             prune_targets = {Path(r).parent.as_posix() for r in result.removed}
+
+        if dry_run:
+            return result
 
         result.pruned = _prune_dirs(prefix, prune_targets)
 

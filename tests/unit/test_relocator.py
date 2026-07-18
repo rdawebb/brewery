@@ -8,7 +8,10 @@ import subprocess
 
 import pytest
 
+from brewery.core import host
+from brewery.core.host import Platform
 from brewery.providers import relocator as r
+from brewery.providers.receipt import RuntimeDependency
 from brewery.providers.relocator import InstallName, NameKind, RelocationError
 
 pytestmark = pytest.mark.unit
@@ -227,6 +230,131 @@ class TestMachOParsing:
         p = tmp_path / "empty"
         p.write_bytes(b"")
         assert r.find_install_names(p) == []
+
+
+def _dep(full_name: str, *, declared_directly: bool = True) -> RuntimeDependency:
+    """Build a runtime dependency entry.
+
+    Args:
+        full_name: The dependency's full name.
+        declared_directly: Whether the formula declares the dep itself.
+
+    Returns:
+        The RuntimeDependency entry.
+    """
+    return RuntimeDependency(
+        full_name=full_name, version="1", declared_directly=declared_directly
+    )
+
+
+@pytest.fixture
+def system_perl(monkeypatch):
+    """Pretend only /usr/bin/perl5.34 is present on the host.
+
+    Keeps the perl-path resolution off the real filesystem, which otherwise
+    varies by macOS version.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    monkeypatch.setattr(
+        r.Path, "exists", lambda self: str(self) == "/usr/bin/perl5.34", raising=False
+    )
+
+
+class TestFormulaTokens:
+    """Tests for the per-formula token map (brew's prepare_relocation_to_locations)."""
+
+    def test_perl_from_system_when_uses_from_macos(
+        self, brew_paths, system_perl
+    ) -> None:
+        """The cloc case: perl is uses_from_macos, so it is not a dep on macOS.
+
+        The shebang must point at the system perl the bottle was built against,
+        not at an opt/perl that was never installed.
+        """
+        tokens = r.formula_tokens(
+            brew_paths["prefix"],
+            name="cloc",
+            runtime_deps=[],
+            built_on={"preferred_perl": "5.34"},
+        )
+        assert tokens["@@HOMEBREW_PERL@@"] == "/usr/bin/perl5.34"
+
+    def test_perl_from_brewed_perl_when_declared(self, brew_paths, system_perl) -> None:
+        """Tests that a formula declaring perl gets the opt-linked brewed perl."""
+        tokens = r.formula_tokens(
+            brew_paths["prefix"],
+            name="ack",
+            runtime_deps=[_dep("perl")],
+            built_on={"preferred_perl": "5.34"},
+        )
+        assert tokens["@@HOMEBREW_PERL@@"] == "/opt/homebrew/opt/perl/bin/perl"
+
+    def test_perl_itself_gets_brewed_perl(self, brew_paths, system_perl) -> None:
+        """Tests that the perl formula resolves to its own opt path."""
+        tokens = r.formula_tokens(brew_paths["prefix"], name="perl", runtime_deps=[])
+        assert tokens["@@HOMEBREW_PERL@@"] == "/opt/homebrew/opt/perl/bin/perl"
+
+    def test_indirect_perl_dep_uses_system_perl(self, brew_paths, system_perl) -> None:
+        """A perl pulled in transitively is not a declared dep, so brew uses system perl."""
+        tokens = r.formula_tokens(
+            brew_paths["prefix"],
+            name="cloc",
+            runtime_deps=[_dep("perl", declared_directly=False)],
+            built_on={"preferred_perl": "5.34"},
+        )
+        assert tokens["@@HOMEBREW_PERL@@"] == "/usr/bin/perl5.34"
+
+    @pytest.mark.parametrize(
+        "built_on",
+        [None, {}, {"preferred_perl": "5.99"}, {"preferred_perl": "not-a-version"}],
+        ids=["no-tab", "empty", "absent-from-host", "malformed"],
+    )
+    def test_perl_falls_back_to_host_preferred(
+        self, brew_paths, system_perl, monkeypatch, built_on
+    ) -> None:
+        """Tests that an unusable tab value falls back to this host's preferred perl."""
+        monkeypatch.setattr(
+            host, "current_platform", lambda: Platform(arch="arm64", macos_major=12)
+        )
+        tokens = r.formula_tokens(
+            brew_paths["prefix"], name="cloc", runtime_deps=[], built_on=built_on
+        )
+        assert tokens["@@HOMEBREW_PERL@@"] == "/usr/bin/perl5.30"
+
+    def test_java_omitted_without_openjdk_dep(self, brew_paths, system_perl) -> None:
+        """Tests that java is left undefined when no openjdk dep exists.
+
+        brew leaves @@HOMEBREW_JAVA@@ alone in that case, so we must too.
+        """
+        tokens = r.formula_tokens(
+            brew_paths["prefix"], name="cloc", runtime_deps=[_dep("zlib")]
+        )
+        assert "@@HOMEBREW_JAVA@@" not in tokens
+
+    @pytest.mark.parametrize("dep", ["openjdk", "openjdk@21", "openjdk@11.0"])
+    def test_java_resolved_from_openjdk_dep(self, brew_paths, system_perl, dep) -> None:
+        """Tests that java resolves to JAVA_HOME inside the openjdk dep's bundle.
+
+        On macOS that is libexec/openjdk.jdk/Contents/Home, not libexec itself:
+        a launcher pointed at libexec finds no bin/java.
+        """
+        tokens = r.formula_tokens(
+            brew_paths["prefix"], name="jenkins", runtime_deps=[_dep(dep)]
+        )
+        assert tokens["@@HOMEBREW_JAVA@@"] == (
+            f"/opt/homebrew/opt/{dep}/libexec/openjdk.jdk/Contents/Home"
+        )
+
+    def test_openjdk_lookalike_dep_ignored(self, brew_paths, system_perl) -> None:
+        """Tests that a dep merely containing 'openjdk' does not resolve java."""
+        tokens = r.formula_tokens(
+            brew_paths["prefix"],
+            name="jenkins",
+            runtime_deps=[_dep("openjdk-headless")],
+        )
+        assert "@@HOMEBREW_JAVA@@" not in tokens
 
 
 @pytest.fixture
@@ -570,6 +698,41 @@ class TestOrchestration:
         assert "@@HOMEBREW_PREFIX@@" not in (keg / "config").read_text()
         assert n.macho_relocated == 0
         assert called == []
+
+    def test_relocate_keg_substitutes_formula_tokens(
+        self, tmp_path, brew_paths, system_perl
+    ) -> None:
+        """A perl shebang is rewritten once the formula tokens are supplied."""
+        keg = tmp_path / "keg"
+        (keg / "libexec" / "bin").mkdir(parents=True)
+        script = keg / "libexec" / "bin" / "cloc"
+        script.write_text("#!@@HOMEBREW_PERL@@\nprint 1;\n")
+
+        tokens = r.formula_tokens(
+            brew_paths["prefix"],
+            name="cloc",
+            runtime_deps=[],
+            built_on={"preferred_perl": "5.34"},
+        )
+        result = r.relocate_keg(keg, **brew_paths, extra_tokens=tokens)
+
+        assert result.changed_files == ["libexec/bin/cloc"]
+        assert script.read_text().startswith("#!/usr/bin/perl5.34\n")
+
+    def test_relocate_keg_raises_on_unresolved_placeholder(
+        self, tmp_path, brew_paths
+    ) -> None:
+        """A placeholder with no token in the map must abort, not ship broken.
+
+        The regression this guards: @@HOMEBREW_PERL@@ was silently left in
+        cloc's libexec shebang because the pipeline never passed extra_tokens.
+        """
+        keg = tmp_path / "keg"
+        (keg / "libexec" / "bin").mkdir(parents=True)
+        (keg / "libexec" / "bin" / "cloc").write_text("#!@@HOMEBREW_PERL@@\n")
+
+        with pytest.raises(RelocationError, match=r"unresolved placeholder .*PERL"):
+            r.relocate_keg(keg, **brew_paths)
 
     def test_relocate_keg_propagates_macho_failure(
         self, tmp_path, mock_run, brew_paths

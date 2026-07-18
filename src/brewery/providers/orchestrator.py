@@ -6,6 +6,7 @@ brew fallback.
 from __future__ import annotations
 
 import asyncio
+import functools
 import shutil
 import tempfile
 import time
@@ -24,7 +25,7 @@ from brewery.core.errors import (
     RelocationError,
 )
 from brewery.providers.cellar import install_to_cellar, rmtree
-from brewery.providers.downloader import BottleRef
+from brewery.providers.downloader import BottleRef, ProgressCb
 from brewery.providers.extractor import extract_bottle
 from brewery.providers.linker import link_keg, unlink_keg
 from brewery.providers.manifest import BottleTabInfo
@@ -35,7 +36,7 @@ from brewery.providers.receipt import (
     read_receipt,
     write_receipt,
 )
-from brewery.providers.relocator import relocate_keg
+from brewery.providers.relocator import formula_tokens, relocate_keg
 from brewery.providers.retention import mark_replaced
 
 
@@ -117,11 +118,14 @@ class CatalogPort(Protocol):
 class DownloadPort(Protocol):
     """Protocol for interacting with the bottle downloader."""
 
-    async def fetch(self, ref: BottleRef) -> Path:
+    async def fetch(
+        self, ref: BottleRef, *, on_progress: ProgressCb | None = None
+    ) -> Path:
         """Fetch a bottle by its reference.
 
         Args:
             ref (BottleRef): The reference to the bottle to fetch.
+            on_progress: Optional callback fed (downloaded_bytes, total_or_None).
 
         Returns:
             Path: The path to the downloaded bottle.
@@ -202,6 +206,65 @@ class BrewPort(Protocol):
             True if the post-install steps were successful, False otherwise.
         """
         ...
+
+
+class ProgressPort(Protocol):
+    """Sink for install/upgrade progress events (UI-agnostic).
+
+    Every call happens on the event-loop thread, a no-op default keeps the pipeline
+    silent when no reporter is bound.
+    """
+
+    def begin(self, total: int) -> None:
+        """Signal the start of a transaction installing `total` packages."""
+        ...
+
+    def update(
+        self,
+        name: str,
+        stage: str,
+        done: int | None = None,
+        total: int | None = None,
+    ) -> None:
+        """Report progress for `name` at `stage` ("download" | "install").
+
+        For the download stage, `done`/`total` are byte counts (total may be
+        None when the server sent no Content-Length).
+        """
+        ...
+
+    def finish(self, name: str, outcome: str) -> None:
+        """Signal that `name` reached a terminal `Outcome` (by value)."""
+        ...
+
+    def end(self) -> None:
+        """Tear the reporter down and hand the terminal back."""
+        ...
+
+
+class _NullProgress:
+    """No-op ProgressPort; the default when no reporter is bound."""
+
+    def begin(self, total: int) -> None:
+        """Ignore the transaction start."""
+
+    def update(
+        self,
+        name: str,
+        stage: str,
+        done: int | None = None,
+        total: int | None = None,
+    ) -> None:
+        """Ignore a progress update."""
+
+    def finish(self, name: str, outcome: str) -> None:
+        """Ignore a package completion."""
+
+    def end(self) -> None:
+        """Ignore teardown."""
+
+
+_NULL_PROGRESS: ProgressPort = _NullProgress()
 
 
 @dataclass(frozen=True)
@@ -305,8 +368,9 @@ class Orchestrator:
         tab_fetcher: TabFetcher,
         brew: BrewPort,
         config: InstallConfig,
-        install_concurrency: int = 4,
+        install_concurrency: int = 8,
         tab_concurrency: int = 8,
+        progress: ProgressPort | None = None,
     ) -> None:
         """Initialises the orchestrator.
 
@@ -316,14 +380,16 @@ class Orchestrator:
             tab_fetcher: The tab fetcher.
             brew: The brew port.
             config: The installation configuration.
-            install_concurrency: The number of concurrent installations. Defaults to 1.
+            install_concurrency: The number of concurrent installations. Defaults to 4.
             tab_concurrency: Maximum concurrent manifest tab fetches. Defaults to 8.
+            progress: Optional progress sink; defaults to a no-op reporter.
         """
         self.catalog = catalog
         self.downloader = downloader
         self.tab_fetcher = tab_fetcher
         self.brew = brew
         self.cfg = config
+        self.progress = progress or _NULL_PROGRESS
         self._install_sem = asyncio.Semaphore(install_concurrency)
         self._tab_sem = asyncio.Semaphore(tab_concurrency)
 
@@ -388,6 +454,8 @@ class Orchestrator:
         if not to_install:
             return report
 
+        self.progress.begin(len(to_install))
+
         graph = {
             n: {d for d in self.catalog.runtime_deps(n) if d in to_install}
             for n in to_install
@@ -421,7 +489,9 @@ class Orchestrator:
                 )
                 for task in done:
                     name = pending.pop(task)
-                    report.outcomes[name] = task.result()
+                    outcome = task.result()
+                    report.outcomes[name] = outcome
+                    self.progress.finish(name, outcome.value)
                     ts.done(name)
 
         finally:
@@ -429,6 +499,7 @@ class Orchestrator:
                 t.cancel()
 
             await asyncio.gather(*fetch.values(), return_exceptions=True)
+            self.progress.end()
 
         return report
 
@@ -565,7 +636,12 @@ class Orchestrator:
             """
             nonlocal bottle_error
             try:
-                return await self.downloader.fetch(ref)
+                return await self.downloader.fetch(
+                    ref,
+                    on_progress=functools.partial(
+                        self.progress.update, name, "download"
+                    ),
+                )
 
             except DownloadError as e:
                 bottle_error = str(e)
@@ -639,6 +715,7 @@ class Orchestrator:
         rt_deps = self._runtime_dep_entries(name)
 
         async with self._install_sem:
+            self.progress.update(name, "install")
             result = await asyncio.to_thread(
                 self._native_install,
                 name,
@@ -744,6 +821,12 @@ class Orchestrator:
                 cellar=self.cfg.cellar,
                 repository=self.cfg.repository,
                 skip_relocation=(fr.bottle_cellar == ":any_skip_relocation"),
+                extra_tokens=formula_tokens(
+                    self.cfg.prefix,
+                    name=name,
+                    runtime_deps=rt_deps,
+                    built_on=tab.built_on,
+                ),
                 text_files=tab.changed_files,
             )
             dest = install_to_cellar(

@@ -5,12 +5,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from rich.console import Console
 from typer_extensions import Context, ExtendedTyper
 
-config_app = ExtendedTyper(help="View brewery configuration and settings.")
+from brewery.cli.context import console
+from brewery.cli.error_formatting import command_error
 
-console = Console(emoji=False, highlight=False)
+config_app = ExtendedTyper(help="View brewery configuration and settings.")
 
 
 def _fmt_count(value: int | None, unit: str) -> str:
@@ -64,7 +64,7 @@ def _render_config() -> None:
     status, ok = _config_status(path)
     s = load_settings()
 
-    config_app.echo()
+    sys.stdout.write("\n")
     console.print("[bold]Configuration[/bold]\n")
     console.print(f"  File   {path}")
     console.print(f"         {status}", style="dim" if ok else "bold yellow")
@@ -91,7 +91,7 @@ def _render_config() -> None:
 
     console.print("\n[bold]Display[/bold]")
     console.print(f"  Format            {s.display.format}")
-    config_app.echo()
+    sys.stdout.write("\n")
 
 
 @config_app.callback(invoke_without_command=True)
@@ -117,6 +117,7 @@ def config_path() -> None:
 
 
 @config_app.command(name="set")
+@command_error()
 def config_set(
     key: str = config_app.Argument(..., help="Dotted key, e.g. retention.age_days"),
     value: str = config_app.Argument(
@@ -124,33 +125,22 @@ def config_set(
     ),
 ) -> None:
     """Set a configuration value."""
-    from brewery.cli.error_formatting import handle_error
-    from brewery.core.errors import BrewError
     from brewery.core.settings import write_setting
 
-    try:
-        written = write_setting(key, value)
-
-    except BrewError as e:
-        sys.exit(handle_error(error=e))
+    written = write_setting(key, value)
 
     shown = "unlimited" if written is None else written
     console.print(f"\n✓ Set [bold]{key}[/bold] to {shown}\n", style="bold green")
 
 
 @config_app.command(name="get")
+@command_error()
 def config_get(
     key: str = config_app.Argument(..., help="Dotted key, e.g. retention.age_days"),
 ) -> None:
     """Print one configuration value (resolved, with defaults applied)."""
-    from brewery.cli.error_formatting import handle_error
-    from brewery.core.errors import BrewError
     from brewery.core.settings import get_setting
 
-    try:
-        value = get_setting(key)
-
-    except BrewError as e:
-        sys.exit(handle_error(error=e))
+    value = get_setting(key)
 
     print("unlimited" if value is None else value)  # Bare stdout, pipe-friendly

@@ -16,12 +16,14 @@ log: BreweryLogger = get_logger(name=__name__)
 _RECEIPT_NAME = "INSTALL_RECEIPT.json"
 _CASK_METADATA_DIR = ".metadata"
 
-# Directories where linked kegs/casks are stored (current + legacy)
-_LINKED_DIRS: tuple[Path, ...] = (
+# Directories where linked kegs/casks are stored (current + legacy).
+# Prefix-relative. Also stat'd by the cache token, so link/pin state changes
+# made by brew are seen by brewery — keep these two in sync with that token.
+LINKED_DIRS: tuple[Path, ...] = (
     Path("var/homebrew/linked"),
     Path("Library/LinkedKegs"),
 )
-_PINNED_DIRS: tuple[Path, ...] = (
+PINNED_DIRS: tuple[Path, ...] = (
     Path("var/homebrew/pinned"),
     Path("Library/PinnedKegs"),
 )
@@ -169,7 +171,7 @@ def linked_names(prefix: Path) -> set[str] | None:
     Returns:
         The set of linked names, or None if no bookkeeping directory exists.
     """
-    return _bookkeeping_names(prefix=prefix, candidates=_LINKED_DIRS)
+    return _bookkeeping_names(prefix=prefix, candidates=LINKED_DIRS)
 
 
 def pinned_names(prefix: Path) -> set[str]:
@@ -181,7 +183,7 @@ def pinned_names(prefix: Path) -> set[str]:
     Returns:
         The set of pinned names (empty when no bookkeeping directory exists).
     """
-    return _bookkeeping_names(prefix=prefix, candidates=_PINNED_DIRS) or set()
+    return _bookkeeping_names(prefix=prefix, candidates=PINNED_DIRS) or set()
 
 
 def _bookkeeping_names(prefix: Path, candidates: tuple[Path, ...]) -> set[str] | None:

@@ -49,8 +49,10 @@ def derive_local_status(
     if kind == PackageKind.FORMULA:
         if pinned:
             status |= PackageStatus.PINNED
+
         if head:
             status |= PackageStatus.HEAD
+
         if not linked:
             status |= PackageStatus.NOT_LINKED
 

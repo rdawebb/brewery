@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, TextIO
@@ -38,11 +39,13 @@ class BreweryLogger:
         for k, v in kwargs.items():
             if k in _STDLIB_SPECIAL_KWARGS:
                 stdlib_kwargs[k] = v
+
             elif v is not None:
                 context[k] = v
 
         if context:
             suffix: str = " | " + " ".join(f"{k}={v}" for k, v in context.items())
+
         else:
             suffix = ""
 
@@ -95,14 +98,17 @@ class BreweryLogger:
 
 
 def configure_logging(
-    level: str = "INFO", log_file: Path | None = None, enable_console: bool = False
+    level: str = "INFO", log_file: Path | None = None, console_level: str | None = None
 ) -> None:
     """Configure logging for the Brewery application.
 
+    User-facing errors are printed by the CLI itself, so the console stays free of
+    log output unless a console level is requested.
+
     Args:
-        level: The logging level as a string (e.g., "DEBUG", "INFO").
+        level: The file logging level as a string (e.g., "DEBUG", "INFO").
         log_file: Optional path to a log file for file logging.
-        enable_console: Whether to enable console logging.
+        console_level: Level for a stderr handler, e.g. "DEBUG". None disables it.
     """
     global _CONFIGURED
     if _CONFIGURED:
@@ -120,20 +126,27 @@ def configure_logging(
         datefmt="%H:%M:%S",
     )
 
+    file_level: int = getattr(logging, level.upper())
+
     file_handler = RotatingFileHandler(
         filename=log_file, maxBytes=1 * 1024 * 1024, backupCount=4
     )
     file_handler.setFormatter(fmt=formatter)
-    file_handler.setLevel(level=getattr(logging, level.upper()))
+    file_handler.setLevel(level=file_level)
     logging.root.addHandler(hdlr=file_handler)
 
-    if enable_console:
-        console_handler: logging.StreamHandler[TextIO] = logging.StreamHandler()
-        console_handler.setFormatter(fmt=formatter)
-        console_handler.setLevel(level=logging.ERROR)
-        logging.root.addHandler(hdlr=console_handler)
+    levels: list[int] = [file_level]
 
-    logging.root.setLevel(level=getattr(logging, level.upper()))
+    if console_level is not None:
+        console_handler: logging.StreamHandler[TextIO] = logging.StreamHandler(
+            stream=sys.stderr
+        )
+        console_handler.setFormatter(fmt=formatter)
+        console_handler.setLevel(level=getattr(logging, console_level.upper()))
+        logging.root.addHandler(hdlr=console_handler)
+        levels.append(console_handler.level)
+
+    logging.root.setLevel(level=min(levels))
     _CONFIGURED = True
 
 

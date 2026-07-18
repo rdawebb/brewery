@@ -25,7 +25,7 @@ class RuntimeDependency:
     declared_directly: bool = False
 
     @classmethod
-    def from_tab(cls, dep: dict) -> "RuntimeDependency":
+    def from_tab(cls, dep: dict) -> RuntimeDependency:
         """Build from a tab runtime_dependency, ignoring compatibility_version.
 
         Args:

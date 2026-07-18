@@ -39,15 +39,13 @@ class TestCacheTokenRoundTrip:
     def test_token_change_invalidates(self, mock_env) -> None:
         """Test that a changed filesystem token misses the cached value.
 
-        The token is derived from Cellar/Caskroom/Taps mtimes; touching the
-        Cellar after a set means the stored token no longer matches on read.
+        Adding a direct child of the Cellar after a set means the stored token
+        no longer matches on read.
         """
         c = Cache(namespace="t4")
         c.set("k", "v")
 
-        # Force a new mtime on the cellar, then drop to force recompute
         (mock_env.cellar / "newpkg").mkdir()
-        c.invalidate_token()
         assert c.get("k") is None
 
     def test_delete_removes_value(self, mock_env) -> None:
@@ -60,6 +58,45 @@ class TestCacheTokenRoundTrip:
     def test_delete_missing_is_silent(self, mock_env) -> None:
         """Test that deleting an absent key does not raise."""
         Cache(namespace="t6").delete("absent")  # No exception
+
+    @pytest.mark.parametrize(
+        "bookkeeping_dir",
+        [
+            pytest.param("var/homebrew/pinned", id="pinned"),
+            pytest.param("var/homebrew/linked", id="linked"),
+            pytest.param("Library/PinnedKegs", id="pinned_legacy"),
+            pytest.param("Library/LinkedKegs", id="linked_legacy"),
+        ],
+    )
+    def test_pin_and_link_bookkeeping_invalidates(
+        self, mock_env, bookkeeping_dir
+    ) -> None:
+        """Test that writing a pin/link record misses the cached value.
+
+        `brew pin foo` only writes `var/homebrew/pinned/foo`; it touches
+        neither the Cellar nor the Caskroom. If those dirs are absent from the
+        token, brewery keeps serving stale pin/link state.
+        """
+        directory: Path = mock_env.prefix / bookkeeping_dir
+        directory.mkdir(parents=True)
+
+        c = Cache(namespace=f"tok-{bookkeeping_dir.replace('/', '-')}")
+        c.set("k", "v")
+        assert c.get("k") == "v"
+
+        # Equivalent of `brew pin foo` / `brew link foo`: a new direct child.
+        (directory / "foo").symlink_to(mock_env.cellar / "foo" / "1.0")
+        assert c.get("k") is None
+
+    def test_token_survives_absent_bookkeeping_dirs(self, mock_env) -> None:
+        """Test that a prefix with no pin/link dirs still round-trips.
+
+        A fresh prefix has neither directory; a missing path must contribute a
+        stable value to the token rather than raising or churning it.
+        """
+        c = Cache(namespace="t7")
+        c.set("k", "v")
+        assert c.get("k") == "v"
 
 
 class TestCacheManagerRecords:

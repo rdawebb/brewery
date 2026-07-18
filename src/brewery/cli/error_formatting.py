@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from rich.console import Console
+import functools
+import sys
+from typing import Callable, ParamSpec
 
 from brewery.core.errors import (
     EXIT_SYSTEM_ERROR,
@@ -13,6 +15,7 @@ from brewery.core.errors import (
     BrewError,
     BrewTimeoutError,
     CacheError,
+    LinkError,
     PackageNotFoundError,
     PinnedPackageWarning,
     SysError,
@@ -21,14 +24,29 @@ from brewery.core.errors import (
 )
 from brewery.core.logging import BreweryLogger, get_logger
 
+from .context import console
+
+P = ParamSpec("P")
+
+EXIT_INTERRUPTED = 130
+
 log: BreweryLogger = get_logger(name=__name__)
 
-console = Console(emoji=False, highlighter=None)
+
+class CommandFailed(Exception):
+    """Signal that a command hard-failed on one or more items.
+
+    Raised after the command has already printed its own failure report, so it
+    carries no message. `command_error` maps it to `EXIT_USER_ERROR`, matching
+    brew's `ofail` semantics: the command does its valid work, reports what
+    failed, and exits non-zero.
+    """
+
 
 ERROR_TEMPLATES: dict[type[BrewError], str] = {
     AlreadyInstalledWarning: (
         "⚠️ Already installed: {package}\n"
-        "   Suggestion: Try 'brewery update {package}' to update the package"
+        "   Suggestion: Try 'brewery upgrade {package}' to update the package"
     ),
     PinnedPackageWarning: (
         "⚠️ Package is pinned: {package}\n"
@@ -48,7 +66,11 @@ ERROR_TEMPLATES: dict[type[BrewError], str] = {
     CacheError: (
         "⚠️ Cache error: {error}\n"
         "   Location: {path}\n"
-        "   Fix: Check file permissions or clear cache with 'brewery cache clear'"
+        "   Fix: Check file permissions, or delete {path} to rebuild the cache"
+    ),
+    LinkError: (
+        "❌ {message}\n"
+        "   Suggestion: Try 'brewery link --overwrite <name>' to replace the existing files"
     ),
     TransientError: (
         "⚠️ Temporary failure: {message}\n   This may resolve itself - try again in a moment"
@@ -74,6 +96,7 @@ def format_error_message(error: BrewError) -> str:
         if issubclass(cls, BrewError) and cls in ERROR_TEMPLATES:
             template = ERROR_TEMPLATES[cls]
             break
+
     else:
         template = ERROR_TEMPLATES[BrewError]
 
@@ -144,3 +167,50 @@ def handle_error(error: Exception) -> int:
         log.error(event="unexpected_error", error=str(object=error), exc_info=True)
         console.print(f"\n⚠ Unexpected error occurred: {error}\n", style="bold red")
         return EXIT_SYSTEM_ERROR
+
+
+def command_error(
+    *,
+    interrupt_hint: str | None = None,
+    warnings: tuple[type[BrewError], ...] = (),
+) -> Callable[[Callable[P, None]], Callable[P, None]]:
+    """Wrap a CLI command body with standard error handling.
+
+    Args:
+        interrupt_hint: Command to suggest re-running after a Ctrl-C, e.g.
+            "brewery install <name>". Omit for commands with nothing to resume.
+        warnings: Error types that are advisory rather than failures. These print
+            their message and exit 0. Checked before the catch-all.
+
+    Returns:
+        A decorator wrapping the command body.
+    """
+
+    def decorate(fn: Callable[P, None]) -> Callable[P, None]:
+        @functools.wraps(fn)
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
+            try:
+                return fn(*args, **kwargs)
+
+            # An empty `warnings` tuple never matches, so this is a no-op by default
+            except warnings as e:
+                console.print(f"\n⚠ {e.message}\n", style="bold yellow")
+
+            except CommandFailed:
+                sys.exit(EXIT_USER_ERROR)
+
+            except KeyboardInterrupt:
+                if interrupt_hint:
+                    console.print(
+                        f"\n⚠ Interrupted. Re-run [bold]{interrupt_hint}[/bold] "
+                        "to complete it\n",
+                        style="bold yellow",
+                    )
+                sys.exit(EXIT_INTERRUPTED)
+
+            except Exception as e:
+                sys.exit(handle_error(error=e))
+
+        return wrapper
+
+    return decorate

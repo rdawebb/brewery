@@ -27,8 +27,6 @@ os.environ["BREWERY_LOG_DIR"] = str(_TMP_ROOT / "logs")
 # Resets module-level state between tests to avoid state leakage (only already-imported modules)
 _RESETTABLE: list[tuple[str, str, object]] = [
     ("brewery.core.config", "_env_cache", None),
-    ("brewery.core.cache", "_cached_token", None),
-    ("brewery.core.cache", "_token_timestamp", 0),
     ("brewery.providers.brew_cask", "_caskroom_path", None),
     # Lazily-created, event-loop-bound, cleared so it re-binds to each test's own loop
     ("brewery.providers.package_builder", "_SEMAPHORE", None),

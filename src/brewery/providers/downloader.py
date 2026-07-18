@@ -74,7 +74,7 @@ class Downloader:
         client: httpx.AsyncClient | None = None,
         *,
         token: str = DEFAULT_GHCR_TOKEN,
-        max_concurrency: int = 4,
+        max_concurrency: int = 8,
         max_retries: int = 3,
         verify_cached: bool = False,
     ) -> None:

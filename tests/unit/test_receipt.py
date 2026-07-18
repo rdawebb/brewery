@@ -11,6 +11,10 @@ import brewery.providers.receipt as r
 from brewery.core.config import get_brewery_env
 from brewery.providers.receipt import RuntimeDependency, Source, build_receipt, dumps
 
+# Fixtures derive source.path from the live env so the byte-exact comparisons
+# hold on any host
+_API_PATH = str(get_brewery_env().api_path)
+
 SQLITE = """\
 {
   "homebrew_version": "5.1.15-12-g2d9bb4c",
@@ -48,7 +52,7 @@ SQLITE = """\
       "version_scheme": 0,
       "compatibility_version": null
     },
-    "path": "/Users/rdawebb/Library/Caches/Homebrew/api/formula.jws.json",
+    "path": "%s",
     "tap_git_head": null,
     "tap": "homebrew/core"
   },
@@ -104,7 +108,7 @@ OPENSSL = """\
       "version_scheme": 0,
       "compatibility_version": null
     },
-    "path": "/Users/rdawebb/Library/Caches/Homebrew/api/formula.jws.json",
+    "path": "%s",
     "tap_git_head": null,
     "tap": "homebrew/core"
   },
@@ -143,13 +147,18 @@ CA_CERTIFICATES = """\
       "version_scheme": 0,
       "compatibility_version": null
     },
-    "path": "/Users/rdawebb/Library/Caches/Homebrew/api/formula.jws.json",
+    "path": "%s",
     "tap_git_head": null,
     "tap": "homebrew/core"
   },
   "arch": "x86_64",
   "built_on": null
 }"""
+
+# Fill each fixture's source.path from the live env (see _API_PATH above)
+SQLITE = SQLITE % _API_PATH
+OPENSSL = OPENSSL % _API_PATH
+CA_CERTIFICATES = CA_CERTIFICATES % _API_PATH
 
 # Tab runtime_dependencies carry an extra compatibility_version the receipt drops
 SQLITE_TAB_DEPS = [
@@ -324,7 +333,8 @@ def test_write_receipt_atomic_mode_and_content(tmp_path) -> None:
     """Test that write_receipt uses atomic mode and writes the correct content."""
     keg = tmp_path / "keg"
     keg.mkdir()
-    receipt = _rebuild(orjson.loads(SQLITE), SQLITE_TAB_DEPS)
+    with mock.patch.object(r.platform, "machine", lambda: "x86_64"):
+        receipt = _rebuild(orjson.loads(SQLITE), SQLITE_TAB_DEPS)
     path = r.write_receipt(keg, receipt)
     assert path == keg / "INSTALL_RECEIPT.json"
     assert path.read_text() == SQLITE

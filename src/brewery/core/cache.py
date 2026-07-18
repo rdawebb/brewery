@@ -11,15 +11,12 @@ import orjson
 from brewery.core.catalog import Catalog
 from brewery.core.config import BreweryENV, ensure_cache_dir, get_brewery_env
 from brewery.core.errors import CacheError
-from brewery.core.fs_state import scan_installed
+from brewery.core.fs_state import LINKED_DIRS, PINNED_DIRS, scan_installed
 from brewery.core.keg_sizes import attach_sizes
 from brewery.core.logging import BreweryLogger, get_logger
 from brewery.core.models import InstalledRecord, Package, PackageKind
 
 log: BreweryLogger = get_logger(name=__name__)
-
-_cached_token = None
-_token_timestamp = 0
 
 
 class Cache:
@@ -50,16 +47,32 @@ class Cache:
         """
         return self.cache_path / f"{key}.json"
 
+    def _token_paths(self) -> list[Path]:
+        """Return every directory whose mtime contributes to the cache token.
+
+        Returns:
+            The directories to stat, in a stable order.
+        """
+        brewery: BreweryENV = get_brewery_env()
+        prefix: Path = brewery.prefix
+
+        return [
+            brewery.cellar,
+            brewery.caskroom,
+            prefix / "Homebrew" / "Library" / "Taps",
+            *(prefix / rel for rel in LINKED_DIRS),
+            *(prefix / rel for rel in PINNED_DIRS),
+        ]
+
     def _update_token(self) -> str:
-        """Generate a new update token based on the current time.
+        """Compute the current filesystem-state token.
+
+        Note: a version change made by brew directly is not visible here.
+        After using brew directly, pass `--refresh`.
 
         Returns:
             A string token representing the current state.
         """
-        global _cached_token, _token_timestamp
-        now: float = time.time()
-
-        brewery: BreweryENV = get_brewery_env()
 
         def mtime(p: Path) -> int:
             try:
@@ -68,19 +81,7 @@ class Cache:
             except FileNotFoundError:
                 return 0
 
-        taps_path: Path = brewery.prefix / "Homebrew" / "Library" / "Taps"
-
-        _cached_token = "-".join(
-            str(mtime(p))
-            for p in [
-                brewery.cellar,
-                brewery.caskroom,
-                taps_path,
-            ]
-        )
-        _token_timestamp = now
-
-        return _cached_token
+        return "-".join(str(mtime(p)) for p in self._token_paths())
 
     def get(self, key: str) -> Optional[Any]:
         """Get a cached value by key.
@@ -168,13 +169,6 @@ class Cache:
                 operation="write",
                 path=str(object=f),
             ) from e
-
-    def invalidate_token(self) -> None:
-        """Invalidate the current cache token, forcing a refresh on the next read."""
-        global _cached_token, _token_timestamp
-
-        _cached_token = None
-        _token_timestamp = 0
 
     def delete(self, key: str) -> None:
         """Delete a cached value by key, if it exists."""
@@ -277,6 +271,5 @@ class CacheManager:
 
     def invalidate(self) -> None:
         """Invalidate FS cache so it is rebuilt on next access."""
-        self.cache.invalidate_token()
         self.cache.delete(self._RECORDS_KEY)
         log.debug(event="installed_records_invalidated")

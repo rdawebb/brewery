@@ -108,9 +108,7 @@ async def test_downloader_built_with_env_cache_and_client(patched, mock_env) -> 
 async def test_orchestrator_wired_with_adapters_and_config(patched, mock_env) -> None:
     """Test that the Orchestrator receives correctly wired adapters and InstallConfig."""
     repo = MockRepo()
-    await svc.run_install(
-        repo, ["wget"], run_brew=_run_brew, env=mock_env, install_concurrency=3
-    )
+    await svc.run_install(repo, ["wget"], run_brew=_run_brew, env=mock_env)
     assert MockOrchestrator.last is not None
     kw = MockOrchestrator.last.kwargs
 
@@ -129,9 +127,9 @@ async def test_orchestrator_wired_with_adapters_and_config(patched, mock_env) ->
     assert tf.func is svc.fetch_bottle_tab
     assert tf.args == (patched,)
 
-    # Downloader and concurrency forwarded
+    # Downloader forwarded; concurrency left to the Orchestrator's default
     assert kw["downloader"] is MockDownloader.last
-    assert kw["install_concurrency"] == 3
+    assert "install_concurrency" not in kw
 
     # Config derived from env
     cfg = kw["config"]
