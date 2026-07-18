@@ -15,14 +15,23 @@ def list_pkgs(
         None, "--kind", "-k", help="formula | cask | all"
     ),
     refresh: bool = app.Option(False, "--refresh", "-r", help="Refresh cache"),
+    table: bool = app.Option(
+        False, "--table", "-t", "--verbose", "-v", help="Show the full table view"
+    ),
 ) -> None:
     """List packages in the repository.
 
     Args:
         kind: Filter by package kind.
         refresh: Refresh cache before listing packages.
+        table: Show the full multi-column table instead of the compact view.
     """
-    from brewery.cli.renderers import _terminal_size, package_table, paginate
+    from brewery.cli.renderers import (
+        _terminal_size,
+        package_columns,
+        package_table,
+        paginate,
+    )
 
     with _repository() as repo:
         pkgs: list[Package]
@@ -34,8 +43,12 @@ def list_pkgs(
         else:
             pkgs = repo.get_all_installed(kind_filter=kind)
 
+        if not table:
+            console.print(package_columns(pkgs, single_column=not console.is_terminal))
+            return
+
         _, term_height = _terminal_size()
-        page_size: int = term_height - 6  # header + footer buffer
+        page_size: int = max(term_height - 6, 1)  # header + footer buffer
 
         if len(pkgs) > page_size:
             paginate(pkgs=pkgs, page_size=page_size, console=console)
@@ -68,15 +81,29 @@ def info(
 
 @app.command(aliases=["s", "find"])
 @command_error()
-def search(term: str) -> None:
+def search(
+    term: str,
+    table: bool = app.Option(
+        False, "--table", "-t", "--verbose", "-v", help="Show the full table view"
+    ),
+) -> None:
     """Search for packages by name or description.
 
     Args:
         term: Search term.
+        table: Show the full multi-column table instead of the compact view.
     """
-    from brewery.cli.renderers import package_table
+    from brewery.cli.renderers import package_columns, package_table
 
     with _repository() as repo:
         pkgs: list[Package] = repo.search(term)
 
-        console.print(package_table(pkgs))
+        if table:
+            console.print(package_table(pkgs))
+            return
+
+        console.print(
+            package_columns(
+                pkgs, mark_installed=True, single_column=not console.is_terminal
+            )
+        )

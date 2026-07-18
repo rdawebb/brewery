@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 from rich.console import Console
 
-from brewery.cli.renderers import package_details, package_table
+from brewery.cli.renderers import package_columns, package_details, package_table
 from brewery.core.models import PackageKind
 
 pytestmark = pytest.mark.integration
@@ -114,3 +114,40 @@ class TestSearchOutput:
         out = render(package_table(repo.search("yazi")))
 
         assert "yazi" in out
+
+
+class TestCompactOutput:
+    """list/search -> package_columns brew-style compact view."""
+
+    def test_sections_split_by_kind_with_summary(self, repo, render) -> None:
+        """Formulae and Casks get their own sections; act's OUTDATED is summarised."""
+        out = render(package_columns(repo.get_all_installed()))
+
+        formulae, _, casks = out.partition("==> Casks")
+        assert "==> Formulae" in formulae
+        assert "1 outdated" in formulae  # act (0.2.88 -> 0.2.89)
+        # Formulae under Formulae, the cask under Casks.
+        assert "act" in formulae and "yazi" in formulae
+        assert "iina" in casks and "iina" not in formulae
+
+    def test_search_marks_installed_hits(self, repo, render) -> None:
+        """An installed search hit carries the green tick."""
+        out = render(package_columns(repo.search("yazi"), mark_installed=True))
+
+        assert "yazi ✓" in out
+
+    def test_single_column_one_per_line(self, repo, render) -> None:
+        """single_column renders each package on its own line."""
+        out = render(
+            package_columns(
+                repo.get_all_installed(kind_filter=PackageKind.FORMULA),
+                single_column=True,
+            )
+        )
+
+        lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+        # Header line plus one line per formula (act, yazi), each on its own row.
+        assert "==> Formulae" in lines[0]
+        assert any(ln.startswith("act") for ln in lines[1:])
+        assert any(ln.startswith("yazi") for ln in lines[1:])
+        assert len(lines) == 3  # header + act + yazi, no multi-name rows

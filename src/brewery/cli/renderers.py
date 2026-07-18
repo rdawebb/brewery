@@ -9,22 +9,43 @@ from typing import Iterable
 import orjson
 import readchar
 from rich import box
-from rich.console import Console
+from rich.columns import Columns
+from rich.console import Console, Group, RenderableType
 from rich.layout import Layout
 from rich.table import Table
 from rich.text import Text
 
 from brewery.core.config import ensure_cache_dir
-from brewery.core.models import Package, PackageStatus
+from brewery.core.models import Package, PackageKind, PackageStatus
+
+# flag -> (colour, label)
+_STATUS_STYLES: dict[PackageStatus, tuple[str, str]] = {
+    PackageStatus.PINNED: ("yellow", "Pinned"),
+    PackageStatus.OUTDATED: ("red", "Outdated"),
+    PackageStatus.NOT_LINKED: ("blue", "Not Linked"),
+    PackageStatus.KEG_ONLY: ("magenta", "Keg-Only"),
+    PackageStatus.HEAD: ("cyan", "HEAD"),
+    PackageStatus.HAS_SERVICE: ("green", "Service"),
+}
 
 STATUS_LABELS: dict[PackageStatus, str] = {
-    PackageStatus.OUTDATED: "[red]Outdated[/red]",
-    PackageStatus.PINNED: "[yellow]Pinned[/yellow]",
-    PackageStatus.NOT_LINKED: "[blue]Not Linked[/blue]",
-    PackageStatus.KEG_ONLY: "[magenta]Keg-Only[/magenta]",
-    PackageStatus.HEAD: "[cyan]HEAD[/cyan]",
-    PackageStatus.HAS_SERVICE: "[green]Service[/green]",
+    flag: f"[{colour}]{label}[/{colour}]"
+    for flag, (colour, label) in _STATUS_STYLES.items()
 }
+
+# The states worth colouring in the compact view (and a count in the section header)
+_COLOURED_FLAGS: tuple[PackageStatus, ...] = (
+    PackageStatus.PINNED,
+    PackageStatus.OUTDATED,
+    PackageStatus.NOT_LINKED,
+)
+
+# Fixed left-to-right order for the section-header summary
+_SUMMARY_ORDER: tuple[PackageStatus, ...] = (
+    PackageStatus.OUTDATED,
+    PackageStatus.PINNED,
+    PackageStatus.NOT_LINKED,
+)
 
 COLUMN_DEFINITIONS: list[dict] = [
     dict(header="Kind"),
@@ -177,6 +198,154 @@ def status_to_str(status: PackageStatus) -> str:
     bits: list[str] = [label for flag, label in STATUS_LABELS.items() if flag in status]
 
     return ", ".join(bits)
+
+
+def _status_colour(pkg: Package) -> str | None:
+    """Return the compact-view status colour for a package's name, or None.
+
+    Picks the first flag present on the package in `_STATUS_STYLES` order (which is
+    pinned-first) that also earns a colour.
+
+    Args:
+        pkg: The package to colour.
+
+    Returns:
+        A colour name, or None when the name should keep its default style.
+    """
+    for flag, (colour, _label) in _STATUS_STYLES.items():
+        if flag in _COLOURED_FLAGS and flag in pkg.status:
+            return colour
+
+    return None
+
+
+def _compact_entry(pkg: Package, *, mark_installed: bool) -> Text:
+    """Build a single compact-view cell: name (status-coloured) and optional install tick.
+
+    Args:
+        pkg: The package to render.
+        mark_installed: When true, append a green tick for installed packages. Used
+            by `search`, where results are mostly not installed; `path is not None`
+            is the installed discriminator.
+
+    Returns:
+        A Rich `Text` for the package.
+    """
+    colour: str | None = _status_colour(pkg)
+    entry = Text(pkg.name, style=colour or "")
+
+    if mark_installed and pkg.path is not None:
+        entry.append(" ✓", style="bold green")
+
+    return entry
+
+
+def _section_summary(pkgs: list[Package]) -> Text:
+    """Summarise a section's bulleted states as 'N outdated / M pinned', zeros omitted.
+
+    Each count is coloured to match its name colour; the separators stay dim.
+
+    Args:
+        pkgs: The packages in one section (all the same kind).
+
+    Returns:
+        A summary Text, empty when no package carries a coloured state.
+    """
+    summary = Text()
+
+    for flag in _SUMMARY_ORDER:
+        count: int = sum(1 for p in pkgs if flag in p.status)
+        if count:
+            colour, label = _STATUS_STYLES[flag]
+            if summary:
+                summary.append(" / ", style="dim")
+            summary.append(f"{count} {label.lower()}", style=colour)
+
+    return summary
+
+
+def _section(
+    pkgs: list[Package], header: str, *, mark_installed: bool, single_column: bool
+) -> Group:
+    """Build one titled section (header + entries) for the compact view.
+
+    Args:
+        pkgs: The packages in this section, already filtered to one kind.
+        header: The section title, e.g. "Formulae".
+        mark_installed: Passed through to `_compact_entry`.
+        single_column: When true, render one entry per line instead of a column grid
+            (used for non-tty output).
+
+    Returns:
+        A renderable group for the section.
+    """
+    ordered: list[Package] = sorted(pkgs, key=lambda p: p.name.lower())
+    entries: list[Text] = [
+        _compact_entry(p, mark_installed=mark_installed) for p in ordered
+    ]
+
+    title = Text(f"==> {header}", style="bold blue")
+    summary: Text = _section_summary(ordered)
+    if summary:
+        title.append(" - ", style="dim")
+        title.append_text(summary)
+
+    body: RenderableType = (
+        Group(*entries)
+        if single_column
+        else Columns(entries, padding=(0, 6), equal=True, column_first=True)
+    )
+
+    return Group(title, body)
+
+
+def package_columns(
+    pkgs: Iterable[Package],
+    *,
+    mark_installed: bool = False,
+    single_column: bool = False,
+) -> RenderableType:
+    """Render packages as a compact, brew-style multi-column view.
+
+    Packages are split into Formulae and Casks sections, each sorted by name, with a
+    header summary of coloured states and the name itself coloured on any package that
+    is pinned, outdated or not-linked.
+
+    Args:
+        pkgs: The packages to render.
+        mark_installed: Mark installed packages with a green tick (for `search`).
+        single_column: Render one entry per line rather than a grid (non-tty output).
+
+    Returns:
+        A Rich renderable for the whole view.
+    """
+    pkg_list: list[Package] = list(pkgs)
+    formulae: list[Package] = [p for p in pkg_list if p.kind is PackageKind.FORMULA]
+    casks: list[Package] = [p for p in pkg_list if p.kind is PackageKind.CASK]
+
+    sections: list[Group] = []
+    for section_pkgs, header in ((formulae, "Formulae"), (casks, "Casks")):
+        if section_pkgs:
+            sections.append(
+                _section(
+                    section_pkgs,
+                    header,
+                    mark_installed=mark_installed,
+                    single_column=single_column,
+                )
+            )
+
+    if not sections:
+        return Text("\n- No packages found\n", style="dim")
+
+    blocks: list[RenderableType] = [""]  # Blank line before the first title
+    for i, section in enumerate(sections):
+        if i:
+            blocks.append("")  # Blank line between sections
+        blocks.append(section)
+    blocks.append("")  # Blank line after the last section
+
+    return Group(*blocks)
 
 
 def _save_width_cache() -> None:
