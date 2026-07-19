@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import struct
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -408,33 +409,50 @@ def mock_run(monkeypatch):
     return install
 
 
-class TestMachORewrite:
-    """Tests for Mach-O file relocation."""
+def _keg_with_dylib(root: Path, load_commands: list[bytes], name: str = "libfoo.dylib"):
+    """Write a single Mach-O into a keg's lib/ dir and return (keg, dylib path).
 
-    def test_relocate_macho_builds_correct_argv(self, tmp_path, subs, mock_run) -> None:
+    Args:
+        root: The temp dir to build the keg under.
+        load_commands: The load commands for the fake thin Mach-O.
+        name: The dylib filename.
+
+    Returns:
+        A (keg_dir, dylib_path) tuple.
+    """
+    keg = root / "keg"
+    (keg / "lib").mkdir(parents=True)
+    dylib = keg / "lib" / name
+    dylib.write_bytes(_thin_macho(load_commands))
+
+    return keg, dylib
+
+
+class TestMachORewrite:
+    """Tests for Mach-O relocation, driven through the real keg walker."""
+
+    def test_relocate_keg_builds_correct_macho_argv(
+        self, tmp_path, brew_paths, mock_run
+    ) -> None:
         """Tests that the correct arguments are passed to the relocation commands."""
         runs = mock_run()
-        p = tmp_path / "libfoo.dylib"
-        p.write_bytes(
-            _thin_macho(
-                [
-                    _lc_dylib(r._LC_ID_DYLIB, "@@HOMEBREW_PREFIX@@/lib/libfoo.dylib"),
-                    _lc_dylib(r._LC_LOAD_DYLIB, "@@HOMEBREW_PREFIX@@/lib/libbar.dylib"),
-                    _lc_dylib(
-                        r._LC_LOAD_DYLIB, "/usr/lib/libSystem.B.dylib"
-                    ),  # untouched
-                    _lc_rpath("@@HOMEBREW_CELLAR@@/foo/1.0/lib"),
-                ]
-            )
+        keg, dylib = _keg_with_dylib(
+            tmp_path,
+            [
+                _lc_dylib(r._LC_ID_DYLIB, "@@HOMEBREW_PREFIX@@/lib/libfoo.dylib"),
+                _lc_dylib(r._LC_LOAD_DYLIB, "@@HOMEBREW_PREFIX@@/lib/libbar.dylib"),
+                _lc_dylib(r._LC_LOAD_DYLIB, "/usr/lib/libSystem.B.dylib"),  # untouched
+                _lc_rpath("@@HOMEBREW_CELLAR@@/foo/1.0/lib"),
+            ],
         )
 
-        changed = r.relocate_macho(p, subs)
-        assert changed is True
-        assert len(runs) == 2  # install_name_tool, then codesign
+        result = r.relocate_keg(keg, **brew_paths)
+        assert result.macho_relocated == 1
+        assert len(runs) == 2  # install_name_tool, then a single batched codesign
 
         int_cmd = runs[0]
         assert int_cmd[0] == "install_name_tool"
-        assert str(p) == int_cmd[-1]
+        assert str(dylib) == int_cmd[-1]
 
         # -id uses new only; -change uses old+new; -rpath uses old+new; libSystem absent
         assert "-id" in int_cmd
@@ -469,42 +487,63 @@ class TestMachORewrite:
 
         return argv[i : i + 3]
 
-    def test_relocate_macho_noop_when_no_placeholders(
-        self, tmp_path, subs, mock_run
+    def test_relocate_keg_noop_when_no_placeholders(
+        self, tmp_path, brew_paths, mock_run
     ) -> None:
         """Tests that no changes are made when there are no placeholders."""
         runs = mock_run()
-        p = tmp_path / "clean.dylib"
-        p.write_bytes(
-            _thin_macho(
-                [
-                    _lc_dylib(r._LC_ID_DYLIB, "/usr/lib/libSystem.B.dylib"),
-                ]
-            )
+        keg, _ = _keg_with_dylib(
+            tmp_path, [_lc_dylib(r._LC_ID_DYLIB, "/usr/lib/libSystem.B.dylib")]
         )
 
         # No placeholders -> no rewrite, and no re-sign
-        assert r.relocate_macho(p, subs) is False
+        result = r.relocate_keg(keg, **brew_paths)
+        assert result.macho_relocated == 0
         assert runs == []
 
     def test_install_name_tool_failure_raises_relocation_error(
-        self, tmp_path, subs, mock_run
+        self, tmp_path, brew_paths, mock_run
     ) -> None:
-        """Tests that the installation name tool is called with the correct arguments."""
-        p = tmp_path / "lib.dylib"
-        p.write_bytes(
-            _thin_macho(
-                [
-                    _lc_dylib(r._LC_ID_DYLIB, "@@HOMEBREW_PREFIX@@/lib/lib.dylib"),
-                ]
-            )
+        """A failing install_name_tool aborts with the offending file and reason."""
+        keg, dylib = _keg_with_dylib(
+            tmp_path,
+            [_lc_dylib(r._LC_ID_DYLIB, "@@HOMEBREW_PREFIX@@/lib/libfoo.dylib")],
         )
 
         mock_run(stderr="load command too large", returncode=1)
         with pytest.raises(RelocationError) as exc:
-            r.relocate_macho(p, subs)
-        assert exc.value.path == p
+            r.relocate_keg(keg, **brew_paths)
+        assert exc.value.path == dylib
         assert "too large" in exc.value.reason
+
+    def test_relocate_macho_handles_readonly_binary(
+        self, tmp_path, brew_paths, monkeypatch
+    ) -> None:
+        """Tests that Mach-O relocation handles read-only binaries correctly."""
+        keg, dylib = _keg_with_dylib(
+            tmp_path,
+            [_lc_dylib(r._LC_ID_DYLIB, "@@HOMEBREW_PREFIX@@/lib/libro.dylib")],
+            name="libro.dylib",
+        )
+        os.chmod(dylib, 0o555)  # Typical read-only executable mode in a keg
+
+        # Both install_name_tool and codesign must see a writable file
+        seen_mode: list[int] = []
+
+        def record(cmd) -> None:
+            """Records the file's write bit at the moment _run is invoked.
+
+            Args:
+                cmd: The command that would have been run.
+            """
+            seen_mode.append(dylib.stat().st_mode & 0o200)
+
+        monkeypatch.setattr(r, "_run", record)
+        result = r.relocate_keg(keg, **brew_paths)
+        assert result.macho_relocated == 1
+
+        assert seen_mode and all(seen_mode), "file was not writable during the rewrite"
+        assert oct(dylib.stat().st_mode & 0o777) == "0o555"  # Mode restored
 
 
 class TestTextSymlinkRelocation:
@@ -537,37 +576,6 @@ class TestTextSymlinkRelocation:
         assert r.relocate_text(p, subs) is True
         assert "prefix=/opt/homebrew" in p.read_text()
         assert oct(p.stat().st_mode & 0o777) == "0o444"  # Mode restored
-
-    def test_relocate_macho_handles_readonly_binary(
-        self, tmp_path, subs, monkeypatch
-    ) -> None:
-        """Tests that Mach-O relocation handles read-only binaries correctly."""
-        p = tmp_path / "libro.dylib"
-        p.write_bytes(
-            _thin_macho(
-                [
-                    _lc_dylib(r._LC_ID_DYLIB, "@@HOMEBREW_PREFIX@@/lib/libro.dylib"),
-                ]
-            )
-        )
-        os.chmod(p, 0o555)  # Typical read-only executable mode in a keg
-
-        # Inside _run the file must be writable
-        seen_mode: list[int] = []
-
-        def record(cmd) -> None:
-            """Records the file's write bit at the moment _run is invoked.
-
-            Args:
-                cmd: The command that would have been run.
-            """
-            seen_mode.append(p.stat().st_mode & 0o200)
-
-        monkeypatch.setattr(r, "_run", record)
-        assert r.relocate_macho(p, subs) is True
-
-        assert seen_mode and all(seen_mode), "file was not writable during the rewrite"
-        assert oct(p.stat().st_mode & 0o777) == "0o555"  # Mode restored
 
     def test_relocate_text_noop_without_marker(self, tmp_path, subs) -> None:
         """Tests that no changes are made when there are no placeholders."""
@@ -751,3 +759,89 @@ class TestOrchestration:
         mock_run(stderr="load command too large", returncode=1)
         with pytest.raises(RelocationError):
             r.relocate_keg(keg, **brew_paths)
+
+    def test_relocate_keg_batches_codesign_across_machos(
+        self, tmp_path, mock_run, brew_paths
+    ) -> None:
+        """All rewritten Mach-O files are re-signed in one codesign call, after
+        every install_name_tool has run."""
+        keg = tmp_path / "keg"
+        (keg / "lib").mkdir(parents=True)
+        names = ["liba.dylib", "libb.dylib", "libc.dylib"]
+        for name in names:
+            (keg / "lib" / name).write_bytes(
+                _thin_macho(
+                    [_lc_dylib(r._LC_ID_DYLIB, f"@@HOMEBREW_PREFIX@@/lib/{name}")]
+                )
+            )
+
+        runs = mock_run()
+
+        result = r.relocate_keg(keg, **brew_paths)
+        assert result.macho_relocated == 3
+
+        int_runs = [cmd for cmd in runs if cmd[0] == "install_name_tool"]
+        sign_runs = [cmd for cmd in runs if cmd[0] == "codesign"]
+        assert len(int_runs) == 3  # one per binary
+        assert len(sign_runs) == 1  # a single batched re-sign
+
+        signed = {arg for arg in sign_runs[0] if arg.endswith(".dylib")}
+        assert signed == {str(keg / "lib" / name) for name in names}
+
+        # codesign must follow every install_name_tool (it strips the signature)
+        assert runs.index(sign_runs[0]) == len(runs) - 1
+
+    def test_relocate_keg_propagates_codesign_failure(
+        self, tmp_path, monkeypatch, brew_paths
+    ) -> None:
+        """A failing batched codesign aborts the keg with a RelocationError even
+        when install_name_tool succeeded."""
+        keg = tmp_path / "keg"
+        (keg / "lib").mkdir(parents=True)
+        (keg / "lib" / "libx.dylib").write_bytes(
+            _thin_macho(
+                [_lc_dylib(r._LC_ID_DYLIB, "@@HOMEBREW_PREFIX@@/lib/libx.dylib")]
+            )
+        )
+
+        def stub(cmd, *args, **kwargs) -> subprocess.CompletedProcess:
+            failed = cmd[0] == "codesign"
+            return subprocess.CompletedProcess(
+                cmd, 1 if failed else 0, "", "bad signature" if failed else ""
+            )
+
+        monkeypatch.setattr(r.subprocess, "run", stub)
+
+        with pytest.raises(RelocationError, match="codesign failed"):
+            r.relocate_keg(keg, **brew_paths)
+
+
+class TestChunkPaths:
+    """Tests for the codesign argv chunker."""
+
+    def test_single_chunk_under_budget(self) -> None:
+        """A handful of short paths stay in one chunk."""
+        paths = [Path(f"/keg/lib/lib{i}.dylib") for i in range(5)]
+        assert r._chunk_paths(paths, budget=1024) == [paths]
+
+    def test_splits_when_byte_budget_exceeded(self) -> None:
+        """Paths are split into multiple chunks once the byte budget is hit."""
+        paths = [Path("/keg/lib/" + "x" * 40 + f"{i}.dylib") for i in range(10)]
+        chunks = r._chunk_paths(paths, budget=100)
+
+        assert len(chunks) > 1
+        # Every input path appears exactly once, order preserved
+        assert [p for chunk in chunks for p in chunk] == paths
+        # No chunk (beyond a lone oversized path) exceeds the budget
+        for chunk in chunks:
+            if len(chunk) > 1:
+                assert sum(len(str(p).encode()) + 1 for p in chunk) <= 100
+
+    def test_oversized_single_path_gets_own_chunk(self) -> None:
+        """A path longer than the budget still yields exactly one chunk."""
+        paths = [Path("/keg/" + "y" * 500 + ".dylib")]
+        assert r._chunk_paths(paths, budget=100) == [paths]
+
+    def test_empty_input(self) -> None:
+        """No paths means no chunks."""
+        assert r._chunk_paths([], budget=100) == []

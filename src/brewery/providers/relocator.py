@@ -83,6 +83,20 @@ _MACOS_JAVA_HOME_SUFFIX = "libexec/openjdk.jdk/Contents/Home"
 # Bounded thread pool for the regular-file relocation phase
 _RELOCATE_WORKERS = min(8, os.cpu_count() or 4)
 
+# Ad-hoc re-sign, preserving what install_name_tool would otherwise strip
+_CODESIGN_ARGS = (
+    "codesign",
+    "--force",
+    "--sign",
+    "-",
+    "--preserve-metadata=entitlements,flags,runtime",
+)
+
+# Per-call limits for batched codesign, kept well under ARG_MAX (argv+envp
+# share ~1 MiB on macOS); a conservative budget leaves room for the environment.
+_CODESIGN_ARG_BUDGET = 256 * 1024
+_CODESIGN_MAX_ARGS = 4096
+
 
 class NameKind(Enum):
     """Represents the kind of a Mach-O name."""
@@ -479,15 +493,18 @@ def _build_macho_args(names: list[InstallName], subs: dict[bytes, bytes]) -> lis
     return args
 
 
-def _run_macho_tools(path: Path, args: list[str]) -> None:
-    """Rewrite install names and ad-hoc re-sign one Mach-O file.
+def _run_install_name_tool(path: Path, args: list[str]) -> None:
+    """Rewrite the install names of one Mach-O file.
+
+    This invalidates the code signature; the caller must ad-hoc re-sign the
+    file (see `_codesign`) before it is used.
 
     Args:
         path: The path to the Mach-O file.
         args: A non-empty install_name_tool argument list.
 
     Raises:
-        RelocationError: If install_name_tool or codesign fails.
+        RelocationError: If install_name_tool fails.
     """
     with _writable(path):
         try:
@@ -498,45 +515,62 @@ def _run_macho_tools(path: Path, args: list[str]) -> None:
                 path, f"install_name_tool failed: {exc.stderr.strip()}"
             )
 
-        # install_name_tool invalidates the code signature, so ad-hoc re-sign
-        try:
-            _run(
-                [
-                    "codesign",
-                    "--force",
-                    "--sign",
-                    "-",
-                    "--preserve-metadata=entitlements,flags,runtime",
-                    str(path),
-                ]
-            )
-        except subprocess.CalledProcessError as exc:
-            raise RelocationError(path, f"codesign failed: {exc.stderr.strip()}")
 
+def _chunk_paths(paths: list[Path], budget: int) -> list[list[Path]]:
+    """Split paths into chunks whose combined byte length stays under `budget`.
 
-def relocate_macho(path: Path, subs: dict[bytes, bytes]) -> bool:
-    """Rewrite placeholder install names in one Mach-O file and re-sign.
-
-    This is a thin wrapper kept for API/test compatibility; the keg walker
-    uses the fused single-mmap path in `_process_file` instead.
+    Keeps each codesign argv clear of ARG_MAX (MacOS caps argv+envp together);
+    a single path longer than the budget still gets its own chunk.
 
     Args:
-        path: The path to the Mach-O file.
-        subs: A mapping of placeholder bytes to their replacements.
+        paths: The paths to chunk.
+        budget: The per-chunk byte budget for the path arguments.
 
     Returns:
-        True if the file was modified, False otherwise.
+        A list of non-empty path chunks, in input order.
+    """
+    chunks: list[list[Path]] = []
+    current: list[Path] = []
+    used = 0
+    for path in paths:
+        size = len(str(path).encode()) + 1  # +1 for the argv NUL terminator
+        if current and (used + size > budget or len(current) >= _CODESIGN_MAX_ARGS):
+            chunks.append(current)
+            current = []
+            used = 0
+
+        current.append(path)
+        used += size
+
+    if current:
+        chunks.append(current)
+
+    return chunks
+
+
+def _codesign(paths: list[Path]) -> None:
+    """Ad-hoc re-sign a batch of Mach-O files.
+
+    The batch is chunked to stay under ARG_MAX. Each file needs its owner-write bit for the
+    in-place re-sign, so the whole chunk is made writable for the duration of the call.
+
+    Args:
+        paths: The Mach-O files to re-sign (may be empty).
 
     Raises:
-        RelocationError: If the file could not be relocated.
+        RelocationError: If codesign fails for any chunk.
     """
-    args = _build_macho_args(find_install_names(path), subs)
-    if not args:
-        return False
+    for chunk in _chunk_paths(paths, _CODESIGN_ARG_BUDGET):
+        with contextlib.ExitStack() as stack:
+            for path in chunk:
+                stack.enter_context(_writable(path))
 
-    _run_macho_tools(path, args)
-
-    return True
+            try:
+                _run([*_CODESIGN_ARGS, *(str(p) for p in chunk)])
+            except subprocess.CalledProcessError as exc:
+                raise RelocationError(
+                    chunk[0], f"codesign failed: {exc.stderr.strip()}"
+                )
 
 
 def relocate_text(path: Path, subs: dict[bytes, bytes]) -> bool:
@@ -624,8 +658,12 @@ def _process_file(
     keg_root: str,
     allowed_text: frozenset[str] | None,
     skip_macho: bool = False,
-) -> tuple[bool, str | None]:
+) -> tuple[Path | None, str | None]:
     """Relocate one regular (non-symlink) file via a single mmap.
+
+    A rewritten Mach-O has its install names fixed but is left unsigned; the
+    returned path is handed back to `relocate_keg`, which batches the ad-hoc
+    re-sign across the whole keg.
 
     Args:
         path_str: The path to the file (str; Path is deferred to here).
@@ -637,9 +675,9 @@ def _process_file(
             substitution still runs.
 
     Returns:
-        (macho_modified, text_rel): `macho_modified` True if a Mach-O file was
-        rewritten; `text_rel` the relative POSIX path if a text file was
-        substituted, else None.
+        (macho_path, text_rel): `macho_path` the file's path if a Mach-O was
+        rewritten (and now needs re-signing), else None; `text_rel` the relative
+        POSIX path if a text file was substituted, else None.
 
     Raises:
         RelocationError: If the file could not be relocated.
@@ -652,12 +690,12 @@ def _process_file(
     try:
         with path.open("rb") as fh:
             if os.fstat(fh.fileno()).st_size == 0:
-                return False, None
+                return None, None
 
             with mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm:
                 # No parse and no full-file read for marker-free files
                 if mm.find(_PLACEHOLDER_MARKER) == -1:
-                    return False, None
+                    return None, None
 
                 kind = _classify(mm)
                 if kind is _Kind.ARCHIVE:
@@ -666,7 +704,7 @@ def _process_file(
 
                 if kind is _Kind.MACHO:
                     if skip_macho:
-                        return False, None  # :any_skip_relocation: no linkage rewrite
+                        return None, None  # :any_skip_relocation: no linkage rewrite
                     macho_args = _build_macho_args(_collect_names(mm), subs)
 
                 else:
@@ -686,17 +724,19 @@ def _process_file(
     # Mapping is closed here, so safe to mutate the file
     if macho_args is not None:
         if not macho_args:
-            return False, None  # Marker present but not in any install name
-        _run_macho_tools(path, macho_args)
-        return True, None
+            return None, None  # Marker present but not in any install name
+
+        # install_name_tool now; re-signing is batched by relocate_keg
+        _run_install_name_tool(path, macho_args)
+        return path, None
 
     if new_text is None:
-        return False, None
+        return None, None
 
     with _writable(path):
         path.write_bytes(new_text)
 
-    return False, text_rel
+    return None, text_rel
 
 
 def _scan(root: Path) -> tuple[list[str], list[str]]:
@@ -812,7 +852,7 @@ def relocate_keg(
     for link in symlinks:
         symlink_n += relocate_symlink(Path(link), subs)
 
-    macho_n = 0
+    to_sign: list[Path] = []
     discovered: list[str] = []
     if regular:
         executor = ThreadPoolExecutor(max_workers=_RELOCATE_WORKERS)
@@ -824,11 +864,11 @@ def relocate_keg(
         ]
         try:
             for fut in as_completed(futures):
-                macho_mod, text_rel = (
+                macho_path, text_rel = (
                     fut.result()
                 )  # First RelocationError re-raises here
-                if macho_mod:
-                    macho_n += 1
+                if macho_path is not None:
+                    to_sign.append(macho_path)
 
                 elif text_rel is not None:
                     discovered.append(text_rel)
@@ -841,7 +881,10 @@ def relocate_keg(
         else:
             executor.shutdown()
 
+    # Resign all rewritten Mach-O files in a single batch
+    _codesign(to_sign)
+
     # The manifest list is authoritative for the receipt
     changed = sorted(text_files) if text_files is not None else sorted(discovered)
 
-    return RelocationResult(changed, macho_n, symlink_n)
+    return RelocationResult(changed, len(to_sign), symlink_n)

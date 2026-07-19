@@ -215,12 +215,13 @@ class TestRelocatorIntegration:
         self, real_dylib, tmp_path
     ) -> None:
         """Test that the relocator correctly relocates binaries and maintains valid signatures."""
-        subs = r.build_substitutions(
+        result = r.relocate_keg(
+            real_dylib.parent,
             prefix=tmp_path,
             cellar=tmp_path / "Cellar",
             repository=tmp_path / "Library",
         )
-        assert r.relocate_macho(real_dylib, subs) is True
+        assert result.macho_relocated == 1
 
         # The install name now points into the target prefix
         out = subprocess.run(
@@ -242,12 +243,12 @@ class TestRelocatorIntegration:
         runs (catches a missed re-sign, which presents as SIGKILL on arm64)."""
         import ctypes
 
-        subs = r.build_substitutions(
+        r.relocate_keg(
+            real_dylib.parent,
             prefix=tmp_path,
             cellar=tmp_path / "Cellar",
             repository=tmp_path / "Library",
         )
-        r.relocate_macho(real_dylib, subs)
         lib = ctypes.CDLL(str(real_dylib))  # Raises OSError if the loader rejects it
         lib.foo.restype = ctypes.c_int
         assert lib.foo() == 42
