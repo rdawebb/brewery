@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "brewery"
-version = "0.2.0"
+version = "0.3.0"
 description = "Minimal Homebrew Package Manager"
 requires-python = ">=3.11"
 dependencies = [
@@ -24,13 +24,13 @@ br = "brewery.cli.main:main"
 [project.optional-dependencies]
 dev = [
   "icecream>=2.2.0,<3.0.0",
-  "prek>=0.4.9,<1.0.0",
+  "prek>=0.4.10,<1.0.0",
   "pytest>=9.0.3,<10.0.0",
   "pytest-asyncio>=1.4.0,<2.0.0",
   "pytest-cov>=7.1.0,<8.0.0",
-  "ruff>=0.15.21,<0.16.0",
-  "rust-just>=1.56.0,<2.0.0",
-  "ty>=0.0.59,<1.0.0"
+  "ruff>=0.15.22,<0.16.0",
+  "rust-just>=1.57.0,<2.0.0",
+  "ty>=0.0.61,<1.0.0"
 ]
 
 [tool.uv.build-backend]
