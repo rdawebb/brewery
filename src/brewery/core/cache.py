@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import orjson
 
@@ -83,7 +83,7 @@ class Cache:
 
         return "-".join(str(mtime(p)) for p in self._token_paths())
 
-    def get(self, key: str) -> Optional[Any]:
+    def get(self, key: str) -> Any | None:
         """Get a cached value by key.
 
         Args:
@@ -227,7 +227,7 @@ class CacheManager:
 
         return records
 
-    def installed_packages(self, kind: Optional[PackageKind] = None) -> list[Package]:
+    def installed_packages(self, kind: PackageKind | None = None) -> list[Package]:
         """Return merged installed packages, optionally filtered by kind.
 
         Args:
@@ -249,8 +249,8 @@ class CacheManager:
         return packages
 
     def find_installed(
-        self, name: str, kind: Optional[PackageKind] = None
-    ) -> Optional[Package]:
+        self, name: str, kind: PackageKind | None = None
+    ) -> Package | None:
         """Return one installed package by name, merging only that record.
 
         Args:

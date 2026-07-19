@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from brewery.core.cache import Cache, CacheManager
 from brewery.core.catalog import Catalog
@@ -55,7 +55,7 @@ class Repository:
 
     @log_operation(event_prefix="get_all_installed", log_args=["kind_filter"])
     def get_all_installed(
-        self, kind_filter: Optional[PackageKind] = None
+        self, kind_filter: PackageKind | None = None
     ) -> list[Package]:
         """Get all installed packages, optionally filtered by kind.
 
@@ -68,7 +68,7 @@ class Repository:
         return self.cache_mgr.installed_packages(kind=kind_filter)
 
     @log_operation(event_prefix="get_details", log_args=["name", "kind"])
-    def get_details(self, name: str, kind: Optional[PackageKind] = None) -> Package:
+    def get_details(self, name: str, kind: PackageKind | None = None) -> Package:
         """Get package details by name and kind.
 
         Args:
@@ -190,9 +190,11 @@ class Repository:
         """
         resolved: dict[str, str] = {n: self.catalog.resolve_alias(n) for n in names}
 
+        all_pkgs: list[Package] | None = None
+
         if kind is None:
             # Resolve kinds and split into two lists
-            all_pkgs: list[Package] = self.get_all_installed()
+            all_pkgs = self.get_all_installed()
             kind_map: dict[str, PackageKind] = {p.name: p.kind for p in all_pkgs}
             formula_names: list[str] = [
                 resolved[n]
@@ -219,7 +221,7 @@ class Repository:
             )
             failures: list = []
 
-        blocked = self._blocking_dependents(set(formula_names))
+        blocked = self._blocking_dependents(set(formula_names), all_pkgs)
         if blocked:
             failures.extend(
                 (name, f"required by {', '.join(deps)}")
@@ -255,7 +257,9 @@ class Repository:
 
         return removed, failures
 
-    def _blocking_dependents(self, removal: set[str]) -> dict[str, list[str]]:
+    def _blocking_dependents(
+        self, removal: set[str], installed_pkgs: list[Package] | None = None
+    ) -> dict[str, list[str]]:
         """Installed formulae outside `removal` that still require a target.
 
         Reads each target's receipt-derived reverse-deps and drops any dependent
@@ -263,6 +267,8 @@ class Repository:
 
         Args:
             removal: Canonical formula names slated for removal.
+            installed_pkgs: Pre-fetched installed packages to reuse; when None,
+                the formula set is fetched here.
 
         Returns:
             target -> sorted installed formulae that require it (empty if none).
@@ -270,10 +276,12 @@ class Repository:
         if not removal:
             return {}
 
-        installed = {
-            p.name: p
-            for p in self.cache_mgr.installed_packages(kind=PackageKind.FORMULA)
-        }
+        source: list[Package] = (
+            installed_pkgs
+            if installed_pkgs is not None
+            else self.cache_mgr.installed_packages(kind=PackageKind.FORMULA)
+        )
+        installed = {p.name: p for p in source if p.kind == PackageKind.FORMULA}
 
         blockers: dict[str, list[str]] = {}
         for name in removal:
@@ -471,7 +479,7 @@ class Repository:
         failures: list[tuple[str, str]] = []
 
         for name in names:
-            pkg: Optional[Package] = self.cache_mgr.find_installed(
+            pkg: Package | None = self.cache_mgr.find_installed(
                 self.catalog.resolve_alias(name), PackageKind.FORMULA
             )
             if pkg is None:
