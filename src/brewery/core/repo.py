@@ -441,6 +441,13 @@ class Repository:
         env = self.cache_mgr.env or get_brewery_env()
         installed = self.cache_mgr.installed_packages(kind=PackageKind.FORMULA)
         active = {Path(p.path) for p in installed if p.path}
+        # Reuse the already-attached size cache so the size cap never re-measures
+        # the active cellar (see providers.keg_sizes.attach_sizes).
+        active_sizes = {
+            Path(p.path): p.size_kb
+            for p in installed
+            if p.path and p.size_kb is not None
+        }
 
         removed: list[str] = []
         failures: list[tuple[str, str]] = []
@@ -450,6 +457,7 @@ class Repository:
             max_age_days=age,
             max_versions=s.max_versions,
             max_cellar_mb=s.max_cellar_mb,
+            active_sizes=active_sizes,
         ):
             label = f"{c.name} {c.version}"
             try:

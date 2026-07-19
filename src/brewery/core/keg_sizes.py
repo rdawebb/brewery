@@ -54,7 +54,7 @@ def attach_sizes(records: list[InstalledRecord], cache_dir: Path | None = None) 
             misses[r.path] = keg
             miss_owner[r.path] = r.name
 
-    measured: dict[str, int] = _du_many(list(misses.values()))
+    measured: dict[str, int] = du_many(list(misses.values()))
     by_name: dict[str, InstalledRecord] = {r.name: r for r in records}
     for path_str, size_kb in measured.items():
         by_name[miss_owner[path_str]].size_kb = size_kb
@@ -73,7 +73,7 @@ def attach_sizes(records: list[InstalledRecord], cache_dir: Path | None = None) 
     )
 
 
-def _du_many(paths: list[Path]) -> dict[str, int]:
+def du_many(paths: list[Path]) -> dict[str, int]:
     """Measure several paths' disk usage in one (chunked) `du -sk` per batch.
 
     Args:

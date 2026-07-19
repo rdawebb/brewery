@@ -10,6 +10,7 @@ from pathlib import Path
 
 import orjson
 
+from brewery.core.keg_sizes import du_many
 from brewery.providers.receipt import read_receipt
 
 REPLACED_SIDECAR = ".brewery_replaced.json"
@@ -60,37 +61,6 @@ def _install_time(keg: Path) -> int:
 
     except OSError:
         return 0
-
-
-def _keg_size(keg: Path) -> int:
-    """Total on-disk bytes of a keg (du-style; counts symlinks, not their targets).
-
-    Args:
-        keg: The keg directory to get the size for.
-
-    Returns:
-        The total on-disk bytes of the keg.
-    """
-    total = 0
-    stack = [str(keg)]
-    while stack:
-        try:
-            with os.scandir(stack.pop()) as entries:
-                for entry in entries:
-                    try:
-                        if entry.is_dir(follow_symlinks=False):
-                            stack.append(entry.path)
-
-                        else:
-                            total += entry.stat(follow_symlinks=False).st_size
-
-                    except OSError:
-                        pass
-
-        except OSError:
-            pass
-
-    return total
 
 
 def _scan_stale(
@@ -190,6 +160,7 @@ def cleanup_candidates(
     max_age_days: int = 30,
     max_versions: int | None = None,
     max_cellar_mb: int | None = None,
+    active_sizes: dict[Path, int] | None = None,
     now: int | None = None,
 ) -> list[CleanupCandidate]:
     """Stale kegs whose replaced_at is older than max_age_days.
@@ -202,6 +173,8 @@ def cleanup_candidates(
         max_age_days: Age threshold in days, defaults to 30.
         max_versions: Maximum number of versions to retain, defaults to None.
         max_cellar_mb: Maximum total cellar size in MB, defaults to None.
+        active_sizes: Precomputed active keg sizes in KB, keyed by keg path (from
+            the shared keg-size cache).
         now: Unix epoch seconds, defaults to now.
 
     Returns:
@@ -231,13 +204,24 @@ def cleanup_candidates(
                 candidates.setdefault(sk.keg, "max_versions")
 
     if max_cellar_mb is not None:
-        budget = max_cellar_mb * 1024 * 1024
+        cached = active_sizes or {}
+        budget = max_cellar_mb * 1024  # KB, matching du -sk
         survivors = [sk for sk in stale if sk.keg not in candidates]
-        sizes = {sk.keg: _keg_size(sk.keg) for sk in survivors}
-        remaining = sum(_keg_size(a) for a in active) + sum(sizes.values())
+
+        # Survivors and active kegs missing from the cache fall back to measurement
+        to_measure = [sk.keg for sk in survivors] + [
+            a for a in active if a not in cached
+        ]
+        measured = du_many(to_measure)
+
+        def size_of(p: Path) -> int:
+            return cached.get(p) or measured.get(str(p), 0)
+
+        sizes = {sk.keg: size_of(sk.keg) for sk in survivors}
+        remaining = sum(size_of(a) for a in active) + sum(sizes.values())
 
         if remaining > budget:
-            for sk in sorted(survivors, key=lambda s: s.install_time):  # oldest first
+            for sk in sorted(survivors, key=lambda s: s.install_time):  # Oldest first
                 if remaining <= budget:
                     break
 
