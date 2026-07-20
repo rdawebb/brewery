@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import mmap
 import os
 import struct
 import subprocess
@@ -847,3 +848,270 @@ class TestChunkPaths:
     def test_empty_input(self) -> None:
         """No paths means no chunks."""
         assert r._chunk_paths([], budget=100) == []
+
+
+def _elf64(
+    *,
+    interp: str | None = None,
+    rpath: str | None = None,
+    runpath: str | None = None,
+    extra: str | None = None,
+    big_endian: bool = False,
+) -> bytes:
+    """Build a minimal but well-formed ELF64 for the relocation parser.
+
+    A single identity-mapped PT_LOAD (vaddr == file offset) keeps DT_STRTAB's
+    virtual address equal to its file offset, so the parser's vaddr->offset step
+    is exercised without a realistic address layout.
+
+    Args:
+        interp: PT_INTERP interpreter path, or None to omit the segment.
+        rpath: DT_RPATH string, or None to omit the entry.
+        runpath: DT_RUNPATH string, or None to omit the entry.
+        extra: An unreferenced string placed in the string table (to simulate a
+            marker that is present in the file but not in any linkage string).
+        big_endian: Emit a big-endian ELF (ELFDATA2MSB).
+
+    Returns:
+        The serialized ELF64 image as bytes.
+    """
+    bo = ">" if big_endian else "<"
+    ei_data = 2 if big_endian else 1
+    e_ident = b"\x7fELF" + bytes([2, ei_data, 1]) + b"\x00" * 9  # ELFCLASS64
+
+    ehdr_size, phentsize = 64, 56
+    phnum = 2 + (1 if interp is not None else 0)  # PT_LOAD + PT_DYNAMIC (+INTERP)
+    phoff = ehdr_size
+    cur = phoff + phnum * phentsize
+
+    blob = b""
+
+    if interp is not None:
+        interp_off = cur
+        interp_b = interp.encode() + b"\x00"
+        blob += interp_b
+        cur += len(interp_b)
+
+    else:
+        interp_off = 0
+
+    # String table: leading NUL, then each referenced (and extra) string
+    strtab_off = cur
+    strtab = b"\x00"
+    rpath_o = runpath_o = None
+    if rpath is not None:
+        rpath_o = len(strtab)
+        strtab += rpath.encode() + b"\x00"
+
+    if runpath is not None:
+        runpath_o = len(strtab)
+        strtab += runpath.encode() + b"\x00"
+
+    if extra is not None:
+        strtab += extra.encode() + b"\x00"
+
+    blob += strtab
+    cur += len(strtab)
+
+    # Dynamic array (identity vaddr mapping: DT_STRTAB value == file offset)
+    dyn_off = cur
+    entries = [(r._DT_STRTAB, strtab_off)]
+    if rpath_o is not None:
+        entries.append((r._DT_RPATH, rpath_o))
+
+    if runpath_o is not None:
+        entries.append((r._DT_RUNPATH, runpath_o))
+
+    entries.append((r._DT_NULL, 0))
+    dyn = b"".join(struct.pack(f"{bo}qQ", tag, val) for tag, val in entries)
+    blob += dyn
+    dyn_len = len(dyn)
+    total = dyn_off + dyn_len
+
+    phdrs = struct.pack(f"{bo}IIQQQQQQ", r._PT_LOAD, 5, 0, 0, 0, total, total, 0x1000)
+    if interp is not None:
+        interp_sz = len(interp) + 1
+        phdrs += struct.pack(
+            f"{bo}IIQQQQQQ",
+            r._PT_INTERP,
+            4,
+            interp_off,
+            interp_off,
+            interp_off,
+            interp_sz,
+            interp_sz,
+            1,
+        )
+
+    phdrs += struct.pack(
+        f"{bo}IIQQQQQQ",
+        r._PT_DYNAMIC,
+        6,
+        dyn_off,
+        dyn_off,
+        dyn_off,
+        dyn_len,
+        dyn_len,
+        8,
+    )
+
+    ehdr = e_ident + struct.pack(
+        f"{bo}HHIQQQIHHHHHH",
+        2,  # e_type ET_EXEC
+        0x3E,  # e_machine x86-64
+        1,  # e_version
+        0,  # e_entry
+        phoff,  # e_phoff
+        0,  # e_shoff
+        0,  # e_flags
+        ehdr_size,  # e_ehsize
+        phentsize,  # e_phentsize
+        phnum,  # e_phnum
+        0,  # e_shentsize
+        0,  # e_shnum
+        0,  # e_shstrndx
+    )
+
+    return ehdr + phdrs + blob
+
+
+def _keg_with_elf(root: Path, name: str = "foo", **elf_kwargs) -> tuple[Path, Path]:
+    """Write a single ELF into a keg's bin/ dir and return (keg, elf path).
+
+    Args:
+        root: The temp dir to build the keg under.
+        name: The ELF filename.
+        **elf_kwargs: Passed through to `_elf64`.
+
+    Returns:
+        A (keg_dir, elf_path) tuple.
+    """
+    keg = root / "keg"
+    (keg / "bin").mkdir(parents=True)
+    elf = keg / "bin" / name
+    elf.write_bytes(_elf64(**elf_kwargs))
+
+    return keg, elf
+
+
+class TestElfParsing:
+    """Tests for the in-process ELF reader."""
+
+    def _read(self, tmp_path: Path, data: bytes) -> r._ElfInfo:
+        """Write ELF bytes to a file and parse them through a real mmap.
+
+        Args:
+            tmp_path: The pytest temp dir.
+            data: The ELF image bytes.
+
+        Returns:
+            The parsed _ElfInfo.
+        """
+        p = tmp_path / "bin"
+        p.write_bytes(data)
+        with (
+            p.open("rb") as fh,
+            mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm,
+        ):
+            return r._read_elf(mm)
+
+    def test_reads_interp_rpath_runpath(self, tmp_path) -> None:
+        """Tests that PT_INTERP and DT_RPATH/DT_RUNPATH strings are parsed."""
+        info = self._read(
+            tmp_path,
+            _elf64(
+                interp="@@HOMEBREW_PREFIX@@/lib/ld.so",
+                rpath="@@HOMEBREW_PREFIX@@/lib",
+                runpath="@@HOMEBREW_CELLAR@@/foo/1.0/lib",
+            ),
+        )
+
+        assert info.interp == "@@HOMEBREW_PREFIX@@/lib/ld.so"
+        assert info.rpath == "@@HOMEBREW_PREFIX@@/lib"
+        assert info.runpath == "@@HOMEBREW_CELLAR@@/foo/1.0/lib"
+
+    def test_big_endian_branch(self, tmp_path) -> None:
+        """Tests that a big-endian ELF is parsed via the swapped byte order."""
+        info = self._read(
+            tmp_path, _elf64(rpath="@@HOMEBREW_PREFIX@@/lib", big_endian=True)
+        )
+
+        assert info.rpath == "@@HOMEBREW_PREFIX@@/lib"
+        assert info.runpath is None
+
+
+class TestElfRewrite:
+    """Tests for ELF relocation, driven through the real keg walker."""
+
+    def test_relocate_keg_builds_correct_patchelf_argv(
+        self, tmp_path, brew_paths, mock_run
+    ) -> None:
+        """Tests that patchelf rewrites interpreter and rpath, and no codesign runs."""
+        runs = mock_run()
+        keg, elf = _keg_with_elf(
+            tmp_path,
+            interp="@@HOMEBREW_PREFIX@@/lib/ld.so",
+            rpath="@@HOMEBREW_PREFIX@@/lib:@@HOMEBREW_CELLAR@@/foo/1.0/lib",
+        )
+
+        result = r.relocate_keg(keg, **brew_paths)
+        assert result.elf_relocated == 1
+        assert result.macho_relocated == 0
+        assert len(runs) == 1  # patchelf only; codesign batch is empty on Linux
+
+        cmd = runs[0]
+        assert cmd[0] == "patchelf"
+        assert str(elf) == cmd[-1]
+        assert cmd[cmd.index("--set-interpreter") + 1] == "/opt/homebrew/lib/ld.so"
+        assert (
+            cmd[cmd.index("--set-rpath") + 1]
+            == "/opt/homebrew/lib:/opt/homebrew/Cellar/foo/1.0/lib"
+        )
+
+    def test_runpath_preferred_over_rpath(self, tmp_path, brew_paths, mock_run) -> None:
+        """Tests that DT_RUNPATH wins over DT_RPATH when both are present."""
+        runs = mock_run()
+        _keg_with_elf(
+            tmp_path,
+            rpath="@@HOMEBREW_PREFIX@@/oldlib",
+            runpath="@@HOMEBREW_PREFIX@@/newlib",
+        )
+        r.relocate_keg(tmp_path / "keg", **brew_paths)
+
+        cmd = runs[0]
+        assert cmd[cmd.index("--set-rpath") + 1] == "/opt/homebrew/newlib"
+
+    def test_skip_relocation_leaves_elf_untouched(
+        self, tmp_path, brew_paths, mock_run
+    ) -> None:
+        """Tests that :any_skip_relocation skips the patchelf rewrite."""
+        runs = mock_run()
+        _keg_with_elf(tmp_path, rpath="@@HOMEBREW_PREFIX@@/lib")
+        result = r.relocate_keg(tmp_path / "keg", **brew_paths, skip_relocation=True)
+
+        assert result.elf_relocated == 0
+        assert runs == []
+
+    def test_marker_outside_linkage_is_noop(
+        self, tmp_path, brew_paths, mock_run
+    ) -> None:
+        """Tests that a placeholder only in a non-linkage string is not patched."""
+        runs = mock_run()
+        _keg_with_elf(
+            tmp_path,
+            rpath="/plain/lib",  # No placeholder
+            extra="@@HOMEBREW_PREFIX@@/embedded",  # Marker present, but unreferenced
+        )
+        result = r.relocate_keg(tmp_path / "keg", **brew_paths)
+
+        assert result.elf_relocated == 0
+        assert runs == []  # Nothing to rewrite
+
+    def test_unresolved_placeholder_raises(
+        self, tmp_path, brew_paths, mock_run
+    ) -> None:
+        """Tests that a surviving placeholder in an rpath aborts the relocation."""
+        mock_run()
+        _keg_with_elf(tmp_path, rpath="@@HOMEBREW_PREFIX@@/lib:@@HOMEBREW_MISSING@@")
+        with pytest.raises(RelocationError, match="unresolved placeholder"):
+            r.relocate_keg(tmp_path / "keg", **brew_paths)

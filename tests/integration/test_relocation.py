@@ -17,14 +17,21 @@ from brewery.providers.extractor import extract_bottle
 pytestmark = pytest.mark.integration
 
 _DARWIN = sys.platform == "darwin"
+_LINUX = sys.platform.startswith("linux")
 _HAS_CC = shutil.which("cc") is not None
 _HAS_TOOLS = shutil.which("install_name_tool") and shutil.which("codesign")
+_HAS_PATCHELF = shutil.which("patchelf") is not None
 _HAS_BREW = shutil.which("brew") is not None
 _FETCH = os.environ.get("BREWERY_FETCH") == "1"
 
 requires_toolchain = pytest.mark.skipif(
     not (_DARWIN and _HAS_CC and _HAS_TOOLS),
     reason="requires macOS with cc, install_name_tool, codesign",
+)
+
+requires_elf_toolchain = pytest.mark.skipif(
+    not (_LINUX and _HAS_CC and _HAS_PATCHELF),
+    reason="requires Linux with cc and patchelf",
 )
 
 skip_no_brew = pytest.mark.skipif(
@@ -250,6 +257,78 @@ class TestRelocatorIntegration:
             repository=tmp_path / "Library",
         )
         lib = ctypes.CDLL(str(real_dylib))  # Raises OSError if the loader rejects it
+        lib.foo.restype = ctypes.c_int
+        assert lib.foo() == 42
+
+
+@pytest.fixture
+def real_elf_so(tmp_path) -> Path:
+    """Compile a tiny ELF shared object with a placeholder RPATH, mimicking a
+    Linux bottle library.
+
+    Args:
+        tmp_path: The temporary directory to use for the shared object.
+
+    Returns:
+        The path to the compiled shared object.
+    """
+    keg = tmp_path / "keg" / "lib"
+    keg.mkdir(parents=True)
+    src = tmp_path / "foo.c"
+    src.write_text("int foo(void){return 42;}\n")
+    lib = keg / "libfoo.so"
+    subprocess.run(
+        [
+            "cc",
+            "-shared",
+            "-fPIC",
+            "-o",
+            str(lib),
+            str(src),
+            "-Wl,-rpath,@@HOMEBREW_PREFIX@@/lib",
+            "-Wl,--enable-new-dtags",  # emit DT_RUNPATH
+        ],
+        check=True,
+    )
+
+    return lib
+
+
+@requires_elf_toolchain
+class TestElfRelocatorIntegration:
+    """Test the ELF relocation path against a real cc-built shared object."""
+
+    def test_integration_rewrites_rpath(self, real_elf_so, tmp_path) -> None:
+        """Test that patchelf rewrites the RPATH into the target prefix."""
+        result = r.relocate_keg(
+            real_elf_so.parent.parent,  # the keg dir
+            prefix=tmp_path,
+            cellar=tmp_path / "Cellar",
+            repository=tmp_path / "Homebrew",
+        )
+        assert result.elf_relocated == 1
+        assert result.macho_relocated == 0
+
+        out = subprocess.run(
+            ["patchelf", "--print-rpath", str(real_elf_so)],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert f"{tmp_path}/lib" in out
+        assert "@@HOMEBREW" not in out
+
+    def test_integration_loadable_after_relocation(self, real_elf_so, tmp_path) -> None:
+        """Relocate, then dlopen to prove the ELF still loads and runs."""
+        import ctypes
+
+        r.relocate_keg(
+            real_elf_so.parent.parent,
+            prefix=tmp_path,
+            cellar=tmp_path / "Cellar",
+            repository=tmp_path / "Homebrew",
+        )
+        lib = ctypes.CDLL(str(real_elf_so))  # Raises OSError if the loader rejects it
         lib.foo.restype = ctypes.c_int
         assert lib.foo() == 42
 

@@ -342,8 +342,10 @@ class RelocationError(SysError):
 
     Typically indicates:
         - install_name_tool failure (e.g. Mach-O header pad exhausted)
-        - codesign failure after relocation
+        - codesign failure after relocation (macOS)
+        - patchelf failure rewriting ELF rpath/interpreter (Linux)
         - Static archive containing an unrewritable placeholder path
+        - A placeholder that survived substitution (unresolved token)
     """
 
     def __init__(self, path: Path, reason: str) -> None:
