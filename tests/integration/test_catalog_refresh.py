@@ -16,6 +16,15 @@ from brewery.providers import retention
 pytestmark = pytest.mark.integration
 
 
+async def _noop(*args, **kwargs) -> None:
+    """Stand in for an awaited daemon stage that should do nothing.
+
+    Args:
+        *args: Ignored.
+        **kwargs: Ignored.
+    """
+
+
 def _formula_body(fixture_text) -> bytes:
     """Unwrap the fixture into the raw top-level list load_formulae expects.
 
@@ -349,3 +358,157 @@ class TestMaybeCleanup:
         await cr._maybe_cleanup(empty_catalog)  # Should not raise
         assert "cleanup" in calls
         assert marks == []
+
+    async def test_borrowed_catalog_is_not_closed(
+        self, monkeypatch, empty_catalog
+    ) -> None:
+        """Tests that the sweep leaves the caller's catalog connection open.
+
+        The Repository built here shares the caller's catalog, so close()ing it
+        would tear down the connection background_refresh still owns.
+        """
+        self._patch(monkeypatch, due=True, cleanup=lambda: ([], []))
+        await cr._maybe_cleanup(empty_catalog)
+
+        # A query proves the sqlite handle is still live
+        assert empty_catalog.get_formula("wget") is None
+
+
+class TestBackgroundRefresh:
+    """Tests for the catalog lifecycle of the top-level daemon entry point."""
+
+    async def test_closes_the_catalog_it_created(self, monkeypatch) -> None:
+        """Tests that the catalog opened by background_refresh is closed on exit."""
+        closed: list[bool] = []
+
+        class StubCatalog:
+            """Records whether the daemon closed it."""
+
+            def __enter__(self) -> StubCatalog:
+                """Enter the context manager.
+
+                Returns:
+                    This stub.
+                """
+                return self
+
+            def __exit__(self, *exc: object) -> None:
+                """Record the close on context exit.
+
+                Args:
+                    *exc: Exception info, unused.
+                """
+                closed.append(True)
+
+        monkeypatch.setattr(cr, "Catalog", StubCatalog)
+        monkeypatch.setattr(cr, "refresh_catalog", _noop)
+        monkeypatch.setattr(cr, "_maybe_cleanup", _noop)
+
+        await cr.background_refresh()
+
+        assert closed == [True]
+
+    async def test_closes_the_catalog_when_refresh_raises(self, monkeypatch) -> None:
+        """Tests that a failed refresh still releases the sqlite connection."""
+        closed: list[bool] = []
+
+        class StubCatalog:
+            """Records whether the daemon closed it."""
+
+            def __enter__(self) -> StubCatalog:
+                """Enter the context manager.
+
+                Returns:
+                    This stub.
+                """
+                return self
+
+            def __exit__(self, *exc: object) -> None:
+                """Record the close on context exit.
+
+                Args:
+                    *exc: Exception info, unused.
+                """
+                closed.append(True)
+
+        async def boom(catalog) -> None:
+            """Fail the refresh.
+
+            Args:
+                catalog: The catalog, unused.
+
+            Raises:
+                api.CatalogFetchError: Always.
+            """
+            raise api.CatalogFetchError("network down")
+
+        monkeypatch.setattr(cr, "Catalog", StubCatalog)
+        monkeypatch.setattr(cr, "refresh_catalog", boom)
+
+        with pytest.raises(api.CatalogFetchError):
+            await cr.background_refresh()
+
+        assert closed == [True]
+
+
+class TestMain:
+    """Tests for the launchd entry point's failure containment."""
+
+    def test_transient_fetch_failure_is_warned_not_raised(self, monkeypatch) -> None:
+        """Tests that a fetch failure is logged as a warning and exits cleanly."""
+
+        async def boom() -> None:
+            """Fail the refresh.
+
+            Raises:
+                api.CatalogFetchError: Always.
+            """
+            raise api.CatalogFetchError("network down")
+
+        monkeypatch.setattr(cr, "background_refresh", boom)
+        warned: list = []
+        monkeypatch.setattr(cr.log, "warning", lambda **kw: warned.append(kw))
+
+        cr.main()  # Should not raise
+
+        assert warned and warned[0]["event"] == "catalog_refresh_failed"
+
+    def test_unexpected_failure_is_logged_not_raised(self, monkeypatch) -> None:
+        """Tests that a non-fetch error cannot crash the daemon into launchd throttling.
+
+        A sqlite lock or orjson parse error previously escaped main() as a
+        traceback and a non-zero exit.
+        """
+
+        async def boom() -> None:
+            """Fail with something main() does not specifically expect.
+
+            Raises:
+                ValueError: Always.
+            """
+            raise ValueError("malformed feed")
+
+        monkeypatch.setattr(cr, "background_refresh", boom)
+        errors: list = []
+        monkeypatch.setattr(cr.log, "error", lambda **kw: errors.append(kw))
+
+        cr.main()  # Should not raise
+
+        assert errors and errors[0]["event"] == "catalog_refresh_crashed"
+        assert errors[0]["exc_info"] is True  # Traceback reaches the log
+
+    def test_keyboard_interrupt_still_propagates(self, monkeypatch) -> None:
+        """Tests that the catch-all does not swallow interpreter shutdown signals."""
+
+        async def boom() -> None:
+            """Simulate an interrupt.
+
+            Raises:
+                KeyboardInterrupt: Always.
+            """
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(cr, "background_refresh", boom)
+
+        with pytest.raises(KeyboardInterrupt):
+            cr.main()

@@ -1,7 +1,7 @@
 """Shared test configuration and fixtures for Brewery.
 
-Redirects all on-disk state (cache, logs) into a temp dir so tests never touch
-the real ~/.brewery directory, and resets the module-level singletons/caches
+Redirects all on-disk state (cache, logs, config) into a temp dir so tests never
+touch the user's real directories, and resets the module-level singletons/caches
 between tests so that test order cannot leak state.
 """
 
@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 _TMP_ROOT = Path(tempfile.mkdtemp(prefix="brewery-tests-"))
 os.environ["BREWERY_CACHE_DIR"] = str(_TMP_ROOT / "cache")
 os.environ["BREWERY_LOG_DIR"] = str(_TMP_ROOT / "logs")
+os.environ["BREWERY_CONFIG_HOME"] = str(_TMP_ROOT / "config")
 
 
 # Resets module-level state between tests to avoid state leakage (only already-imported modules)

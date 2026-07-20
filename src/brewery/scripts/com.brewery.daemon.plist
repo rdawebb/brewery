@@ -20,7 +20,6 @@
     <integer>1800</integer>
     <key>RunAtLoad</key>
     <true />
-    <key>StandardErrorPath</key>
-    <string>/tmp/brewery.refresh.err</string>
+    <!-- StandardErrorPath/StandardOutPath are written by patch_plist -->
 </dict>
 </plist>

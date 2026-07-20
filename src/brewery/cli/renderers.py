@@ -224,8 +224,8 @@ def _compact_entry(pkg: Package, *, mark_installed: bool) -> Text:
 
     Args:
         pkg: The package to render.
-        mark_installed: When true, append a green tick for installed packages. Used
-            by `search`, where results are mostly not installed; `path is not None`
+        mark_installed: When true, style green and append a tick for installed packages.
+            Used by `search`, where results are mostly not installed; `path is not None`
             is the installed discriminator.
 
     Returns:
@@ -235,7 +235,7 @@ def _compact_entry(pkg: Package, *, mark_installed: bool) -> Text:
     entry = Text(pkg.name, style=colour or "")
 
     if mark_installed and pkg.path is not None:
-        entry.append(" ✓", style="bold green")
+        entry.append(" ✓").style = "green"
 
     return entry
 

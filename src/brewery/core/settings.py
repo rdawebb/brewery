@@ -57,11 +57,84 @@ class _Settable:
 
     section: str
     name: str
-    parse: Callable[[str], Any]
+    parse: Callable[[str], Any]  # CLI string -> value; delegates to check
+    check: Callable[[Any], Any]  # Decoded JSON value -> validated value
+    hint: str | None = None  # Advisory printed after a successful write
+
+
+def _check_positive_int(value: Any) -> int:
+    """Validate a decoded value as a positive integer.
+
+    Args:
+        value: The decoded value to validate.
+
+    Returns:
+        The validated integer.
+
+    Raises:
+        SettingsError: If the value is not an integer greater than 0.
+    """
+    # bool is a subclass of int, so True would otherwise pass as 1
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise SettingsError(f"{value!r} is not an integer")
+
+    if value <= 0:
+        raise SettingsError("Value must be greater than 0")
+
+    return value
+
+
+def _check_positive_int_or_none(value: Any) -> int | None:
+    """Validate a decoded value as a positive integer, or None to disable the limit.
+
+    Args:
+        value: The decoded value to validate.
+
+    Returns:
+        The validated integer, or None.
+
+    Raises:
+        SettingsError: If the value is neither None nor an integer greater than 0.
+    """
+    if value is None:
+        return None
+
+    return _check_positive_int(value)
+
+
+def _check_choice(allowed: set[str]) -> Callable[[Any], str]:
+    """Return a validator that constrains a decoded value to a set of allowed strings.
+
+    Args:
+        allowed: The set of allowed values.
+
+    Returns:
+        A validator function.
+    """
+
+    def check(value: Any) -> str:
+        """Validate the decoded value against the allowed set.
+
+        Args:
+            value: The decoded value to validate.
+
+        Returns:
+            The validated, normalised value.
+
+        Raises:
+            SettingsError: If the value is not in the allowed set.
+        """
+        v = value.strip().lower() if isinstance(value, str) else value
+        if v not in allowed:
+            raise SettingsError(f"Value must be one of: {', '.join(sorted(allowed))}")
+
+        return v
+
+    return check
 
 
 def _positive_int(raw: str) -> int:
-    """Parse a positive integer from a string.
+    """Parse a positive integer from a CLI string.
 
     Args:
         raw: The string to parse.
@@ -78,14 +151,11 @@ def _positive_int(raw: str) -> int:
     except ValueError:
         raise SettingsError(f"'{raw}' is not an integer")
 
-    if v <= 0:
-        raise SettingsError("value must be greater than 0")
-
-    return v
+    return _check_positive_int(v)
 
 
 def _positive_int_or_none(raw: str) -> int | None:
-    """Parse a positive integer from a string, or return None.
+    """Parse a positive integer from a CLI string, or return None.
 
     Args:
         raw: The string to parse.
@@ -99,63 +169,48 @@ def _positive_int_or_none(raw: str) -> int | None:
     return _positive_int(raw)
 
 
-def _choice(allowed: set[str]) -> Callable[[str], str]:
-    """Return a parser function that validates a string against a set of allowed values.
-
-    Args:
-        allowed: The set of allowed values.
-
-    Returns:
-        A parser function that raises a SettingsError if the value is not in the allowed set.
-
-    Raises:
-        SettingsError: If the value is not in the allowed set.
-    """
-
-    def parse(raw: str) -> str:
-        """Parse the raw string against the allowed set of values.
-
-        Args:
-            raw: The raw string to parse.
-
-        Returns:
-            The parsed string, or raises a SettingsError if the value is not in the allowed set.
-
-        Raises:
-            SettingsError: If the value is not in the allowed set.
-        """
-        v = raw.strip().lower()
-        if v not in allowed:
-            raise SettingsError(f"value must be one of: {', '.join(sorted(allowed))}")
-
-        return v
-
-    return parse
-
+_FORMATS = {"rich", "plain"}
+_format_choice = _check_choice(_FORMATS)  # A string value needs no separate decoding
 
 SETTABLE: dict[str, _Settable] = {
-    "retention.age_days": _Settable("retention", "age_days", _positive_int),
+    "retention.age_days": _Settable(
+        "retention", "age_days", _positive_int, _check_positive_int
+    ),
     "retention.max_versions": _Settable(
-        "retention", "max_versions", _positive_int_or_none
+        "retention", "max_versions", _positive_int_or_none, _check_positive_int_or_none
     ),
     "retention.max_cellar_mb": _Settable(
-        "retention", "max_cellar_mb", _positive_int_or_none
+        "retention", "max_cellar_mb", _positive_int_or_none, _check_positive_int_or_none
+    ),
+    "daemon.catalog_refresh_interval_mins": _Settable(
+        "daemon",
+        "catalog_refresh_interval_mins",
+        _positive_int,
+        _check_positive_int,
+        hint="Restart the daemon to apply: brewery daemon restart",
     ),
     "daemon.cleanup_interval_days": _Settable(
-        "daemon", "cleanup_interval_days", _positive_int
+        "daemon", "cleanup_interval_days", _positive_int, _check_positive_int
     ),
-    "display.format": _Settable("display", "format", _choice({"rich", "plain"})),
+    "display.format": _Settable("display", "format", _format_choice, _format_choice),
+}
+
+# Per-field validators, derived from SETTABLE so the rules live in exactly one place
+_CHECKS: dict[tuple[str, str], Callable[[Any], Any]] = {
+    (s.section, s.name): s.check for s in SETTABLE.values()
 }
 
 
-def _coerce(cls, raw: Any):
-    """Build a settings dataclass from a dict, ignoring unknown keys and bad types.
+def _coerce(cls, section: str, raw: Any):
+    """Build a settings dataclass from a dict, dropping unknown and invalid values.
 
-    A malformed section degrades to that section's defaults, unknown keys
-    (forward-compat) and wrong-typed values are dropped with a warning.
+    A malformed section falls back to that section's defaults; unknown keys
+    (forward-compat) and values failing their validator are dropped individually
+    with a warning, leaving the section's other values intact.
 
     Args:
         cls: The settings dataclass to build.
+        section: The section name, used to look up per-field validators.
         raw: The corresponding sub-dict from the config file.
 
     Returns:
@@ -164,14 +219,29 @@ def _coerce(cls, raw: Any):
     if not isinstance(raw, dict):
         return cls()
 
-    known = {f.name: f.type for f in fields(cls)}
+    known = {f.name for f in fields(cls)}
     kwargs: dict[str, Any] = {}
     for key, value in raw.items():
         if key not in known:
             log.warning(event="settings_unknown_key", section=cls.__name__, key=key)
             continue
 
-        kwargs[key] = value
+        check = _CHECKS.get((section, key))
+        if check is None:
+            kwargs[key] = value
+            continue
+
+        try:
+            kwargs[key] = check(value)
+
+        except SettingsError as e:
+            log.warning(
+                event="settings_invalid_value",
+                section=cls.__name__,
+                key=key,
+                value=repr(value),
+                error=str(e),
+            )
 
     try:
         return cls(**kwargs)
@@ -213,9 +283,9 @@ def load_settings() -> Settings:
         return Settings()
 
     return Settings(
-        retention=_coerce(RetentionSettings, raw.get("retention", {})),
-        daemon=_coerce(DaemonSettings, raw.get("daemon", {})),
-        display=_coerce(DisplaySettings, raw.get("display", {})),
+        retention=_coerce(RetentionSettings, "retention", raw.get("retention", {})),
+        daemon=_coerce(DaemonSettings, "daemon", raw.get("daemon", {})),
+        display=_coerce(DisplaySettings, "display", raw.get("display", {})),
     )
 
 

@@ -65,38 +65,51 @@ def is_running() -> bool:
 def patch_plist(plist_path: Path) -> list[str]:
     """Rewrite the plist with paths and interval from current settings.
 
+    Every resolvable key is patched even when one lookup fails, so a missing brew
+    never leaves the plist carrying a stale interval or an unresolved interpreter.
+
     Args:
         plist_path: The path to the plist file to patch.
 
     Returns:
         Advisory messages for the user; empty when the plist was fully patched.
-        A missing brew leaves the plist untouched rather than failing the load.
     """
-    python = sys.executable or shutil.which("python3")
-    brew = shutil.which("brew")
-    if not brew:
-        return ["Could not locate brew on PATH — daemon may not work"]
-
     import plistlib
 
+    from brewery.core.logging import ensure_log_dir
     from brewery.core.settings import load_settings
 
+    warnings: list[str] = []
     data = plistlib.loads(plist_path.read_bytes())
 
+    python = sys.executable or shutil.which("python3")
     args = data.get("ProgramArguments", [])
-    if args:
+    if not python:
+        warnings.append("Could not locate a python interpreter — daemon may not work")
+
+    elif args:
         args[0] = python
 
-    data.setdefault("EnvironmentVariables", {})["PATH"] = (
-        f"{Path(brew).parent}:/usr/local/bin:/usr/bin:/bin"
-    )
+    brew = shutil.which("brew")
+    if brew:
+        data.setdefault("EnvironmentVariables", {})["PATH"] = (
+            f"{Path(brew).parent}:/usr/local/bin:/usr/bin:/bin"
+        )
+
+    else:
+        warnings.append("Could not locate brew on PATH — daemon may not work")
 
     interval_mins = load_settings().daemon.catalog_refresh_interval_mins
     data["StartInterval"] = interval_mins * 60
 
+    # launchd does not expand '~', so these must be absolute
+    log_dir = ensure_log_dir()
+    data["StandardErrorPath"] = str(log_dir / "refresh.err")
+    data["StandardOutPath"] = str(log_dir / "refresh.out")
+
     plist_path.write_bytes(plistlib.dumps(data))
 
-    return []
+    return warnings
 
 
 def start() -> list[str]:

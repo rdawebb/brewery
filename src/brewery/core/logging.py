@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, TextIO
 
 _CONFIGURED = False
+
+DEFAULT_LOG_DIR = (
+    Path.home() / "Library" / "Logs" / "brewery"
+    if platform.system() == "Darwin"
+    else Path.home() / ".local" / "state" / "brewery" / "logs"
+)
 
 _STDLIB_SPECIAL_KWARGS = frozenset({"exc_info", "stack_info", "stacklevel", "extra"})
 
@@ -97,6 +104,18 @@ class BreweryLogger:
         self._log(level=logging.CRITICAL, event=event, **kwargs)
 
 
+def ensure_log_dir() -> Path:
+    """Resolve and create the log directory shared by the CLI and the daemon.
+
+    Returns:
+        $BREWERY_LOG_DIR if set, else the platform-conventional log directory.
+    """
+    log_dir = Path(os.environ.get("BREWERY_LOG_DIR", DEFAULT_LOG_DIR))
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    return log_dir
+
+
 def configure_logging(
     level: str = "INFO", log_file: Path | None = None, console_level: str | None = None
 ) -> None:
@@ -115,11 +134,7 @@ def configure_logging(
         return
 
     if log_file is None:
-        log_dir: Path = Path(
-            os.environ.get("BREWERY_LOG_DIR", Path.home() / ".brewery" / "logs")
-        )
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / "backend.log"
+        log_file = ensure_log_dir() / "backend.log"
 
     formatter = logging.Formatter(
         fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",

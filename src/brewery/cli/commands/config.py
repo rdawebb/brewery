@@ -86,6 +86,10 @@ def _render_config() -> None:
 
     console.print("\n[bold]Daemon[/bold]")
     console.print(
+        "  Refresh interval  "
+        + _fmt_count(s.daemon.catalog_refresh_interval_mins, "minute")
+    )
+    console.print(
         f"  Cleanup interval  {_fmt_count(s.daemon.cleanup_interval_days, 'day')}"
     )
 
@@ -125,12 +129,16 @@ def config_set(
     ),
 ) -> None:
     """Set a configuration value."""
-    from brewery.core.settings import write_setting
+    from brewery.core.settings import SETTABLE, write_setting
 
     written = write_setting(key, value)
 
     shown = "unlimited" if written is None else written
     console.print(f"\n✓ Set [bold]{key}[/bold] to {shown}\n", style="bold green")
+
+    hint = SETTABLE[key].hint
+    if hint:
+        console.print(f"  {hint}\n", style="dim")
 
 
 @config_app.command(name="get")

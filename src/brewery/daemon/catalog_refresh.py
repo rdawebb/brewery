@@ -75,6 +75,7 @@ async def _maybe_cleanup(catalog: Catalog) -> None:
         return
 
     try:
+        # Borrows the caller's catalog, so must not be closed here
         repo = Repository(catalog=catalog)
         removed, _failures = await repo.cleanup_packages()
         mark_cleanup_run(cache_dir)
@@ -87,13 +88,16 @@ async def _maybe_cleanup(catalog: Catalog) -> None:
 
 async def background_refresh() -> None:
     """Refresh the default catalog store and run cleanup if necessary."""
-    catalog = Catalog()
-    await refresh_catalog(catalog)
-    await _maybe_cleanup(catalog)
+    with Catalog() as catalog:
+        await refresh_catalog(catalog)
+        await _maybe_cleanup(catalog)
 
 
 def main() -> None:
-    """Entry point invoked by launchd."""
+    """Entry point invoked by launchd.
+
+    Never exits non-zero; every failure is logged and the next interval retries.
+    """
     configure_logging(level="INFO")
 
     try:
@@ -102,6 +106,10 @@ def main() -> None:
     except CatalogFetchError as e:
         # Transient: launchd will retry at the next interval
         log.warning(event="catalog_refresh_failed", error=str(object=e))
+
+    except Exception:
+        # KeyboardInterrupt/SystemExit are BaseException and still propagate
+        log.error(event="catalog_refresh_crashed", exc_info=True)
 
 
 if __name__ == "__main__":

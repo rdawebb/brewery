@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from brewery.core.errors import SysError, UserError
-from brewery.core.settings import load_settings
+from brewery.core.settings import load_settings, write_setting
 from brewery.daemon import launchd as daemon_mod
 from brewery.daemon.launchd import (
     PLIST_LABEL,
@@ -107,24 +107,68 @@ class TestPatchExecutablePaths:
                 "brew": "/opt/homebrew/bin/brew",
             }[name],
         )
+        monkeypatch.setenv("BREWERY_CONFIG_HOME", str(tmp_path / "config"))
+        write_setting("daemon.catalog_refresh_interval_mins", "15")
         patch_plist(plist)
 
         data = plistlib.loads(plist.read_bytes())
-        mins = load_settings().daemon.catalog_refresh_interval_mins
-        assert data["StartInterval"] == mins * 60
+        assert data["StartInterval"] == 15 * 60
+        assert data["StartInterval"] == (
+            load_settings().daemon.catalog_refresh_interval_mins * 60
+        )
 
-    def test_no_brew_leaves_plist_unchanged(self, tmp_path, monkeypatch) -> None:
-        """Test that a missing brew aborts patching without modifying the plist."""
+    def test_writes_log_paths_under_the_log_dir(self, tmp_path, monkeypatch) -> None:
+        """Test that launchd's stderr/stdout go to the log dir, never /tmp."""
         plist = tmp_path / "d.plist"
         self._write_plist(plist)
-        before = plist.read_bytes()
+        log_dir = tmp_path / "logs"
+        monkeypatch.setenv("BREWERY_LOG_DIR", str(log_dir))
+        monkeypatch.setattr(
+            daemon_mod.shutil, "which", lambda name: f"/opt/homebrew/bin/{name}"
+        )
+        patch_plist(plist)
+
+        data = plistlib.loads(plist.read_bytes())
+        assert data["StandardErrorPath"] == str(log_dir / "refresh.err")
+        assert data["StandardOutPath"] == str(log_dir / "refresh.out")
+        assert log_dir.is_dir()  # launchd will not create it
+
+    def test_no_brew_still_patches_the_rest(self, tmp_path, monkeypatch) -> None:
+        """Test that a missing brew only costs the PATH entry, not the whole patch."""
+        plist = tmp_path / "d.plist"
+        self._write_plist(plist)
+        monkeypatch.setattr(daemon_mod.sys, "executable", "/venv/bin/python3")
         monkeypatch.setattr(
             daemon_mod.shutil,
             "which",
             lambda name: None if name == "brew" else "/new/python3",
         )
-        patch_plist(plist)
-        assert plist.read_bytes() == before
+
+        warnings = patch_plist(plist)
+
+        data = plistlib.loads(plist.read_bytes())
+        assert len(warnings) == 1 and "brew" in warnings[0]
+        assert data["ProgramArguments"][0] == "/venv/bin/python3"
+        assert "StartInterval" in data
+        assert "StandardErrorPath" in data
+        assert "EnvironmentVariables" not in data  # PATH is the only casualty
+
+    def test_no_interpreter_leaves_argv_alone(self, tmp_path, monkeypatch) -> None:
+        """Test that an unresolvable interpreter advises rather than raising."""
+        plist = tmp_path / "d.plist"
+        self._write_plist(plist)
+        monkeypatch.setattr(daemon_mod.sys, "executable", "")
+        monkeypatch.setattr(
+            daemon_mod.shutil,
+            "which",
+            lambda name: "/opt/homebrew/bin/brew" if name == "brew" else None,
+        )
+
+        warnings = patch_plist(plist)
+
+        data = plistlib.loads(plist.read_bytes())
+        assert len(warnings) == 1 and "python" in warnings[0]
+        assert data["ProgramArguments"][0] == "/old/python"  # Untouched, not None
 
     def test_falls_back_to_sys_executable(self, tmp_path, monkeypatch) -> None:
         """Test that arg[0] uses sys.executable when python3 is not on PATH."""
