@@ -48,7 +48,7 @@ class TestCandidateTags:
         ("platform", "expected"),
         [
             pytest.param(
-                Platform(arch="arm64", macos_major=15),
+                Platform(arch="arm64", os="macos", macos_major=15),
                 [
                     "arm64_sequoia",
                     "arm64_sonoma",
@@ -60,7 +60,7 @@ class TestCandidateTags:
                 id="arm64_sequoia_full_descent",
             ),
             pytest.param(
-                Platform(arch="arm64", macos_major=14),
+                Platform(arch="arm64", os="macos", macos_major=14),
                 [
                     "arm64_sonoma",
                     "arm64_ventura",
@@ -71,19 +71,29 @@ class TestCandidateTags:
                 id="current_major_first_excludes_newer",
             ),
             pytest.param(
-                Platform(arch="amd64", macos_major=13),
+                Platform(arch="amd64", os="macos", macos_major=13),
                 ["ventura", "monterey", "big_sur", "all"],
                 id="intel_excludes_newer",
             ),
             pytest.param(
-                Platform(arch="arm64", macos_major=11),
+                Platform(arch="arm64", os="macos", macos_major=11),
                 ["arm64_big_sur", "all"],
                 id="oldest_known_then_any",
             ),
             pytest.param(
-                Platform(arch="arm64", macos_major=10),
+                Platform(arch="arm64", os="macos", macos_major=10),
                 ["all"],
                 id="below_known_range_only_any",
+            ),
+            pytest.param(
+                Platform(arch="amd64", os="linux"),
+                ["x86_64_linux", "all"],
+                id="linux_x86_64",
+            ),
+            pytest.param(
+                Platform(arch="arm64", os="linux"),
+                ["arm64_linux", "all"],
+                id="linux_arm64",
             ),
         ],
     )
@@ -99,15 +109,25 @@ class TestPlatformTag:
         ("platform", "expected"),
         [
             pytest.param(
-                Platform(arch="arm64", macos_major=14), "arm64_sonoma", id="known_major"
+                Platform(arch="arm64", os="macos", macos_major=14),
+                "arm64_sonoma",
+                id="known_major",
             ),
             pytest.param(
-                Platform(arch="arm64", macos_major=99),
+                Platform(arch="arm64", os="macos", macos_major=99),
                 "arm64_99",
                 id="unknown_major_stringified",
             ),
             pytest.param(
-                Platform(arch="amd64", macos_major=13), "ventura", id="intel_known"
+                Platform(arch="amd64", os="macos", macos_major=13),
+                "ventura",
+                id="intel_known",
+            ),
+            pytest.param(
+                Platform(arch="amd64", os="linux"), "x86_64_linux", id="linux_x86_64"
+            ),
+            pytest.param(
+                Platform(arch="arm64", os="linux"), "arm64_linux", id="linux_arm64"
             ),
         ],
     )
@@ -145,7 +165,7 @@ class TestResolveBottle:
 
     def test_no_files_returns_none(self) -> None:
         """Test that an empty files map returns None."""
-        assert resolve_bottle(files={}, platform=Platform("arm64", 14)) is None
+        assert resolve_bottle(files={}, platform=Platform("arm64", "macos", 14)) is None
 
     def test_no_platform_returns_none(self) -> None:
         """Test that a None platform (source-only) returns None."""
@@ -156,7 +176,9 @@ class TestResolveBottle:
 
         On arm64 Sonoma the exact arm64_sonoma bottle wins over the all tag.
         """
-        bottle = resolve_bottle(files=self._files(), platform=Platform("arm64", 14))
+        bottle = resolve_bottle(
+            files=self._files(), platform=Platform("arm64", "macos", 14)
+        )
         assert bottle == Bottle(
             url="https://example/arm64_sonoma", sha256="aaa", cellar=":any"
         )
@@ -166,13 +188,15 @@ class TestResolveBottle:
         files = {
             "all": {"url": "u", "sha256": "s", "cellar": ":any"},
         }
-        bottle = resolve_bottle(files=files, platform=Platform("arm64", 14))
+        bottle = resolve_bottle(files=files, platform=Platform("arm64", "macos", 14))
         assert bottle == Bottle(url="u", sha256="s", cellar=":any")
 
     def test_no_matching_tag_returns_none(self) -> None:
         """Test that a files map with no candidate tag returns None."""
         files = {"linux": {"url": "u", "sha256": "s", "cellar": ":any"}}
-        assert resolve_bottle(files=files, platform=Platform("arm64", 14)) is None
+        assert (
+            resolve_bottle(files=files, platform=Platform("arm64", "macos", 14)) is None
+        )
 
     def test_empty_entry_is_skipped(self) -> None:
         """Test that a falsy (empty-dict) entry is skipped, not selected.
@@ -181,12 +205,14 @@ class TestResolveBottle:
         candidate tag yields no match rather than an all-None Bottle.
         """
         files = {"all": {}}
-        assert resolve_bottle(files=files, platform=Platform("arm64", 14)) is None
+        assert (
+            resolve_bottle(files=files, platform=Platform("arm64", "macos", 14)) is None
+        )
 
     def test_partial_entry_fills_missing_with_none(self) -> None:
         """Test that a truthy entry missing some keys maps them to None."""
         files = {"all": {"url": "u"}}
-        bottle = resolve_bottle(files=files, platform=Platform("arm64", 14))
+        bottle = resolve_bottle(files=files, platform=Platform("arm64", "macos", 14))
         assert bottle == Bottle(url="u", sha256=None, cellar=None)
 
 
@@ -231,7 +257,7 @@ class TestParseFormula:
 
     def test_row_field_mapping(self) -> None:
         """Test that scalar fields map onto the catalog row."""
-        row, _, _ = _parse_formula(self._obj(), platform=Platform("arm64", 14))
+        row, _, _ = _parse_formula(self._obj(), platform=Platform("arm64", "macos", 14))
         assert row["name"] == "wget"
         assert row["desc"] == "retrieves files"
         assert row["version"] == "1.21.4"
@@ -240,7 +266,7 @@ class TestParseFormula:
 
     def test_boolean_coercion(self) -> None:
         """Test that truthy source values are coerced to real bools."""
-        row, _, _ = _parse_formula(self._obj(), platform=Platform("arm64", 14))
+        row, _, _ = _parse_formula(self._obj(), platform=Platform("arm64", "macos", 14))
         assert row["keg_only"] is True
         assert row["has_service"] is True  # Derived from non-empty service dict
         assert row["post_install"] is True
@@ -250,20 +276,20 @@ class TestParseFormula:
     def test_has_service_false_when_absent(self) -> None:
         """Test that has_service is False when no service block is present."""
         row, _, _ = _parse_formula(
-            self._obj(service=None), platform=Platform("arm64", 14)
+            self._obj(service=None), platform=Platform("arm64", "macos", 14)
         )
         assert row["has_service"] is False
 
     def test_missing_stable_version_becomes_empty(self) -> None:
         """Test that a missing stable version defaults to the empty string."""
         row, _, _ = _parse_formula(
-            self._obj(versions={}), platform=Platform("arm64", 14)
+            self._obj(versions={}), platform=Platform("arm64", "macos", 14)
         )
         assert row["version"] == ""
 
     def test_bottle_resolved_into_row(self) -> None:
         """Test that a resolved bottle's fields populate the row."""
-        row, _, _ = _parse_formula(self._obj(), platform=Platform("arm64", 14))
+        row, _, _ = _parse_formula(self._obj(), platform=Platform("arm64", "macos", 14))
         assert row["bottle_url"] == "u"
         assert row["bottle_sha256"] == "s"
         assert row["bottle_cellar"] == ":any"
@@ -278,7 +304,9 @@ class TestParseFormula:
 
     def test_deps_are_runtime_rows(self) -> None:
         """Test that dependencies become runtime dep rows keyed by package."""
-        _, deps, _ = _parse_formula(self._obj(), platform=Platform("arm64", 14))
+        _, deps, _ = _parse_formula(
+            self._obj(), platform=Platform("arm64", "macos", 14)
+        )
         assert deps == [
             {"pkg": "wget", "dep": "openssl", "kind": "runtime"},
             {"pkg": "wget", "dep": "libidn2", "kind": "runtime"},
@@ -286,7 +314,9 @@ class TestParseFormula:
 
     def test_aliases_and_oldnames_both_resolve_to_canonical(self) -> None:
         """Test that aliases and oldnames both map to the canonical name."""
-        _, _, aliases = _parse_formula(self._obj(), platform=Platform("arm64", 14))
+        _, _, aliases = _parse_formula(
+            self._obj(), platform=Platform("arm64", "macos", 14)
+        )
         assert aliases == [
             {"alias": "wngt", "name": "wget"},
             {"alias": "wget2", "name": "wget"},

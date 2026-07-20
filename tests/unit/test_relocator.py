@@ -317,7 +317,9 @@ class TestFormulaTokens:
     ) -> None:
         """Tests that an unusable tab value falls back to this host's preferred perl."""
         monkeypatch.setattr(
-            host, "current_platform", lambda: Platform(arch="arm64", macos_major=12)
+            host,
+            "current_platform",
+            lambda: Platform(arch="arm64", os="macos", macos_major=12),
         )
         tokens = r.formula_tokens(
             brew_paths["prefix"], name="cloc", runtime_deps=[], built_on=built_on

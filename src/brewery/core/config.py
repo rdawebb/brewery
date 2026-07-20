@@ -94,18 +94,25 @@ def get_brewery_env() -> BreweryENV:
     if _env_cache is not None:
         return _env_cache
 
+    _is_linux = platform.system() == "Linux"
     _is_arm = platform.machine() == "arm64"
-    _FALLBACK_PREFIX = Path("/opt/homebrew") if _is_arm else Path("/usr/local")
+
+    if _is_linux:
+        _FALLBACK_PREFIX = Path("/home/linuxbrew/.linuxbrew")
+    else:
+        _FALLBACK_PREFIX = Path("/opt/homebrew") if _is_arm else Path("/usr/local")
 
     prefix: Path = _resolve_brew_path(
         flag="--prefix",
         cache_file=_DEF_CACHE / "brew_prefix.txt",
         fallback=_FALLBACK_PREFIX,
     )
+    # On macOS arm64 the repository is the prefix itself; on Intel and on Linux
+    # it lives under `<prefix>/Homebrew`
     repository: Path = _resolve_brew_path(
         flag="--repository",
         cache_file=_DEF_CACHE / "brew_repository.txt",
-        fallback=prefix if _is_arm else prefix / "Homebrew",
+        fallback=prefix if (_is_arm and not _is_linux) else prefix / "Homebrew",
     )
 
     bottle_cache: Path = HOMEBREW_CACHE
