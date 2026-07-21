@@ -12,11 +12,21 @@ from typing import Any, TextIO
 
 _CONFIGURED = False
 
-DEFAULT_LOG_DIR = (
-    Path.home() / "Library" / "Logs" / "brewery"
-    if platform.system() == "Darwin"
-    else Path.home() / ".local" / "state" / "brewery" / "logs"
-)
+
+def _default_log_dir() -> Path:
+    """The platform-conventional log directory (resolved per call).
+
+    Returns:
+        The default log directory for the host.
+    """
+    if platform.system() == "Darwin":
+        return Path.home() / "Library" / "Logs" / "brewery"
+
+    xdg_state = os.environ.get("XDG_STATE_HOME")
+    base = Path(xdg_state) if xdg_state else Path.home() / ".local" / "state"
+
+    return base / "brewery" / "logs"
+
 
 _STDLIB_SPECIAL_KWARGS = frozenset({"exc_info", "stack_info", "stacklevel", "extra"})
 
@@ -110,7 +120,8 @@ def ensure_log_dir() -> Path:
     Returns:
         $BREWERY_LOG_DIR if set, else the platform-conventional log directory.
     """
-    log_dir = Path(os.environ.get("BREWERY_LOG_DIR", DEFAULT_LOG_DIR))
+    override = os.environ.get("BREWERY_LOG_DIR")
+    log_dir = Path(override) if override else _default_log_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
 
     return log_dir

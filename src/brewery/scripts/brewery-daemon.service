@@ -1,0 +1,7 @@
+[Unit]
+Description=Brewery background catalog refresh
+
+[Service]
+Type=oneshot
+ExecStart={python} -m brewery.daemon.catalog_refresh
+Environment=PATH={path}

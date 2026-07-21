@@ -15,6 +15,9 @@ PLIST_NAME = f"{PLIST_LABEL}.plist"
 LAUNCH_AGENTS = Path.home() / "Library" / "LaunchAgents"
 PLIST_DEST = LAUNCH_AGENTS / PLIST_NAME
 
+# Backend-neutral label used by the CLI and the daemon dispatch layer
+SERVICE_LABEL = PLIST_LABEL
+
 
 def _gui_domain() -> str:
     """Return the launchd GUI domain target for the current user.

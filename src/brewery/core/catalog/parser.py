@@ -53,6 +53,21 @@ def _macos_tag(arch: str, codename: str) -> str:
     return f"arm64_{codename}" if arch == "arm64" else codename
 
 
+def _linux_tag(arch: str) -> str:
+    """Build the Linux bottle tag for an arch.
+
+    Homebrew uses the raw machine name, e.g. `x86_64_linux` / `arm64_linux`.
+
+    Args:
+        arch: The CPU architecture (`"amd64"` | `"arm64"`).
+
+    Returns:
+        The Linux bottle tag.
+    """
+    machine = "x86_64" if arch == "amd64" else arch
+    return f"{machine}_linux"
+
+
 def candidate_tags(platform: Platform) -> list[str]:
     """Bottle tags to try, in preference order, for a platform.
 
@@ -62,10 +77,13 @@ def candidate_tags(platform: Platform) -> list[str]:
     Returns:
         The list of candidate tags.
     """
+    if platform.os == "linux":
+        return [_linux_tag(platform.arch), _ANY_TAG]
+
     tags: list[str] = [
         _macos_tag(arch=platform.arch, codename=_MACOS_CODENAMES[major])
         for major in _MACOS_MAJORS_DESC
-        if major <= platform.macos_major
+        if platform.macos_major is not None and major <= platform.macos_major
     ]
     tags.append(_ANY_TAG)
 
@@ -81,6 +99,9 @@ def platform_tag(platform: Platform) -> str:
     Returns:
         The canonical exact tag for the current platform.
     """
+    if platform.os == "linux":
+        return _linux_tag(platform.arch)
+
     codename: str = _MACOS_CODENAMES.get(
         platform.macos_major, str(platform.macos_major)
     )

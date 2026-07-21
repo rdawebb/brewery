@@ -8,22 +8,41 @@ from dataclasses import dataclass
 _SONOMA = 14
 _BIG_SUR = 11
 
+# Machine names reporting a 64-bit ARM host: Darwin is "arm64", Linux
+# "aarch64"; both map to brew's single `arm64` token
+ARM_MACHINES = frozenset({"arm64", "aarch64"})
+
 
 @dataclass(frozen=True, slots=True)
 class Platform:
     """The current build platform for bottle selection."""
 
     arch: str  # "arm64" | "amd64"
-    macos_major: int
+    os: str  # "macos" | "linux"
+    macos_major: int | None = None  # None on Linux
+
+
+def _detect_arch() -> str:
+    """Map the host machine name to a bottle arch token.
+
+    Returns:
+        "arm64" for Apple Silicon / aarch64, else "amd64".
+    """
+    return "arm64" if _platform.machine() in ARM_MACHINES else "amd64"
 
 
 def current_platform() -> Platform | None:
-    """Detect the current macOS build platform, or None if not resolvable.
+    """Detect the current build platform, or None if not resolvable.
 
     Returns:
-        Tuple of current (arch, OS major version), or None.
+        The current Platform (macOS or Linux), or None.
     """
-    if _platform.system() != "Darwin":
+    system = _platform.system()
+
+    if system == "Linux":
+        return Platform(arch=_detect_arch(), os="linux")
+
+    if system != "Darwin":
         return None
 
     version: str = _platform.mac_ver()[0]
@@ -36,9 +55,7 @@ def current_platform() -> Platform | None:
     except ValueError:
         return None
 
-    arch = "arm64" if _platform.machine() == "arm64" else "amd64"
-
-    return Platform(arch=arch, macos_major=major)
+    return Platform(arch=_detect_arch(), os="macos", macos_major=major)
 
 
 def preferred_perl_version(macos_major: int | None = None) -> str:
@@ -52,7 +69,7 @@ def preferred_perl_version(macos_major: int | None = None) -> str:
     """
     if macos_major is None:
         plat = current_platform()
-        macos_major = plat.macos_major if plat else _SONOMA
+        macos_major = plat.macos_major if plat and plat.macos_major else _SONOMA
 
     if macos_major >= _SONOMA:
         return "5.34"

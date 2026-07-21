@@ -8,6 +8,7 @@ import pytest
 
 import brewery.providers.manifest as m
 from brewery.core.errors import ManifestError
+from brewery.core.host import Platform
 from brewery.providers.manifest import BottleTabInfo, fetch_bottle_tab
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
@@ -289,3 +290,61 @@ async def test_incomplete_tab_missing_required_field_raises() -> None:
     body = _index([{"digest": DIGEST, "tab": bad}])
     with pytest.raises(ManifestError, match="incomplete sh.brew.tab"):
         await _fetch(_handler(body))
+
+
+def _index_multi(entries: list[dict]) -> bytes:
+    """OCI index where each entry may carry a `platform` descriptor.
+
+    Args:
+        entries: Each entry: {digest, tab, platform?}.
+
+    Returns:
+        The serialised OCI image index.
+    """
+    manifests = []
+    for e in entries:
+        ann = {"sh.brew.bottle.digest": e["digest"]}
+        tab = e.get("tab")
+        if tab is not None:
+            ann["sh.brew.tab"] = orjson.dumps(tab).decode()
+        entry: dict = {
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "annotations": ann,
+        }
+        if "platform" in e:
+            entry["platform"] = e["platform"]
+        manifests.append(entry)
+    return orjson.dumps({"schemaVersion": 2, "manifests": manifests})
+
+
+async def test_linux_selection_disambiguates_by_arch(monkeypatch) -> None:
+    """Test that on Linux the arch-matching entry is chosen among a shared digest."""
+    monkeypatch.setattr(
+        m, "current_platform", lambda: Platform(arch="amd64", os="linux")
+    )
+    tab_amd = {**TAB_ALL, "compiler": "gcc-amd64"}
+    tab_arm = {**TAB_ALL, "compiler": "gcc-arm64"}
+    body = _index_multi(
+        [
+            {
+                "digest": DIGEST,
+                "tab": tab_arm,
+                "platform": {"os": "linux", "architecture": "arm64"},
+            },
+            {
+                "digest": DIGEST,
+                "tab": tab_amd,
+                "platform": {"os": "linux", "architecture": "amd64"},
+            },
+        ]
+    )
+    info = await _fetch(_handler(body), sha=DIGEST)
+    assert info.compiler == "gcc-amd64"
+
+
+async def test_unresolvable_platform_raises(monkeypatch) -> None:
+    """Test that an unresolvable host platform refuses to guess a bottle."""
+    monkeypatch.setattr(m, "current_platform", lambda: None)
+    body = _index([{"digest": DIGEST, "tab": TAB_PLATFORM}])
+    with pytest.raises(ManifestError, match="unresolvable"):
+        await _fetch(_handler(body), sha=DIGEST)

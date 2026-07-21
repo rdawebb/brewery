@@ -102,25 +102,31 @@ def _os_sort_key(os_version: str) -> tuple[int, ...]:
 
 
 def select_bottle_manifest(
-    manifests: list, bottle_sha256: str, *, oci_arch: str, os_major: int
+    manifests: list,
+    bottle_sha256: str,
+    *,
+    oci_arch: str,
+    platform_os: str,
+    os_major: int | None = None,
 ) -> dict | None:
     """Pick the manifest entry for the host's bottle.
 
     A bottle's blob can be shared across platforms: `:any_skip_relocation` and
-    `all` bottles reuse one tarball for several macOS versions (and sometimes
-    arches), so several index entries carry the *same* `sh.brew.bottle.digest`
+    `all` bottles reuse one tarball for several OS versions (and sometimes
+    arches), so several index entries carry the same `sh.brew.bottle.digest`
     while each holds its own per-platform `sh.brew.tab` (distinct `built_on`,
     arch, etc.). Matching on the digest alone is ambiguous -- the first match may
-    be a different platform's entry -- so we disambiguate by host arch and macOS
-    version the way brew selects a bottle. For a normal per-platform bottle the
-    digest is unique and the first branch returns immediately.
+    be a different platform's entry -- so we disambiguate by host arch and (on
+    macOS) OS version the way brew selects a bottle. For a normal per-platform
+    bottle the digest is unique and the first branch returns immediately.
 
     Args:
         manifests: The `manifests` array from an OCI image index.
         bottle_sha256: The expected bottle blob digest from the catalog (with or
             without the `sha256:` prefix).
         oci_arch: OCI architecture string for the host, e.g. `'arm64'`.
-        os_major: Host macOS major version number, e.g. `14`.
+        platform_os: Host OS discriminator (`"macos"` | `"linux"`).
+        os_major: Host macOS major version number, e.g. `14`. Ignored on Linux.
 
     Returns:
         The matching manifest dict, or `None` if no digest match is found.
@@ -141,9 +147,15 @@ def select_bottle_manifest(
 
     pool = [m for m in matches if plat(m).get("architecture") == oci_arch] or matches
 
-    # Exact host major wins (newest point release if several share it); else the
-    # newest major not exceeding the host (brew's forward-compatible fallback);
-    # else the newest available.
+    if platform_os == "linux":
+        # Linux manifests carry `platform.os == "linux"` and no macOS-style
+        # `os.version`; arch (plus os) is the only discriminator.
+        linux_pool = [m for m in pool if plat(m).get("os") == "linux"]
+        return (linux_pool or pool)[0]
+
+    # macOS: exact host major wins (newest point release if several share it);
+    # else the newest major not exceeding the host (brew's forward-compatible
+    # fallback); else the newest available.
     exact = [m for m in pool if _os_major(plat(m).get("os.version", "")) == os_major]
     if exact:
         return max(exact, key=lambda m: _os_sort_key(plat(m).get("os.version", "")))
@@ -151,7 +163,8 @@ def select_bottle_manifest(
     not_newer = [
         m
         for m in pool
-        if (maj := _os_major(plat(m).get("os.version", ""))) is not None
+        if os_major is not None
+        and (maj := _os_major(plat(m).get("os.version", ""))) is not None
         and maj <= os_major
     ]
 
@@ -279,10 +292,16 @@ async def fetch_bottle_tab(
         raise ManifestParseError("no manifests array in index", name=name, tag=tag)
 
     p = current_platform()
-    oci_arch = p.arch if p is not None else "amd64"
-    os_major = p.macos_major if p is not None else 0
+    if p is None:
+        raise ManifestParseError(
+            "cannot select a bottle: host platform is unresolvable", name=name, tag=tag
+        )
     entry = select_bottle_manifest(
-        manifests, bottle_sha256, oci_arch=oci_arch, os_major=os_major
+        manifests,
+        bottle_sha256,
+        oci_arch=p.arch,
+        platform_os=p.os,
+        os_major=p.macos_major,
     )
 
     if entry is None:

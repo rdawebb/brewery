@@ -20,7 +20,7 @@ from enum import Enum
 from pathlib import Path
 
 from brewery.core.errors import RelocationError
-from brewery.core.host import preferred_perl_version
+from brewery.core.host import current_platform, preferred_perl_version
 from brewery.providers.receipt import RuntimeDependency
 
 # Mach-O Constants
@@ -71,14 +71,28 @@ _MACHO_MAGICS = frozenset(
 _PLACEHOLDER_MARKER = b"@@HOMEBREW_"
 _AR_MAGIC = b"!<arch>\n"  # Static archive (ar) magic
 
+# ELF constants (Linux dynamic linkage; rewritten via patchelf, no signing)
+_ELF_MAGIC = b"\x7fELF"
+_ELFCLASS32, _ELFCLASS64 = 1, 2
+_ELFDATA2LSB = 1  # little-endian; anything else is treated big-endian
+_PT_LOAD = 1
+_PT_DYNAMIC = 2
+_PT_INTERP = 3
+_DT_NULL = 0
+_DT_STRTAB = 5
+_DT_RPATH = 15
+_DT_RUNPATH = 29
+
 # Matches brew's Version.formula_optionally_versioned_regex(:openjdk)
 _OPENJDK_RE = re.compile(r"\Aopenjdk(@\d+(?:\.\d+)*)?\Z")
 
 # Guards the tab's `preferred_perl` before it is pasted into a shebang path
 _PERL_VERSION_RE = re.compile(r"\A\d+\.\d+\Z")
 
-# JAVA_HOME within an openjdk keg on macOS (brew's macOS Keg override)
+# JAVA_HOME within an openjdk keg: macOS nests it in the .jdk bundle, while
+# Linux keeps it directly under libexec (brew's per-OS Keg override)
 _MACOS_JAVA_HOME_SUFFIX = "libexec/openjdk.jdk/Contents/Home"
+_LINUX_JAVA_HOME_SUFFIX = "libexec"
 
 # Bounded thread pool for the regular-file relocation phase
 _RELOCATE_WORKERS = min(8, os.cpu_count() or 4)
@@ -110,6 +124,7 @@ class _Kind(Enum):
     """Internal file classification for the fused relocation path."""
 
     MACHO = "macho"
+    ELF = "elf"
     ARCHIVE = "archive"
     TEXT = "text"
 
@@ -157,19 +172,25 @@ def build_substitutions(
     return dict(sorted(subs.items(), key=lambda kv: len(kv[0]), reverse=True))
 
 
-def _perl_path(prefix: Path, brewed: bool, built_on: dict[str, object] | None) -> str:
+def _perl_path(
+    prefix: Path, brewed: bool, built_on: dict[str, object] | None, *, is_linux: bool
+) -> str:
     """Resolve the `@@HOMEBREW_PERL@@` override path.
 
     Args:
         prefix: The Homebrew prefix path.
         brewed: Whether the formula depends on the brewed perl.
         built_on: The bottle tab's `built_on` block, if any.
+        is_linux: Whether the host is Linux (unversioned system perl).
 
     Returns:
         The absolute path to the perl interpreter.
     """
     if brewed:
         return str(prefix / "opt" / "perl" / "bin" / "perl")
+
+    if is_linux:
+        return "/usr/bin/perl"
 
     built_version = (built_on or {}).get("preferred_perl")
     if isinstance(built_version, str) and _PERL_VERSION_RE.match(built_version):
@@ -198,19 +219,24 @@ def formula_tokens(
     Returns:
         The formula-specific token map, suitable for `relocate_keg`'s `extra_tokens`.
     """
+    plat = current_platform()
+    is_linux = plat is not None and plat.os == "linux"
+
     brewed_perl = name == "perl" or any(
         d.full_name == "perl" and d.declared_directly for d in runtime_deps
     )
-    tokens = {"@@HOMEBREW_PERL@@": _perl_path(prefix, brewed_perl, built_on)}
+    tokens = {
+        "@@HOMEBREW_PERL@@": _perl_path(
+            prefix, brewed_perl, built_on, is_linux=is_linux
+        )
+    }
 
     openjdk = next(
         (d.full_name for d in runtime_deps if _OPENJDK_RE.match(d.full_name)), None
     )
     if openjdk:
-        # On macOS the JDK sits inside the bundle, not directly under libexec
-        tokens["@@HOMEBREW_JAVA@@"] = str(
-            prefix / "opt" / openjdk / _MACOS_JAVA_HOME_SUFFIX
-        )
+        suffix = _LINUX_JAVA_HOME_SUFFIX if is_linux else _MACOS_JAVA_HOME_SUFFIX
+        tokens["@@HOMEBREW_JAVA@@"] = str(prefix / "opt" / openjdk / suffix)
 
     return tokens
 
@@ -418,6 +444,132 @@ def find_install_names(path: Path) -> list[InstallName]:
             return _collect_names(mm)
 
 
+@dataclass(frozen=True)
+class _ElfInfo:
+    """The dynamic-linkage strings an ELF relocation may need to rewrite."""
+
+    interp: str | None  # PT_INTERP (the ELF interpreter / dynamic loader)
+    rpath: str | None  # DT_RPATH
+    runpath: str | None  # DT_RUNPATH
+
+
+def _vaddr_to_offset(vaddr: int, loads: list[tuple[int, int, int]]) -> int | None:
+    """Translate a virtual address to a file offset via the PT_LOAD segments.
+
+    Args:
+        vaddr: The virtual address to translate (e.g. DT_STRTAB).
+        loads: The (vaddr, offset, filesz) tuples of the PT_LOAD segments.
+
+    Returns:
+        The file offset, or None if no segment maps the address.
+    """
+    for seg_vaddr, seg_off, seg_filesz in loads:
+        if seg_vaddr <= vaddr < seg_vaddr + seg_filesz:
+            return seg_off + (vaddr - seg_vaddr)
+
+    return None
+
+
+def _read_elf(mm: mmap.mmap) -> _ElfInfo:
+    """Parse an ELF's interpreter and RPATH/RUNPATH strings.
+
+    Mirrors the in-process Mach-O parser: reads the program headers for
+    PT_INTERP / PT_DYNAMIC, walks the dynamic array for DT_RPATH / DT_RUNPATH,
+    and resolves those string-table offsets to file offsets via the PT_LOAD
+    map. Unparseable or missing fields yield None entries rather than raising.
+
+    Args:
+        mm: A readable mapping positioned at the start of the file.
+
+    Returns:
+        The parsed _ElfInfo (fields may be None).
+    """
+    is64 = mm[4] == _ELFCLASS64
+    if not is64 and mm[4] != _ELFCLASS32:
+        return _ElfInfo(None, None, None)
+
+    bo = "<" if mm[5] == _ELFDATA2LSB else ">"
+
+    if is64:
+        e_phoff = struct.unpack_from(f"{bo}Q", mm, 32)[0]
+        e_phentsize, e_phnum = struct.unpack_from(f"{bo}HH", mm, 54)
+
+    else:
+        e_phoff = struct.unpack_from(f"{bo}I", mm, 28)[0]
+        e_phentsize, e_phnum = struct.unpack_from(f"{bo}HH", mm, 42)
+
+    if e_phoff == 0 or e_phnum == 0:
+        return _ElfInfo(None, None, None)
+
+    interp: str | None = None
+    dyn_off = dyn_size = 0
+    loads: list[tuple[int, int, int]] = []
+
+    for i in range(e_phnum):
+        ph = e_phoff + i * e_phentsize
+        p_type = struct.unpack_from(f"{bo}I", mm, ph)[0]
+        if is64:
+            p_offset = struct.unpack_from(f"{bo}Q", mm, ph + 8)[0]
+            p_vaddr = struct.unpack_from(f"{bo}Q", mm, ph + 16)[0]
+            p_filesz = struct.unpack_from(f"{bo}Q", mm, ph + 32)[0]
+
+        else:
+            p_offset = struct.unpack_from(f"{bo}I", mm, ph + 4)[0]
+            p_vaddr = struct.unpack_from(f"{bo}I", mm, ph + 8)[0]
+            p_filesz = struct.unpack_from(f"{bo}I", mm, ph + 16)[0]
+
+        if p_type == _PT_INTERP:
+            interp = _read_cstr(mm, p_offset, p_offset + p_filesz).decode(
+                "utf-8", "surrogateescape"
+            )
+
+        elif p_type == _PT_DYNAMIC:
+            dyn_off, dyn_size = p_offset, p_filesz
+
+        elif p_type == _PT_LOAD:
+            loads.append((p_vaddr, p_offset, p_filesz))
+
+    if dyn_off == 0:
+        return _ElfInfo(interp, None, None)
+
+    # Dynamic array: Elf(32|64)_Dyn is {d_tag, d_un}, both word-sized
+    ent_size = 16 if is64 else 8
+    word = "Q" if is64 else "I"
+    strtab_vaddr: int | None = None
+    rpath_off: int | None = None
+    runpath_off: int | None = None
+
+    for i in range(dyn_size // ent_size):
+        off = dyn_off + i * ent_size
+        d_tag, d_val = struct.unpack_from(f"{bo}{word}{word}", mm, off)
+        if d_tag == _DT_NULL:
+            break
+
+        if d_tag == _DT_STRTAB:
+            strtab_vaddr = d_val
+
+        elif d_tag == _DT_RPATH:
+            rpath_off = d_val
+
+        elif d_tag == _DT_RUNPATH:
+            runpath_off = d_val
+
+    if strtab_vaddr is None:
+        return _ElfInfo(interp, None, None)
+
+    strtab = _vaddr_to_offset(strtab_vaddr, loads)
+    if strtab is None:
+        return _ElfInfo(interp, None, None)
+
+    def _s(o: int | None) -> str | None:
+        if o is None:
+            return None
+
+        return _read_cstr(mm, strtab + o, mm.size()).decode("utf-8", "surrogateescape")
+
+    return _ElfInfo(interp, _s(rpath_off), _s(runpath_off))
+
+
 def _run(cmd: list[str]) -> None:
     """Run install_name_tool / codesign synchronously.
 
@@ -515,6 +667,91 @@ def _run_install_name_tool(path: Path, args: list[str]) -> None:
                 path, f"install_name_tool failed: {exc.stderr.strip()}"
             )
 
+        except FileNotFoundError:
+            raise RelocationError(
+                path,
+                "install_name_tool not found on PATH; "
+                "install the Xcode Command Line Tools",
+            )
+
+
+def _rewrite_str(path: Path, old: str, subs: dict[bytes, bytes]) -> str | None:
+    """Substitute placeholders in an ELF linkage string; None if unchanged.
+
+    Args:
+        path: The ELF file (for the error message).
+        old: The current string (an rpath or interpreter path).
+        subs: A mapping of placeholder bytes to their replacements.
+
+    Returns:
+        The rewritten string, or None if no substitution applied.
+
+    Raises:
+        RelocationError: If a placeholder survived substitution.
+    """
+    old_b = old.encode("utf-8", "surrogateescape")
+    new_b = _apply(old_b, subs)
+
+    # Any surviving placeholder is a broken keg, whether or not a sub applied
+    _reject_unresolved(path, new_b)
+    if new_b == old_b:
+        return None
+
+    return new_b.decode("utf-8", "surrogateescape")
+
+
+def _build_elf_args(path: Path, info: _ElfInfo, subs: dict[bytes, bytes]) -> list[str]:
+    """Build the patchelf argument list for an ELF file.
+
+    Rewrites the interpreter and the run-time search path. DT_RUNPATH takes
+    precedence over DT_RPATH at load time, so it is preferred when present.
+
+    Args:
+        path: The ELF file (for error messages).
+        info: The parsed interpreter / rpath / runpath strings.
+        subs: A mapping of placeholder bytes to their replacements.
+
+    Returns:
+        The patchelf arguments (empty if nothing needs rewriting).
+    """
+    args: list[str] = []
+
+    if info.interp:
+        new_interp = _rewrite_str(path, info.interp, subs)
+        if new_interp is not None:
+            args += ["--set-interpreter", new_interp]
+
+    search_path = info.runpath if info.runpath is not None else info.rpath
+    if search_path:
+        new_path = _rewrite_str(path, search_path, subs)
+        if new_path is not None:
+            args += ["--set-rpath", new_path]
+
+    return args
+
+
+def _run_patchelf(path: Path, args: list[str]) -> None:
+    """Rewrite the dynamic linkage of one ELF file. No re-signing on Linux.
+
+    Args:
+        path: The path to the ELF file.
+        args: A non-empty patchelf argument list.
+
+    Raises:
+        RelocationError: If patchelf fails.
+    """
+    with _writable(path):
+        try:
+            _run(["patchelf", *args, str(path)])
+
+        except subprocess.CalledProcessError as exc:
+            raise RelocationError(path, f"patchelf failed: {exc.stderr.strip()}")
+
+        except FileNotFoundError:
+            raise RelocationError(
+                path, "patchelf not found on PATH; install it to relocate ELF binaries"
+            )
+
 
 def _chunk_paths(paths: list[Path], budget: int) -> list[list[Path]]:
     """Split paths into chunks whose combined byte length stays under `budget`.
@@ -570,6 +807,12 @@ def _codesign(paths: list[Path]) -> None:
             except subprocess.CalledProcessError as exc:
                 raise RelocationError(
                     chunk[0], f"codesign failed: {exc.stderr.strip()}"
+                )
+
+            except FileNotFoundError:
+                raise RelocationError(
+                    chunk[0],
+                    "codesign not found on PATH; install the Xcode Command Line Tools",
                 )
 
 
@@ -649,6 +892,9 @@ def _classify(mm: mmap.mmap) -> _Kind:
     if struct.unpack_from(">I", mm, 0)[0] in _MACHO_MAGICS:
         return _Kind.MACHO
 
+    if mm[:4] == _ELF_MAGIC:
+        return _Kind.ELF
+
     return _Kind.TEXT
 
 
@@ -657,13 +903,14 @@ def _process_file(
     subs: dict[bytes, bytes],
     keg_root: str,
     allowed_text: frozenset[str] | None,
-    skip_macho: bool = False,
-) -> tuple[Path | None, str | None]:
+    skip_linkage: bool = False,
+) -> tuple[Path | None, str | None, bool]:
     """Relocate one regular (non-symlink) file via a single mmap.
 
     A rewritten Mach-O has its install names fixed but is left unsigned; the
     returned path is handed back to `relocate_keg`, which batches the ad-hoc
-    re-sign across the whole keg.
+    re-sign across the whole keg. An ELF is rewritten in place via patchelf and
+    needs no re-signing, so it is only counted.
 
     Args:
         path_str: The path to the file (str; Path is deferred to here).
@@ -671,31 +918,33 @@ def _process_file(
         keg_root: The keg directory as a string, for computing relative paths.
         allowed_text: The manifest's changed_files set (relative POSIX), or None
             to substitute any marker-bearing text file.
-        skip_macho: When True, leave Mach-O install names untouched, text
-            substitution still runs.
+        skip_linkage: When True, leave binary (Mach-O/ELF) dynamic linkage
+            untouched; text substitution still runs.
 
     Returns:
-        (macho_path, text_rel): `macho_path` the file's path if a Mach-O was
-        rewritten (and now needs re-signing), else None; `text_rel` the relative
-        POSIX path if a text file was substituted, else None.
+        (macho_path, text_rel, elf_relocated): `macho_path` the file's path if a
+        Mach-O was rewritten (and now needs re-signing), else None; `text_rel`
+        the relative POSIX path if a text file was substituted, else None;
+        `elf_relocated` True if an ELF's linkage was rewritten.
 
     Raises:
         RelocationError: If the file could not be relocated.
     """
     path = Path(path_str)
     macho_args: list[str] | None = None
+    elf_args: list[str] | None = None
     new_text: bytes | None = None
     text_rel: str | None = None
 
     try:
         with path.open("rb") as fh:
             if os.fstat(fh.fileno()).st_size == 0:
-                return None, None
+                return None, None, False
 
             with mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm:
                 # No parse and no full-file read for marker-free files
                 if mm.find(_PLACEHOLDER_MARKER) == -1:
-                    return None, None
+                    return None, None, False
 
                 kind = _classify(mm)
                 if kind is _Kind.ARCHIVE:
@@ -703,9 +952,16 @@ def _process_file(
                     raise RelocationError(path, "static archive contains a placeholder")
 
                 if kind is _Kind.MACHO:
-                    if skip_macho:
-                        return None, None  # :any_skip_relocation: no linkage rewrite
+                    if skip_linkage:
+                        return None, None, False  # :any_skip_relocation
+
                     macho_args = _build_macho_args(_collect_names(mm), subs)
+
+                elif kind is _Kind.ELF:
+                    if skip_linkage:
+                        return None, None, False  # :any_skip_relocation
+
+                    elf_args = _build_elf_args(path, _read_elf(mm), subs)
 
                 else:
                     rel = path.relative_to(keg_root).as_posix()
@@ -724,19 +980,26 @@ def _process_file(
     # Mapping is closed here, so safe to mutate the file
     if macho_args is not None:
         if not macho_args:
-            return None, None  # Marker present but not in any install name
+            return None, None, False  # Marker present but not in any install name
 
         # install_name_tool now; re-signing is batched by relocate_keg
         _run_install_name_tool(path, macho_args)
-        return path, None
+        return path, None, False
+
+    if elf_args is not None:
+        if not elf_args:
+            return None, None, False  # Marker present but not in linkage strings
+
+        _run_patchelf(path, elf_args)
+        return None, None, True
 
     if new_text is None:
-        return None, None
+        return None, None, False
 
     with _writable(path):
         path.write_bytes(new_text)
 
-    return None, text_rel
+    return None, text_rel, False
 
 
 def _scan(root: Path) -> tuple[list[str], list[str]]:
@@ -785,6 +1048,7 @@ class RelocationResult:
     changed_files: list[str]
     macho_relocated: int
     symlinks_relocated: int
+    elf_relocated: int = 0
 
 
 def relocate_keg(
@@ -800,8 +1064,9 @@ def relocate_keg(
     """Relocate an extracted keg in place.
 
     `skip_relocation` should be set from the catalog bottle's `cellar` value
-    being `:any_skip_relocation`. When true the Mach-O install-name rewrite is skipped
-    but text and symlink placeholder substitution still run.
+    being `:any_skip_relocation`. When true the binary dynamic-linkage rewrite
+    (Mach-O install names / ELF rpath) is skipped but text and symlink
+    placeholder substitution still run.
 
     `text_files` is the manifest tab's `changed_files` (relative POSIX paths).
     When provided, only those files are text-substituted and the result's
@@ -854,6 +1119,7 @@ def relocate_keg(
 
     to_sign: list[Path] = []
     discovered: list[str] = []
+    elf_n = 0
     if regular:
         executor = ThreadPoolExecutor(max_workers=_RELOCATE_WORKERS)
         futures = [
@@ -864,11 +1130,14 @@ def relocate_keg(
         ]
         try:
             for fut in as_completed(futures):
-                macho_path, text_rel = (
+                macho_path, text_rel, elf_done = (
                     fut.result()
                 )  # First RelocationError re-raises here
                 if macho_path is not None:
                     to_sign.append(macho_path)
+
+                elif elf_done:
+                    elf_n += 1
 
                 elif text_rel is not None:
                     discovered.append(text_rel)
@@ -881,10 +1150,10 @@ def relocate_keg(
         else:
             executor.shutdown()
 
-    # Resign all rewritten Mach-O files in a single batch
+    # Resign all rewritten Mach-O files in a single batch (empty/no-op on Linux)
     _codesign(to_sign)
 
     # The manifest list is authoritative for the receipt
     changed = sorted(text_files) if text_files is not None else sorted(discovered)
 
-    return RelocationResult(changed, len(to_sign), symlink_n)
+    return RelocationResult(changed, len(to_sign), symlink_n, elf_n)
