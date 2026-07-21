@@ -5,8 +5,40 @@ build-backend = "uv_build"
 [project]
 name = "brewery"
 version = "0.4.0"
-description = "Minimal Homebrew Package Manager"
+description = "Fast Homebrew Package Manager"
+authors = [{name = "Rob Webb"}]
 requires-python = ">=3.11"
+license = "MIT AND BSD-2-Clause"
+license-files = ["LICENSE", "LICENSE-HOMEBREW"]
+keywords = [
+    "homebrew",
+    "brew",
+    "package-manager",
+    "formula",
+    "cask",
+    "macos",
+    "linux",
+    "command-line",
+    "cli",
+    "terminal",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: System Administrators",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: System :: Installation/Setup",
+    "Topic :: System :: Software Distribution",
+    "Topic :: Utilities",
+]
 dependencies = [
   "httpx[brotli,zstd]>=0.28.0,<1.0.0",
   "orjson>=3.11.9,<4.0.0",
@@ -32,6 +64,10 @@ dev = [
   "rust-just>=1.57.0,<2.0.0",
   "ty>=0.0.61,<1.0.0"
 ]
+
+[project.urls]
+Repository = "https://github.com/rdawebb/brewery"
+Changelog = "https://github.com/rdawebb/brewery/blob/main/CHANGELOG.md"
 
 [tool.uv.build-backend]
 module-name = "brewery"

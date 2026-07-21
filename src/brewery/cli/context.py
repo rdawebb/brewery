@@ -28,13 +28,41 @@ def setup() -> None:
 
 @contextmanager
 def _repository() -> Iterator[Repository]:
-    """Yield a repository instance and close it on exit."""
+    """Yield a repository instance and close it on exit.
+
+    Populates the catalog first if it is empty, which happens on a first run and
+    after a schema-version rebuild.
+
+    Yields:
+        The repository instance.
+    """
     repo = Repository()
     try:
+        _ensure_catalog_populated(repo)
         yield repo
 
     finally:
         repo.close()
+
+
+def _ensure_catalog_populated(repo: Repository) -> None:
+    """Refresh the catalog in the foreground when it holds no formulae.
+
+    Args:
+        repo: The repository whose catalog to check and populate.
+    """
+    if not repo.catalog.is_empty():
+        return
+
+    from brewery.cli.output import spinner
+    from brewery.daemon.catalog_refresh import refresh_catalog
+
+    try:
+        with spinner("Building the package catalog..."):
+            run_async(coro=refresh_catalog(catalog=repo.catalog))
+
+    except Exception as e:
+        log.warning(event="catalog_bootstrap_failed", error=str(object=e))
 
 
 def run_async(coro: Coroutine) -> Any:

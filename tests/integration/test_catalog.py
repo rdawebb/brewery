@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import sqlite3
+import threading
 from typing import Any
 
+import httpx
 import pytest
 
 from brewery.core.catalog import (
@@ -12,8 +16,15 @@ from brewery.core.catalog import (
     Catalog,
     FormulaRow,
 )
+from brewery.core.catalog.parser import load_casks, load_formulae
+from brewery.core.errors import CatalogFetchError
+from brewery.core.host import Platform
+from brewery.daemon.catalog_refresh import _refresh
 
 pytestmark = pytest.mark.integration
+
+# Pinned so the guard tests never depend on the running host's platform
+_PLATFORM = Platform(arch="arm64", os="macos", macos_major=15)
 
 
 def formula_dict(name: str, **overrides: Any) -> dict[str, Any]:
@@ -119,6 +130,44 @@ class TestSchema:
             assert reopened.get_formula("wget") is None
         finally:
             reopened.close()
+
+    def test_rebuild_discards_stored_validators(self, tmp_path) -> None:
+        """Test that a rebuild drops the feed ETags along with the rows."""
+        path = tmp_path / "catalog.db"
+        cat = Catalog(db_path=path)
+        cat.write_formulae([formula_dict("wget")], [], [])
+        cat.set_meta("formula_etag", '"abc123"')
+        cat.set_meta("schema_version", str(SCHEMA_VERSION + 1))
+        cat.close()
+
+        reopened = Catalog(db_path=path)
+        try:
+            assert reopened.get_meta("formula_etag") is None
+        finally:
+            reopened.close()
+
+    def test_is_empty(self, empty_catalog) -> None:
+        """Test that is_empty tracks the presence of formula rows."""
+        assert empty_catalog.is_empty() is True
+
+        empty_catalog.write_formulae([formula_dict("wget")], [], [])
+        assert empty_catalog.is_empty() is False
+
+    def test_connection_is_thread_owned(self, empty_catalog) -> None:
+        """Test that a cross-thread call raises rather than silently racing."""
+        errors: list[BaseException] = []
+
+        def query() -> None:
+            try:
+                empty_catalog.get_formula("wget")
+            except BaseException as e:  # noqa: BLE001 - recorded for the assert
+                errors.append(e)
+
+        thread = threading.Thread(target=query)
+        thread.start()
+        thread.join()
+
+        assert isinstance(errors[0], sqlite3.ProgrammingError)
 
     def test_unparseable_version_is_none(self, empty_catalog) -> None:
         """Test that a non-integer stored version reads back as None."""
@@ -374,14 +423,22 @@ class TestSearch:
         self._populate(empty_catalog)
         assert empty_catalog.search('"""') == []
 
-    def test_limit_caps_results(self, empty_catalog) -> None:
-        """Test that the limit caps the total number of results."""
+    def test_limit_caps_each_kind(self, empty_catalog) -> None:
+        """Test that the limit applies per kind, so casks are never starved."""
         empty_catalog.write_formulae(
             [formula_dict(f"tool{i}", desc="shared keyword") for i in range(5)],
             [],
             [],
         )
-        assert len(empty_catalog.search("keyword", limit=3)) == 3
+        empty_catalog.write_casks(
+            [cask_dict(f"app{i}", desc="shared keyword") for i in range(5)]
+        )
+
+        results = empty_catalog.search("keyword", limit=3)
+        kinds = [type(r).__name__ for r in results]
+
+        assert kinds.count("FormulaRow") == 3
+        assert kinds.count("CaskRow") == 3
 
     def test_no_match_returns_empty(self, empty_catalog) -> None:
         """Test that a query matching nothing returns an empty list."""
@@ -433,3 +490,57 @@ class TestMetaAndLifecycle:
         # After exit the connection is closed, so further use raises
         with pytest.raises(Exception):
             cat.get_formula("wget")
+
+
+class TestFeedGuards:
+    """Tests that a full-feed load refuses to empty the catalog."""
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param(b"[]", id="empty_list"),
+            pytest.param(b"{}", id="not_a_list"),
+            pytest.param(b"", id="empty_body"),
+            pytest.param(b'[{"name": "wget"', id="truncated_json"),
+        ],
+    )
+    def test_formula_load_rejects_and_preserves(self, empty_catalog, body) -> None:
+        """Test that a bad formula feed raises and leaves existing rows intact."""
+        empty_catalog.write_formulae([formula_dict("wget")], [], [])
+
+        with pytest.raises(CatalogFetchError):
+            load_formulae(empty_catalog, body, platform=_PLATFORM)
+
+        assert empty_catalog.get_formula("wget") is not None
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param(b"[]", id="empty_list"),
+            pytest.param(b"{}", id="not_a_list"),
+            pytest.param(b"", id="empty_body"),
+        ],
+    )
+    def test_cask_load_rejects_and_preserves(self, empty_catalog, body) -> None:
+        """Test that a bad cask feed raises and leaves existing rows intact."""
+        empty_catalog.write_casks([cask_dict("firefox")])
+
+        with pytest.raises(CatalogFetchError):
+            load_casks(empty_catalog, body)
+
+        assert empty_catalog.get_cask("firefox") is not None
+
+    def test_refresh_does_not_store_validators_for_a_bad_feed(
+        self, empty_catalog, http_client
+    ) -> None:
+        """Test that an empty feed body never advances the stored ETag."""
+        empty_catalog.set_meta("formula_etag", '"old"')
+
+        client = http_client(
+            httpx.Response(200, content=b"[]", headers={"ETag": '"new"'})
+        )
+
+        with pytest.raises(CatalogFetchError):
+            asyncio.run(_refresh(empty_catalog, client))
+
+        assert empty_catalog.get_meta("formula_etag") == '"old"'

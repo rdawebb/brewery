@@ -16,7 +16,7 @@ log: BreweryLogger = get_logger(name=__name__)
 
 SCHEMA_VERSION = 1
 
-_DEFAULT_DB_PATH: Path = ensure_cache_dir() / "catalog.db"
+_DB_FILENAME = "catalog.db"
 
 _SCHEMA: str = """
 CREATE TABLE formula (
@@ -265,6 +265,13 @@ class Catalog:
     Callers never touch SQL directly. The connection runs in WAL mode so a
     reader sees a consistent snapshot while daemon updates the contents in a single
     transaction.
+
+    Threading: the connection is owned by the thread that constructed it
+    (`check_same_thread` is left at its default, so a cross-thread call raises
+    `sqlite3.ProgrammingError`). Resolve catalog data on the event-loop thread
+    before dispatching work to `asyncio.to_thread`. If genuinely concurrent access
+    is ever needed, open a connection per thread — WAL supports several readers —
+    rather than sharing one behind a lock.
     """
 
     def __init__(self, db_path: Path | None = None) -> None:
@@ -273,8 +280,7 @@ class Catalog:
         Args:
             db_path: Override for the database location (useful for tests)
         """
-        ensure_cache_dir()
-        self.db_path: Path = db_path or _DEFAULT_DB_PATH
+        self.db_path: Path = db_path or (ensure_cache_dir() / _DB_FILENAME)
         self._conn: sqlite3.Connection = self._connect()
         self._ensure_schema()
 
@@ -316,7 +322,13 @@ class Catalog:
             self._create_schema()
 
     def _drop_all(self) -> None:
-        """Drop every catalog object so _create_schema can rebuild from clean."""
+        """Drop every catalog object so _create_schema can rebuild from clean.
+
+        `meta` goes with the rest, and that is required rather than incidental:
+        keeping the stored ETags across a rebuild would make the next conditional
+        fetch return 304 against an empty catalog, leaving it empty until the feed
+        changes upstream. Do not preserve `meta` here.
+        """
         objects = self._conn.execute(
             "SELECT type, name FROM sqlite_master "
             "WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite_%'"
@@ -340,6 +352,17 @@ class Catalog:
             version=SCHEMA_VERSION,
             path=str(object=self.db_path),
         )
+
+    def is_empty(self) -> bool:
+        """Return True when the catalog holds no formulae.
+
+        True on a first run and after a schema-version rebuild, both of which need
+        a foreground refresh before the catalog is usable.
+
+        Returns:
+            True if the formula table has no rows.
+        """
+        return self._conn.execute("SELECT 1 FROM formula LIMIT 1").fetchone() is None
 
     def get_formula(self, name: str) -> FormulaRow | None:
         """Fetch a single formula by canonical name.
@@ -495,12 +518,13 @@ class Catalog:
 
         Both FTS tables are queried and the results concatenated, formulae
         first then casks. Relevance rank is per-table in FTS5 and not comparable
-        across tables, so this does not attempt a global ranking. The total is
-        capped at 'limit'.
+        across tables, so this does not attempt a global ranking — and for the
+        same reason 'limit' applies to each kind independently. A shared budget
+        would simply let formulae starve casks by virtue of being queried first.
 
         Args:
             query: Free-text search string.
-            limit: Maximum number of results across both kinds.
+            limit: Maximum number of results of each kind.
 
         Returns:
             Formula and cask rows matching the query. Empty when the query has
@@ -522,16 +546,14 @@ class Catalog:
             _formula_from_row(row) for row in formula_rows
         ]
 
-        remaining: int = limit - len(results)
-        if remaining > 0:
-            cask_rows = self._conn.execute(
-                "SELECT c.* FROM cask_fts "
-                "JOIN cask c ON c.rowid = cask_fts.rowid "
-                "WHERE cask_fts MATCH ? "
-                "ORDER BY rank LIMIT ?",
-                (match, remaining),
-            ).fetchall()
-            results.extend(_cask_from_row(row) for row in cask_rows)
+        cask_rows = self._conn.execute(
+            "SELECT c.* FROM cask_fts "
+            "JOIN cask c ON c.rowid = cask_fts.rowid "
+            "WHERE cask_fts MATCH ? "
+            "ORDER BY rank LIMIT ?",
+            (match, limit),
+        ).fetchall()
+        results.extend(_cask_from_row(row) for row in cask_rows)
 
         return results
 

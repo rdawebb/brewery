@@ -57,7 +57,20 @@ COLUMN_DEFINITIONS: list[dict] = [
     dict(header="Installed On", style="dim"),
 ]
 
-WIDTHS_CACHE: Path = ensure_cache_dir() / "column_widths.json"
+_WIDTHS_FILENAME = "column_widths.json"
+
+
+def _widths_cache_path() -> Path:
+    """Path of the on-disk column-width cache, creating the cache dir if needed.
+
+    Resolved lazily rather than at import time, so importing the CLI never touches
+    the filesystem.
+
+    Returns:
+        The column-width cache file path.
+    """
+    return ensure_cache_dir() / _WIDTHS_FILENAME
+
 
 # Terminal width mapped to column headers
 _width_cache: dict[int, tuple[int, ...]] = {}
@@ -67,8 +80,9 @@ _width_cache_loaded = False
 def _load_width_cache() -> None:
     """Load pre-computed column widths from cache."""
     try:
-        if WIDTHS_CACHE.exists():
-            data: dict[int, tuple[int, ...]] = orjson.loads(WIDTHS_CACHE.read_bytes())
+        path: Path = _widths_cache_path()
+        if path.exists():
+            data: dict[int, tuple[int, ...]] = orjson.loads(path.read_bytes())
             _width_cache.update({int(k): tuple(v) for k, v in data.items()})
 
     except Exception:
@@ -351,8 +365,7 @@ def package_columns(
 def _save_width_cache() -> None:
     """Save calculated column widths to file cache"""
     try:
-        ensure_cache_dir()
-        WIDTHS_CACHE.write_bytes(
+        _widths_cache_path().write_bytes(
             orjson.dumps({str(k): list(v) for k, v in _width_cache.items()})
         )
 

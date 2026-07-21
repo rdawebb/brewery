@@ -8,6 +8,7 @@ from typing import Any
 import orjson
 
 from brewery.core.catalog.store import Catalog
+from brewery.core.errors import CatalogFetchError
 from brewery.core.host import Platform, current_platform
 from brewery.core.logging import BreweryLogger, get_logger
 
@@ -134,6 +135,37 @@ def resolve_bottle(files: dict[str, Any], platform: Platform | None) -> Bottle |
     return None
 
 
+def _decode_feed(name: str, body: bytes) -> list[Any]:
+    """Decode a full-feed body, refusing anything that would empty the catalog.
+
+    Args:
+        name: Feed name, for the error context ("formula" | "cask").
+        body: Raw (decoded) feed bytes.
+
+    Returns:
+        The decoded feed entries.
+
+    Raises:
+        CatalogFetchError: The body is not valid JSON, is not a list, or is empty.
+    """
+    try:
+        entries: Any = orjson.loads(body)
+
+    except orjson.JSONDecodeError as e:
+        raise CatalogFetchError(
+            message=f"Catalog feed '{name}' is not valid JSON",
+            context={"feed": name, "bytes": len(body), "error": str(object=e)},
+        ) from e
+
+    if not isinstance(entries, list) or not entries:
+        raise CatalogFetchError(
+            message=f"Catalog feed '{name}' is empty or malformed; refusing to load",
+            context={"feed": name, "bytes": len(body), "type": type(entries).__name__},
+        )
+
+    return entries
+
+
 def load_formulae(
     catalog: Catalog, body: bytes, platform: Platform | None = None
 ) -> int:
@@ -146,9 +178,12 @@ def load_formulae(
 
     Returns:
         The number of formulae written.
+
+    Raises:
+        CatalogFetchError: The body is empty or malformed.
     """
     resolved: Platform | None = platform or current_platform()
-    entries: Any = orjson.loads(body)
+    entries: list[Any] = _decode_feed(name="formula", body=body)
 
     formulae: list[dict[str, Any]] = []
     deps: list[dict[str, Any]] = []
@@ -176,8 +211,11 @@ def load_casks(catalog: Catalog, body: bytes) -> int:
 
     Returns:
         The number of casks written.
+
+    Raises:
+        CatalogFetchError: The body is empty or malformed.
     """
-    entries: Any = orjson.loads(body)
+    entries: list[Any] = _decode_feed(name="cask", body=body)
     casks: list[dict[str, Any]] = [_parse_cask(obj=obj) for obj in entries]
     catalog.write_casks(casks=casks)
 

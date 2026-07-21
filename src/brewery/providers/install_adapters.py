@@ -15,6 +15,10 @@ class RepositoryCatalogAdapter:  # Implements orchestrator.CatalogPort
     Catalog lookups delegate to repo.catalog; installed-state (is_satisfied)
     delegates to repo.cache_mgr, since the catalog has no view of what's
     installed.
+
+    Every method here must be called on the thread that opened the catalog, i.e.
+    the event loop; resolve what a worker needs before handing off to
+    `asyncio.to_thread`, never from inside one. See `Catalog`'s docstring.
     """
 
     def __init__(self, repo) -> None:
