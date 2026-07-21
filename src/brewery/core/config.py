@@ -30,11 +30,24 @@ _DEF_CACHE = Path(
     os.environ.get(key="BREWERY_CACHE_DIR", default=Path.home() / ".brewery" / "cache")
 )
 
-DEFAULT_CACHE = (
-    Path.home() / "Library" / "Caches" / "Homebrew"
-    if platform.system() == "Darwin"
-    else Path.home() / ".cache" / "Homebrew"
-)
+
+def _default_homebrew_cache() -> Path:
+    """brew's own default cache location for this host.
+
+    Returns:
+        `~/Library/Caches/Homebrew` on macOS; on Linux, `Homebrew` under
+        $XDG_CACHE_HOME, else `~/.cache`.
+    """
+    if platform.system() == "Darwin":
+        return Path.home() / "Library" / "Caches" / "Homebrew"
+
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".cache"
+
+    return base / "Homebrew"
+
+
+DEFAULT_CACHE = _default_homebrew_cache()
 HOMEBREW_CACHE = Path(os.environ.get("HOMEBREW_CACHE", str(DEFAULT_CACHE)))
 FORMULA_API_PATH = HOMEBREW_CACHE / "api" / "formula.jws.json"
 

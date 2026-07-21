@@ -227,3 +227,27 @@ class TestGetBreweryEnv:
             bottle_cache=HOMEBREW_CACHE,
             cache=cache_dir,
         )
+
+
+class TestDefaultHomebrewCache:
+    """Tests for brew's per-host default cache location."""
+
+    def test_macos_uses_library_caches(self, monkeypatch) -> None:
+        """Test that macOS uses ~/Library/Caches/Homebrew, ignoring XDG."""
+        monkeypatch.setattr(config.platform, "system", lambda: "Darwin")
+        monkeypatch.setenv("XDG_CACHE_HOME", "/custom/cache")
+        assert config._default_homebrew_cache() == (
+            Path.home() / "Library" / "Caches" / "Homebrew"
+        )
+
+    def test_linux_honours_xdg_cache_home(self, monkeypatch) -> None:
+        """Test that Linux places the cache under $XDG_CACHE_HOME, as brew does."""
+        monkeypatch.setattr(config.platform, "system", lambda: "Linux")
+        monkeypatch.setenv("XDG_CACHE_HOME", "/custom/cache")
+        assert config._default_homebrew_cache() == Path("/custom/cache/Homebrew")
+
+    def test_linux_falls_back_to_dot_cache(self, monkeypatch) -> None:
+        """Test that Linux defaults to ~/.cache/Homebrew when XDG is unset."""
+        monkeypatch.setattr(config.platform, "system", lambda: "Linux")
+        monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+        assert config._default_homebrew_cache() == Path.home() / ".cache" / "Homebrew"

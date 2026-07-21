@@ -342,7 +342,17 @@ def test_write_receipt_atomic_mode_and_content(tmp_path) -> None:
     assert list(keg.glob("*.tmp")) == []
 
 
-def test_current_arch_maps_machine(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("machine", "expected"),
+    [
+        ("arm64", "arm64"),
+        # Linux reports aarch64, but brew's tab token is arm64 on both
+        ("aarch64", "arm64"),
+        # Intel keeps the raw name: the tab says x86_64 where a tag says amd64
+        ("x86_64", "x86_64"),
+    ],
+)
+def test_current_arch_maps_machine(monkeypatch, machine: str, expected: str) -> None:
     """Test that current_arch maps to the machine architecture."""
-    monkeypatch.setattr(r.platform, "machine", lambda: "arm64")
-    assert r.current_arch() == "arm64"
+    monkeypatch.setattr(r.platform, "machine", lambda: machine)
+    assert r.current_arch() == expected

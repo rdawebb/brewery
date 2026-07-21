@@ -49,10 +49,20 @@ def _systemctl(*args: str) -> subprocess.CompletedProcess:
 
     Returns:
         The completed process.
+
+    Raises:
+        SysError: If systemctl is absent (a Linux without systemd, e.g. a
+            container or a non-systemd distribution).
     """
-    return subprocess.run(
-        ["systemctl", "--user", *args], capture_output=True, text=True
-    )
+    try:
+        return subprocess.run(
+            ["systemctl", "--user", *args], capture_output=True, text=True
+        )
+
+    except FileNotFoundError:
+        raise SysError(
+            "systemctl not found — the brewery daemon needs systemd on Linux"
+        )
 
 
 def render_units() -> tuple[str, str, list[str]]:

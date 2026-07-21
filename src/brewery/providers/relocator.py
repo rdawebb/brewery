@@ -667,6 +667,13 @@ def _run_install_name_tool(path: Path, args: list[str]) -> None:
                 path, f"install_name_tool failed: {exc.stderr.strip()}"
             )
 
+        except FileNotFoundError:
+            raise RelocationError(
+                path,
+                "install_name_tool not found on PATH; "
+                "install the Xcode Command Line Tools",
+            )
+
 
 def _rewrite_str(path: Path, old: str, subs: dict[bytes, bytes]) -> str | None:
     """Substitute placeholders in an ELF linkage string; None if unchanged.
@@ -740,6 +747,11 @@ def _run_patchelf(path: Path, args: list[str]) -> None:
         except subprocess.CalledProcessError as exc:
             raise RelocationError(path, f"patchelf failed: {exc.stderr.strip()}")
 
+        except FileNotFoundError:
+            raise RelocationError(
+                path, "patchelf not found on PATH; install it to relocate ELF binaries"
+            )
+
 
 def _chunk_paths(paths: list[Path], budget: int) -> list[list[Path]]:
     """Split paths into chunks whose combined byte length stays under `budget`.
@@ -795,6 +807,12 @@ def _codesign(paths: list[Path]) -> None:
             except subprocess.CalledProcessError as exc:
                 raise RelocationError(
                     chunk[0], f"codesign failed: {exc.stderr.strip()}"
+                )
+
+            except FileNotFoundError:
+                raise RelocationError(
+                    chunk[0],
+                    "codesign not found on PATH; install the Xcode Command Line Tools",
                 )
 
 

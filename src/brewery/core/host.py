@@ -8,6 +8,10 @@ from dataclasses import dataclass
 _SONOMA = 14
 _BIG_SUR = 11
 
+# Machine names reporting a 64-bit ARM host: Darwin is "arm64", Linux
+# "aarch64"; both map to brew's single `arm64` token
+ARM_MACHINES = frozenset({"arm64", "aarch64"})
+
 
 @dataclass(frozen=True, slots=True)
 class Platform:
@@ -24,8 +28,7 @@ def _detect_arch() -> str:
     Returns:
         "arm64" for Apple Silicon / aarch64, else "amd64".
     """
-    machine = _platform.machine()
-    return "arm64" if machine in ("arm64", "aarch64") else "amd64"
+    return "arm64" if _platform.machine() in ARM_MACHINES else "amd64"
 
 
 def current_platform() -> Platform | None:

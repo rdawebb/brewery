@@ -10,6 +10,8 @@ from pathlib import Path
 
 import orjson
 
+from brewery.core.host import ARM_MACHINES
+
 RECEIPT_NAME = "INSTALL_RECEIPT.json"
 
 
@@ -236,9 +238,13 @@ def read_receipt(keg_dir: Path) -> dict | None:
 def current_arch() -> str:
     """brew's arch token: 'arm64' or 'x86_64'. Fallback for all-bottle receipts.
 
+    Note this is the tab token, not the bottle-tag token: Intel is `'x86_64'`
+    here where a bottle tag would say `amd64`.
+
     Returns:
-        `'arm64'` on Apple Silicon, otherwise the raw `platform.machine()` string.
+        `'arm64'` on any 64-bit ARM host (Apple Silicon reports `arm64`, Linux
+        `aarch64`), otherwise the raw `platform.machine()` string.
     """
     machine = platform.machine()
 
-    return "arm64" if machine == "arm64" else machine
+    return "arm64" if machine in ARM_MACHINES else machine
