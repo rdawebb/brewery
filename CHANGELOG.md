@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-21
+
 ### Added
 
 - Linux support: bottle selection and install at the default `/home/linuxbrew/.linuxbrew` prefix, ELF dynamic-linkage relocation via `patchelf` for non-default prefixes, and a systemd user-timer background daemon
@@ -74,7 +76,8 @@ Initial release.
 - Passthrough of unknown commands to `brew`
 - Package size calculation
 
-[Unreleased]: https://github.com/rdawebb/brewery/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/rdawebb/brewery/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/rdawebb/brewery/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/rdawebb/brewery/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rdawebb/brewery/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rdawebb/brewery/releases/tag/v0.1.0
