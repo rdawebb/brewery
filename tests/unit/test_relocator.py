@@ -251,16 +251,22 @@ def _dep(full_name: str, *, declared_directly: bool = True) -> RuntimeDependency
 
 @pytest.fixture
 def system_perl(monkeypatch):
-    """Pretend only /usr/bin/perl5.34 is present on the host.
+    """Pretend only /usr/bin/perl5.34 is present, on a macOS host.
 
-    Keeps the perl-path resolution off the real filesystem, which otherwise
-    varies by macOS version.
+    Keeps the perl-path resolution off the real filesystem (which varies by
+    macOS version) and pins the host platform so the token tests behave
+    identically on macOS and Linux CI runners.
 
     Args:
         monkeypatch: The monkeypatch fixture.
     """
     monkeypatch.setattr(
         r.Path, "exists", lambda self: str(self) == "/usr/bin/perl5.34", raising=False
+    )
+    monkeypatch.setattr(
+        r,
+        "current_platform",
+        lambda: Platform(arch="arm64", os="macos", macos_major=14),
     )
 
 
@@ -359,6 +365,29 @@ class TestFormulaTokens:
             runtime_deps=[_dep("openjdk-headless")],
         )
         assert "@@HOMEBREW_JAVA@@" not in tokens
+
+    def test_perl_unversioned_on_linux(self, brew_paths, monkeypatch) -> None:
+        """Tests that Linux uses the unversioned /usr/bin/perl (no system perlX.Y)."""
+        monkeypatch.setattr(
+            r, "current_platform", lambda: Platform(arch="amd64", os="linux")
+        )
+        tokens = r.formula_tokens(
+            brew_paths["prefix"],
+            name="cloc",
+            runtime_deps=[],
+            built_on={"preferred_perl": "5.34"},
+        )
+        assert tokens["@@HOMEBREW_PERL@@"] == "/usr/bin/perl"
+
+    def test_java_resolves_to_libexec_on_linux(self, brew_paths, monkeypatch) -> None:
+        """Tests that on Linux JAVA_HOME is the keg's libexec, not the .jdk bundle."""
+        monkeypatch.setattr(
+            r, "current_platform", lambda: Platform(arch="amd64", os="linux")
+        )
+        tokens = r.formula_tokens(
+            brew_paths["prefix"], name="jenkins", runtime_deps=[_dep("openjdk@21")]
+        )
+        assert tokens["@@HOMEBREW_JAVA@@"] == "/opt/homebrew/opt/openjdk@21/libexec"
 
 
 @pytest.fixture

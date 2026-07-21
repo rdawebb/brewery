@@ -20,7 +20,7 @@ from enum import Enum
 from pathlib import Path
 
 from brewery.core.errors import RelocationError
-from brewery.core.host import preferred_perl_version
+from brewery.core.host import current_platform, preferred_perl_version
 from brewery.providers.receipt import RuntimeDependency
 
 # Mach-O Constants
@@ -89,8 +89,10 @@ _OPENJDK_RE = re.compile(r"\Aopenjdk(@\d+(?:\.\d+)*)?\Z")
 # Guards the tab's `preferred_perl` before it is pasted into a shebang path
 _PERL_VERSION_RE = re.compile(r"\A\d+\.\d+\Z")
 
-# JAVA_HOME within an openjdk keg on macOS (brew's macOS Keg override)
+# JAVA_HOME within an openjdk keg: macOS nests it in the .jdk bundle, while
+# Linux keeps it directly under libexec (brew's per-OS Keg override)
 _MACOS_JAVA_HOME_SUFFIX = "libexec/openjdk.jdk/Contents/Home"
+_LINUX_JAVA_HOME_SUFFIX = "libexec"
 
 # Bounded thread pool for the regular-file relocation phase
 _RELOCATE_WORKERS = min(8, os.cpu_count() or 4)
@@ -170,19 +172,25 @@ def build_substitutions(
     return dict(sorted(subs.items(), key=lambda kv: len(kv[0]), reverse=True))
 
 
-def _perl_path(prefix: Path, brewed: bool, built_on: dict[str, object] | None) -> str:
+def _perl_path(
+    prefix: Path, brewed: bool, built_on: dict[str, object] | None, *, is_linux: bool
+) -> str:
     """Resolve the `@@HOMEBREW_PERL@@` override path.
 
     Args:
         prefix: The Homebrew prefix path.
         brewed: Whether the formula depends on the brewed perl.
         built_on: The bottle tab's `built_on` block, if any.
+        is_linux: Whether the host is Linux (unversioned system perl).
 
     Returns:
         The absolute path to the perl interpreter.
     """
     if brewed:
         return str(prefix / "opt" / "perl" / "bin" / "perl")
+
+    if is_linux:
+        return "/usr/bin/perl"
 
     built_version = (built_on or {}).get("preferred_perl")
     if isinstance(built_version, str) and _PERL_VERSION_RE.match(built_version):
@@ -211,19 +219,24 @@ def formula_tokens(
     Returns:
         The formula-specific token map, suitable for `relocate_keg`'s `extra_tokens`.
     """
+    plat = current_platform()
+    is_linux = plat is not None and plat.os == "linux"
+
     brewed_perl = name == "perl" or any(
         d.full_name == "perl" and d.declared_directly for d in runtime_deps
     )
-    tokens = {"@@HOMEBREW_PERL@@": _perl_path(prefix, brewed_perl, built_on)}
+    tokens = {
+        "@@HOMEBREW_PERL@@": _perl_path(
+            prefix, brewed_perl, built_on, is_linux=is_linux
+        )
+    }
 
     openjdk = next(
         (d.full_name for d in runtime_deps if _OPENJDK_RE.match(d.full_name)), None
     )
     if openjdk:
-        # On macOS the JDK sits inside the bundle, not directly under libexec
-        tokens["@@HOMEBREW_JAVA@@"] = str(
-            prefix / "opt" / openjdk / _MACOS_JAVA_HOME_SUFFIX
-        )
+        suffix = _LINUX_JAVA_HOME_SUFFIX if is_linux else _MACOS_JAVA_HOME_SUFFIX
+        tokens["@@HOMEBREW_JAVA@@"] = str(prefix / "opt" / openjdk / suffix)
 
     return tokens
 

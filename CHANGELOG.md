@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added
+
+- Linux support: bottle selection and install at the default `/home/linuxbrew/.linuxbrew` prefix, ELF dynamic-linkage relocation via `patchelf` for non-default prefixes, and a systemd user-timer background daemon
+- Log directory honours `$XDG_STATE_HOME` on Linux
+
 ## [0.3.0] - 2026-07-19
 
 ### Added

@@ -73,7 +73,8 @@ class TestGetBreweryEnv:
         (cache_dir / "brew_prefix.txt").write_text("/opt/homebrew\n")
         (cache_dir / "brew_repository.txt").write_text("/opt/homebrew\n")
 
-        def _fail(*args, **kwargs):
+        def _fail(*args, **kwargs) -> None:
+            """Raise an AssertionError to simulate a failed brew invocation."""
             raise AssertionError("brew should not be called when cache exists")
 
         # Any subprocess use here would be a regression
@@ -103,9 +104,11 @@ class TestGetBreweryEnv:
 
     def test_brew_not_found_uses_arm_fallback(self, cache_dir, monkeypatch) -> None:
         """Test that a missing brew on arm64 falls back to /opt/homebrew."""
+        monkeypatch.setattr(config.platform, "system", lambda: "Darwin")
         monkeypatch.setattr(config.platform, "machine", lambda: "arm64")
 
-        def _raise(*a, **k):
+        def _raise(*a, **k) -> None:
+            """Raise a FileNotFoundError to simulate a missing brew command."""
             raise FileNotFoundError
 
         monkeypatch.setattr(config.subprocess, "check_output", _raise)
@@ -114,20 +117,38 @@ class TestGetBreweryEnv:
 
     def test_brew_not_found_uses_intel_fallback(self, cache_dir, monkeypatch) -> None:
         """Test that a missing brew on Intel falls back to /usr/local."""
+        monkeypatch.setattr(config.platform, "system", lambda: "Darwin")
         monkeypatch.setattr(config.platform, "machine", lambda: "x86_64")
 
-        def _raise(*a, **k):
+        def _raise(*a, **k) -> None:
+            """Raise a FileNotFoundError to simulate a missing brew command."""
             raise FileNotFoundError
 
         monkeypatch.setattr(config.subprocess, "check_output", _raise)
         env = get_brewery_env()
         assert env.prefix == Path("/usr/local")
 
+    def test_brew_not_found_uses_linux_fallback(self, cache_dir, monkeypatch) -> None:
+        """Test that a missing brew on Linux falls back to /home/linuxbrew/.linuxbrew."""
+        monkeypatch.setattr(config.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(config.platform, "machine", lambda: "x86_64")
+
+        def _raise(*a, **k) -> None:
+            """Raise a FileNotFoundError to simulate a missing brew command."""
+            raise FileNotFoundError
+
+        monkeypatch.setattr(config.subprocess, "check_output", _raise)
+        env = get_brewery_env()
+        assert env.prefix == Path("/home/linuxbrew/.linuxbrew")
+        assert env.repository == Path("/home/linuxbrew/.linuxbrew/Homebrew")
+
     def test_brew_command_error_uses_fallback(self, cache_dir, monkeypatch) -> None:
         """Test that a failing brew invocation falls back rather than raising."""
+        monkeypatch.setattr(config.platform, "system", lambda: "Darwin")
         monkeypatch.setattr(config.platform, "machine", lambda: "arm64")
 
-        def _raise(*a, **k):
+        def _raise(*a, **k) -> None:
+            """Raise a CalledProcessError to simulate a failing brew invocation."""
             raise subprocess.CalledProcessError(returncode=1, cmd=["brew"])
 
         monkeypatch.setattr(config.subprocess, "check_output", _raise)
@@ -140,7 +161,8 @@ class TestGetBreweryEnv:
         """Test that a fallback prefix is not persisted to the cache file."""
         monkeypatch.setattr(config.platform, "machine", lambda: "arm64")
 
-        def _raise(*a, **k):
+        def _raise(*a, **k) -> None:
+            """Raise a FileNotFoundError to simulate a missing brew command."""
             raise FileNotFoundError
 
         monkeypatch.setattr(config.subprocess, "check_output", _raise)
@@ -161,9 +183,11 @@ class TestGetBreweryEnv:
 
         original_read_text = Path.read_text
 
-        def _boom(self, *a, **k):
+        def _boom(self, *a, **k) -> str:
+            """Raise an OSError to simulate an unreadable cache file."""
             if self == prefix_file:
                 raise OSError("unreadable")
+
             return original_read_text(self, *a, **k)
 
         monkeypatch.setattr(Path, "read_text", _boom)
@@ -177,7 +201,8 @@ class TestGetBreweryEnv:
         """Test that a second call returns the cached env without rediscovery."""
         calls = {"n": 0}
 
-        def _once(*a, **k):
+        def _once(*a, **k) -> str:
+            """Return the cached brew prefix without incrementing the call count."""
             calls["n"] += 1
             return "/opt/homebrew\n"
 
