@@ -11,6 +11,7 @@ import pytest
 from brewery.core.errors import SysError, UserError
 from brewery.core.settings import load_settings, write_setting
 from brewery.daemon import launchd as daemon_mod
+from brewery.daemon import systemd as systemd_mod
 from brewery.daemon.launchd import (
     PLIST_LABEL,
     _gui_domain,
@@ -267,3 +268,153 @@ class TestServiceControl:
             lambda *a, **kw: subprocess.CompletedProcess(a[0], returncode=1),
         )
         assert daemon_mod.is_running() is False
+
+
+class TestSystemdBackend:
+    """Tests for the systemd (user) backend, with systemctl mocked."""
+
+    def _which(self, name: str) -> str | None:
+        """A shutil.which stub resolving python3 and brew.
+
+        Args:
+            name: The executable being looked up.
+
+        Returns:
+            A fake absolute path, or None for anything else.
+        """
+        return {
+            "python3": "/usr/bin/python3",
+            "brew": "/home/linuxbrew/.linuxbrew/bin/brew",
+        }.get(name)
+
+    def test_render_units_fills_interpreter_path_and_interval(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Test that the rendered units carry the venv python, brew PATH, interval."""
+        monkeypatch.setattr(systemd_mod.sys, "executable", "/venv/bin/python3")
+        monkeypatch.setattr(systemd_mod.shutil, "which", self._which)
+        monkeypatch.setenv("BREWERY_CONFIG_HOME", str(tmp_path / "config"))
+        write_setting("daemon.catalog_refresh_interval_mins", "45")
+
+        service, timer, warnings = systemd_mod.render_units()
+
+        assert warnings == []
+        assert (
+            "ExecStart=/venv/bin/python3 -m brewery.daemon.catalog_refresh" in service
+        )
+        assert "Environment=PATH=/home/linuxbrew/.linuxbrew/bin:" in service
+        assert "OnUnitActiveSec=2700" in timer  # 45 * 60
+
+    def test_render_units_warns_when_brew_missing(self, tmp_path, monkeypatch) -> None:
+        """Test that a missing brew costs only the brew PATH entry, with a warning."""
+        monkeypatch.setattr(systemd_mod.sys, "executable", "/venv/bin/python3")
+        monkeypatch.setattr(
+            systemd_mod.shutil,
+            "which",
+            lambda name: None if name == "brew" else "/usr/bin/python3",
+        )
+
+        service, _, warnings = systemd_mod.render_units()
+
+        assert len(warnings) == 1 and "brew" in warnings[0]
+        assert "Environment=PATH=/usr/local/bin:/usr/bin:/bin" in service
+
+    def test_start_writes_units_and_enables_timer(self, tmp_path, monkeypatch) -> None:
+        """Test that start writes both units and enables the timer via systemctl."""
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+        monkeypatch.setattr(systemd_mod.sys, "executable", "/venv/bin/python3")
+        monkeypatch.setattr(systemd_mod.shutil, "which", self._which)
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *a, **kw) -> subprocess.CompletedProcess:
+            calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(systemd_mod.subprocess, "run", fake_run)
+
+        warnings = systemd_mod.start()
+
+        unit_dir = tmp_path / "config" / "systemd" / "user"
+        assert (unit_dir / systemd_mod.SERVICE_NAME).is_file()
+        assert (unit_dir / systemd_mod.TIMER_NAME).is_file()
+        assert warnings == []
+        assert ["systemctl", "--user", "daemon-reload"] in calls
+        assert [
+            "systemctl",
+            "--user",
+            "enable",
+            "--now",
+            systemd_mod.TIMER_NAME,
+        ] in calls
+
+    def test_start_raises_when_enable_fails(self, tmp_path, monkeypatch) -> None:
+        """Test that a non-zero `systemctl enable` surfaces as a SysError."""
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+        monkeypatch.setattr(systemd_mod.shutil, "which", self._which)
+
+        def fake_run(cmd, *a, **kw) -> subprocess.CompletedProcess:
+            rc = 1 if "enable" in cmd else 0
+            return subprocess.CompletedProcess(
+                cmd, returncode=rc, stdout="", stderr="x"
+            )
+
+        monkeypatch.setattr(systemd_mod.subprocess, "run", fake_run)
+
+        with pytest.raises(SysError, match="enable failed") as exc:
+            systemd_mod.start()
+
+        assert exc.value.context["returncode"] == 1
+
+    def test_stop_raises_when_not_installed(self, tmp_path, monkeypatch) -> None:
+        """Test that stopping an uninstalled daemon is a UserError."""
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty"))
+
+        with pytest.raises(UserError, match="not installed"):
+            systemd_mod.stop()
+
+    def test_stop_disables_and_removes_units(self, tmp_path, monkeypatch) -> None:
+        """Test that stop disables the timer and deletes both unit files."""
+        unit_dir = tmp_path / "config" / "systemd" / "user"
+        unit_dir.mkdir(parents=True)
+        (unit_dir / systemd_mod.TIMER_NAME).write_text("[Timer]\n")
+        (unit_dir / systemd_mod.SERVICE_NAME).write_text("[Service]\n")
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+
+        calls: list[list[str]] = []
+        monkeypatch.setattr(
+            systemd_mod.subprocess,
+            "run",
+            lambda cmd, *a, **kw: (
+                calls.append(list(cmd))
+                or subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+            ),
+        )
+
+        systemd_mod.stop()
+
+        assert not (unit_dir / systemd_mod.TIMER_NAME).exists()
+        assert not (unit_dir / systemd_mod.SERVICE_NAME).exists()
+        assert [
+            "systemctl",
+            "--user",
+            "disable",
+            "--now",
+            systemd_mod.TIMER_NAME,
+        ] in calls
+
+    def test_is_running_reflects_is_active_returncode(self, monkeypatch) -> None:
+        """Test that is_running is a pure predicate over `systemctl is-active`."""
+        monkeypatch.setattr(
+            systemd_mod.subprocess,
+            "run",
+            lambda *a, **kw: subprocess.CompletedProcess(a[0], returncode=0),
+        )
+        assert systemd_mod.is_running() is True
+
+        monkeypatch.setattr(
+            systemd_mod.subprocess,
+            "run",
+            lambda *a, **kw: subprocess.CompletedProcess(a[0], returncode=3),
+        )
+        assert systemd_mod.is_running() is False

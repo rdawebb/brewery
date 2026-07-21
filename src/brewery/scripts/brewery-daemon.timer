@@ -1,0 +1,10 @@
+[Unit]
+Description=Brewery background catalog refresh timer
+
+[Timer]
+OnBootSec={interval_sec}
+OnUnitActiveSec={interval_sec}
+Persistent=true
+
+[Install]
+WantedBy=timers.target

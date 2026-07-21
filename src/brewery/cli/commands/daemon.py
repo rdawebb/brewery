@@ -6,8 +6,8 @@ from typer_extensions import ExtendedTyper
 
 from brewery.cli.context import console
 from brewery.cli.error_formatting import command_error
-from brewery.daemon import launchd
-from brewery.daemon.launchd import PLIST_LABEL
+from brewery import daemon
+from brewery.daemon import SERVICE_LABEL
 
 daemon_app = ExtendedTyper(help="Manage the brewery background daemon.")
 
@@ -26,9 +26,9 @@ def _print_warnings(warnings: list[str]) -> None:
 @command_error()
 def start() -> None:
     """Activate the background daemon."""
-    _print_warnings(launchd.start())
+    _print_warnings(daemon.start())
     console.print(
-        f"\n✓ Daemon installed and loaded ({PLIST_LABEL})\n", style="bold green"
+        f"\n✓ Daemon installed and loaded ({SERVICE_LABEL})\n", style="bold green"
     )
 
 
@@ -36,24 +36,24 @@ def start() -> None:
 @command_error()
 def stop() -> None:
     """Deactivate the background daemon."""
-    launchd.stop()
-    console.print(f"\n✓ Daemon removed ({PLIST_LABEL})\n", style="bold green")
+    daemon.stop()
+    console.print(f"\n✓ Daemon removed ({SERVICE_LABEL})\n", style="bold green")
 
 
 @daemon_app.command(aliases=["r"])
 @command_error()
 def restart() -> None:
     """Restart the background daemon."""
-    launchd.stop()
-    _print_warnings(launchd.start())
-    console.print(f"\n✓ Daemon restarted ({PLIST_LABEL})\n", style="bold green")
+    daemon.stop()
+    _print_warnings(daemon.start())
+    console.print(f"\n✓ Daemon restarted ({SERVICE_LABEL})\n", style="bold green")
 
 
 @daemon_app.command(aliases=["st", "stat"])
 @command_error()
 def status() -> None:
     """Check whether the daemon is currently active."""
-    if launchd.is_running():
+    if daemon.is_running():
         console.print(
             "\n✓ Background refresh + cleanup is active\n", style="bold green"
         )
