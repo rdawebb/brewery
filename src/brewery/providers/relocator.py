@@ -241,25 +241,6 @@ def formula_tokens(
     return tokens
 
 
-def _unresolved_token(value: bytes) -> str | None:
-    """Return the first placeholder left in `value`, or None if there is none.
-
-    Args:
-        value: The byte string to inspect, after substitution.
-
-    Returns:
-        The surviving placeholder as text, or None.
-    """
-    start = value.find(_PLACEHOLDER_MARKER)
-    if start == -1:
-        return None
-
-    end = value.find(b"@@", start + len(_PLACEHOLDER_MARKER))
-    token = value[start : end + 2] if end != -1 else value[start : start + 40]
-
-    return token.decode("utf-8", "replace")
-
-
 def _reject_unresolved(path: Path, value: bytes) -> None:
     """Raise if a placeholder survived substitution.
 
@@ -273,9 +254,15 @@ def _reject_unresolved(path: Path, value: bytes) -> None:
     Raises:
         RelocationError: If a placeholder remains.
     """
-    token = _unresolved_token(value)
-    if token is not None:
-        raise RelocationError(path, f"unresolved placeholder {token}")
+    start = value.find(_PLACEHOLDER_MARKER)
+    if start == -1:
+        return
+
+    end = value.find(b"@@", start + len(_PLACEHOLDER_MARKER))
+    token = value[start : end + 2] if end != -1 else value[start : start + 40]
+    raise RelocationError(
+        path, f"unresolved placeholder {token.decode('utf-8', 'replace')}"
+    )
 
 
 def _apply(value: bytes, subs: dict[bytes, bytes]) -> bytes:

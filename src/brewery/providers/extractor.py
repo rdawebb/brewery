@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tarfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import BinaryIO
 
@@ -12,6 +13,14 @@ from brewery.core.errors import ExtractionError
 
 _GZIP_MAGIC = b"\x1f\x8b"
 _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+
+# Decompression-bomb ceilings: bottles are sha256-pinned to the catalog feed, so
+# these only bite on a hostile or corrupt feed; the caps are set above any real
+# keg, so they never fire in normal use. In streaming mode tarfile reads exactly
+# the header-declared byte count per member, so summing `member.size` bounds the
+# decompressed stream.
+_MAX_EXTRACTED_BYTES = 17_179_869_184  # 16 GiB
+_MAX_MEMBERS = 500_000
 
 
 def detect_format(archive: Path) -> str:
@@ -37,41 +46,78 @@ def detect_format(archive: Path) -> str:
     )
 
 
-def _keg_filter(member: tarfile.TarInfo, dest_path: str) -> tarfile.TarInfo:
-    """data-filter security checks, but preserve the member's exact mode, and permit
-    the symlinks brew creates verbatim.
+_TarFilter = Callable[[tarfile.TarInfo, str], tarfile.TarInfo]
+
+
+def _keg_filter(archive: Path | None = None) -> _TarFilter:
+    """Build the per-member extraction filter for one archive.
+
+    The filter applies the data-filter security checks, but preserves the
+    member's exact mode, permits the symlinks brew creates verbatim, and
+    rejects the archive before anything is written once it exceeds the
+    decompression-bomb ceilings.
 
     Args:
-        member: The tarfile member to filter.
-        dest_path: The destination path for the extracted files.
+        archive: The archive being extracted, for error context.
 
     Returns:
-        The filtered tarfile member.
+        A filter callable for `tarfile.extractall`, holding the running totals.
     """
-    try:
-        safe = tarfile.data_filter(member, dest_path)  # Raises FilterError if unsafe
+    totals = {"bytes": 0, "members": 0}
 
-    except (tarfile.AbsoluteLinkError, tarfile.LinkOutsideDestinationError):
-        if member.issym():
-            return member.replace(mode=member.mode & 0o777, deep=False)
-        raise
+    def _filter(member: tarfile.TarInfo, dest_path: str) -> tarfile.TarInfo:
+        """Apply the data-filter security checks and track the running totals.
 
-    # Keep the bottle's real permission bits (read-only files stay read-only)
-    return safe.replace(mode=member.mode & 0o777, deep=False)
+        Args:
+            member: The tar member being filtered.
+            dest_path: The destination path for the member.
+
+        Returns:
+            The filtered tar member.
+        """
+        totals["bytes"] += member.size
+        totals["members"] += 1
+
+        if totals["bytes"] > _MAX_EXTRACTED_BYTES:
+            raise ExtractionError(
+                f"bottle expands past the {_MAX_EXTRACTED_BYTES} byte extraction "
+                f"limit at member {member.name!r}",
+                archive=archive,
+            )
+
+        if totals["members"] > _MAX_MEMBERS:
+            raise ExtractionError(
+                f"bottle holds more than {_MAX_MEMBERS} members",
+                archive=archive,
+            )
+
+        try:
+            safe = tarfile.data_filter(member, dest_path)  # FilterError if unsafe
+
+        except (tarfile.AbsoluteLinkError, tarfile.LinkOutsideDestinationError):
+            if member.issym():
+                return member.replace(mode=member.mode & 0o777, deep=False)
+            raise
+
+        # Keep the bottle's real permission bits (read-only files stay read-only)
+        return safe.replace(mode=member.mode & 0o777, deep=False)
+
+    return _filter
 
 
-def _extract_stream(fileobj: BinaryIO, dest: Path) -> None:
+def _extract_stream(fileobj: BinaryIO, dest: Path, tar_filter: _TarFilter) -> None:
     """Extract a tar archive from a file-like object into a directory.
 
     Args:
         fileobj: The file-like object to read the archive from.
         dest: The directory to extract the archive into.
+        tar_filter: The per-member filter to apply.
     """
-    # 'r|*' auto-detects gzip vs uncompressed in streaming mode. The zstd path
+    # 'r|*' auto-detects gzip vs uncompressed in streaming mode; the zstd path
     # passes an already-decompressed (raw) tar stream, which reads as
-    # uncompressed; the gzip path is decompressed here.
+    # uncompressed; the gzip path is decompressed here
     with tarfile.open(fileobj=fileobj, mode="r|*") as tar:
-        tar.extractall(dest, filter=_keg_filter)
+        tar.extractall(dest, filter=tar_filter)
 
 
 def extract_bottle(archive: Path, dest: Path) -> Path:
@@ -90,16 +136,17 @@ def extract_bottle(archive: Path, dest: Path) -> Path:
     """
     fmt = detect_format(archive)
     dest.mkdir(parents=True, exist_ok=True)
+    tar_filter = _keg_filter(archive=archive)
 
     try:
         if fmt == "gzip":
             with archive.open("rb") as fh:
-                _extract_stream(fh, dest)
+                _extract_stream(fh, dest, tar_filter)
 
         else:  # zstd
             dctx = zstandard.ZstdDecompressor()
             with archive.open("rb") as fh, dctx.stream_reader(fh) as reader:
-                _extract_stream(reader, dest)
+                _extract_stream(reader, dest, tar_filter)
 
     except tarfile.FilterError as exc:
         raise ExtractionError(

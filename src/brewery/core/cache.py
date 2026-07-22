@@ -97,28 +97,9 @@ class Cache:
             return None
 
         try:
-            data: Any = orjson.loads(f.read_bytes())
-            token: str = self._update_token()
+            raw: bytes = f.read_bytes()
 
-            if token == data.get("_token"):
-                log.info(event="cache_hit", key=key, namespace=self.cache_path.name)
-                return data.get("value")
-
-            else:
-                log.debug(
-                    event="cache_invalid", key=key, namespace=self.cache_path.name
-                )
-                return None
-
-        except orjson.JSONDecodeError:
-            log.warning(
-                event="cache_corrupted",
-                key=key,
-                namespace=self.cache_path.name,
-                exc_info=True,
-            )
-
-        except Exception as e:
+        except OSError as e:
             log.error(
                 event="cache_read_error",
                 key=key,
@@ -131,6 +112,32 @@ class Cache:
                 operation="read",
             ) from e
 
+        try:
+            data: Any = orjson.loads(raw)
+
+        except orjson.JSONDecodeError:
+            log.warning(
+                event="cache_corrupted",
+                key=key,
+                namespace=self.cache_path.name,
+                exc_info=True,
+            )
+            return None
+
+        if not isinstance(data, dict):
+            log.warning(
+                event="cache_corrupted",
+                key=key,
+                namespace=self.cache_path.name,
+                reason="payload is not an object",
+            )
+            return None
+
+        if self._update_token() == data.get("_token"):
+            log.info(event="cache_hit", key=key, namespace=self.cache_path.name)
+            return data.get("value")
+
+        log.debug(event="cache_invalid", key=key, namespace=self.cache_path.name)
         return None
 
     def set(self, key: str, value: Any) -> None:
@@ -215,7 +222,16 @@ class CacheManager:
         """
         cached: Any = self.cache.get(self._RECORDS_KEY)
         if cached is not None:
-            return [InstalledRecord._record_from_cache_dict(d) for d in cached]
+            try:
+                return [InstalledRecord._record_from_cache_dict(d) for d in cached]
+
+            # Rebuild a payload written by an older/truncated record schema
+            except Exception:
+                log.warning(
+                    event="installed_records_unreadable",
+                    key=self._RECORDS_KEY,
+                    exc_info=True,
+                )
 
         records: list[InstalledRecord] = scan_installed(env=self.env)
         attach_sizes(records=records)

@@ -10,6 +10,7 @@ from typing import Callable
 import pytest
 import zstandard
 
+from brewery.providers import extractor
 from brewery.providers.extractor import ExtractionError, extract_bottle
 
 pytestmark = pytest.mark.integration
@@ -273,6 +274,40 @@ def test_extract_rejects_unsafe_or_malformed(tmp_path, entries, match) -> None:
     else:
         with pytest.raises(ExtractionError, match=match):
             extract_bottle(arc, tmp_path / "stage")
+
+
+def test_extraction_stops_at_byte_ceiling(tmp_path, monkeypatch) -> None:
+    """Test that a bottle expanding past the byte cap is rejected mid-stream.
+
+    The cap is checked before the member is written, so the file that trips it
+    never lands on disk.
+    """
+    monkeypatch.setattr(extractor, "_MAX_EXTRACTED_BYTES", 4096)
+    raw = make_tar(
+        [
+            ("file", "foo/1.0/bin/small", b"x" * 1024, 0o644),
+            ("file", "foo/1.0/bin/huge", b"x" * 8192, 0o644),
+        ]
+    )
+    stage = tmp_path / "stage"
+    with pytest.raises(ExtractionError, match="extraction limit"):
+        extract_bottle(_archive(tmp_path, gzip.compress, raw), stage)
+
+    assert not (stage / "foo" / "1.0" / "bin" / "huge").exists()
+
+
+def test_extraction_stops_at_member_ceiling(tmp_path, monkeypatch) -> None:
+    """Test that an archive with too many members is rejected.
+
+    A byte cap alone misses the many-tiny-files shape, which exhausts inodes
+    rather than space.
+    """
+    monkeypatch.setattr(extractor, "_MAX_MEMBERS", 3)
+    raw = make_tar(
+        [("file", f"foo/1.0/bin/f{i}", b"x", 0o644) for i in range(10)],
+    )
+    with pytest.raises(ExtractionError, match="more than 3 members"):
+        extract_bottle(_archive(tmp_path, gzip.compress, raw), tmp_path / "stage")
 
 
 def test_corrupt_archive_raises(tmp_path) -> None:

@@ -41,10 +41,6 @@ check: lint format type
 pre:
     uv run prek run --all-files
 
-# Run the application
-run:
-    uv run python src/brewery/cli/main.py
-
 # Clean up temporary files
 clean:
     @which python3 > /dev/null && uv run python3 src/brewery/scripts/clean.py || uv run python src/brewery/scripts/clean.py

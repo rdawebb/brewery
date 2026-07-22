@@ -298,6 +298,67 @@ async def test_sha_mismatch_raises_and_leaves_no_artifact(tmp_path) -> None:
     assert list(tmp_path.glob("*.part")) == []  # Temp cleaned up
 
 
+async def test_body_longer_than_content_length_aborts(tmp_path) -> None:
+    """Test that a body overrunning its advertised length is aborted.
+
+    The sha256 can only be checked once the whole body is on disk, so an
+    unbounded response would fill the disk before integrity is consulted.
+    """
+    blob = _blob(20, size=64 * 1024)
+    ref = _ref(blob)
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        """Serve a body far longer than the Content-Length it advertises.
+
+        Args:
+            req: The HTTP request to handle.
+
+        Returns:
+            The HTTP response with the requested content.
+        """
+        return httpx.Response(200, content=blob, headers={"Content-Length": "1024"})
+
+    async with _make(tmp_path, handler) as dl:
+        with pytest.raises(DownloadError, match="exceeds 1024 bytes"):
+            await dl.fetch(ref)
+
+    assert not dl.cache_path(ref.sha256).exists()
+    assert list(tmp_path.glob("*.part")) == []
+
+
+async def test_unbounded_body_aborts_at_hard_cap(tmp_path, monkeypatch) -> None:
+    """Test that a response with no Content-Length is capped."""
+    monkeypatch.setattr(d, "_MAX_BOTTLE_BYTES", 1024)
+    blob = _blob(21, size=64 * 1024)
+    ref = _ref(blob)
+
+    async def _stream():
+        """Yield the blob in chunks under chunked transfer encoding.
+
+        Yields:
+            Successive chunks of the blob.
+        """
+        for i in range(0, len(blob), 4096):
+            yield blob[i : i + 4096]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        """Serve the blob without a Content-Length header.
+
+        Args:
+            req: The HTTP request to handle.
+
+        Returns:
+            The HTTP response with the requested content.
+        """
+        return httpx.Response(200, content=_stream())
+
+    async with _make(tmp_path, handler) as dl:
+        with pytest.raises(DownloadError, match="exceeds 1024 bytes"):
+            await dl.fetch(ref)
+
+    assert list(tmp_path.glob("*.part")) == []
+
+
 async def test_http_404_raises_without_retry(tmp_path) -> None:
     """Test that a 404 error raises an error without retrying."""
     calls: list = []

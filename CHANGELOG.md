@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Fixed
+
+- A corrupt or older-schema installed-records cache now rebuilds itself instead of failing the command
+
+### Security
+
+- Bottle downloads are capped, so a response that overruns its advertised length is aborted rather than filling the disk before the checksum is verified
+- Bottle extraction is capped on total size and member count, rejecting a decompression bomb before anything is written
+
 ## [0.4.0] - 2026-07-21
 
 ### Added

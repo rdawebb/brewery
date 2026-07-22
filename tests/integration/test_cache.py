@@ -36,6 +36,21 @@ class TestCacheTokenRoundTrip:
         c._file("k").write_text("{not json")
         assert c.get("k") is None
 
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param(b"[]", id="list"),
+            pytest.param(b'"just a string"', id="string"),
+            pytest.param(b"3", id="number"),
+            pytest.param(b"null", id="null"),
+        ],
+    )
+    def test_non_object_payload_returns_none(self, mock_env, payload) -> None:
+        """Test that valid JSON of the wrong shape is a miss, not a CacheError."""
+        c = Cache(namespace="t3-shape")
+        c._file("k").write_bytes(payload)
+        assert c.get("k") is None
+
     def test_token_change_invalidates(self, mock_env) -> None:
         """Test that a changed filesystem token misses the cached value.
 
@@ -144,6 +159,29 @@ class TestCacheManagerRecords:
         keg.mkdir(parents=True)
         names = {r.name for r in mgr.installed_records()}
         assert "ripgrep" in names
+
+    @pytest.mark.parametrize(
+        "cached",
+        [
+            pytest.param([{"kind": "formula", "version": "1.0"}], id="missing_name"),
+            pytest.param([{"name": "yazi", "kind": "nonsense"}], id="bad_kind"),
+            pytest.param(["not-a-dict"], id="not_a_dict"),
+        ],
+    )
+    def test_unreadable_records_rescan(
+        self, catalog, mock_env, mock_brew, cached
+    ) -> None:
+        """Test that an unrebuildable cached payload rescans instead of raising.
+
+        A record dict written by an older schema (or a truncated one) must be
+        treated as a miss; otherwise every command touching installed state
+        dies on a KeyError with no way back short of deleting the cache.
+        """
+        mgr = self._manager(catalog, mock_env)
+        mgr.cache.set(CacheManager._RECORDS_KEY, cached)
+
+        records = mgr.installed_records()
+        assert {r.name for r in records} == {"yazi", "act", "iina"}
 
     def test_installed_packages_sorted_by_kind_then_name(
         self, catalog, mock_env, mock_brew

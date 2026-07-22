@@ -23,6 +23,11 @@ _OCI_LAYER_ACCEPT = "application/vnd.oci.image.layer.v1.tar+gzip"
 _CHUNK = 1 << 20  # 1 MiB
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 
+# Hard ceiling on a downloaded bottle: the sha256 can only be checked once the
+# whole body is on disk, so a hostile or wedged response fills the disk before
+# integrity is ever consulted; set well above any real bottle.
+_MAX_BOTTLE_BYTES = 8_589_934_592  # 8 GiB
+
 # (downloaded_bytes, total_bytes_or_None)
 ProgressCb = Callable[[int, "int | None"], None]
 
@@ -228,10 +233,21 @@ class Downloader:
                     resp.raise_for_status()
                     total = int(resp.headers.get("Content-Length", 0)) or None
 
+                    # Trust the advertised length only as far as the hard cap;
+                    # an absent or oversized Content-Length falls back to it.
+                    ceiling = min(total or _MAX_BOTTLE_BYTES, _MAX_BOTTLE_BYTES)
+
                     async for chunk in resp.aiter_bytes(_CHUNK):
+                        downloaded += len(chunk)
+                        if downloaded > ceiling:
+                            raise DownloadError(
+                                f"response exceeds {ceiling} bytes; aborting",
+                                name=ref.name,
+                                url=ref.url,
+                            )
+
                         out.write(chunk)
                         hasher.update(chunk)
-                        downloaded += len(chunk)
                         if on_progress is not None:
                             on_progress(downloaded, total)
 
