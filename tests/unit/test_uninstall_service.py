@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import fcntl
+import os
+
+import pytest
+
 import brewery.providers.uninstall_service as svc
-from brewery.core.errors import BrewCommandError
+from brewery.core.errors import BrewCommandError, OperationInProgressError
+from brewery.core.locks import lock_path
 
 
 def _raise_os(c, p, name) -> None:
@@ -106,6 +112,49 @@ async def test_env_resolved_when_omitted(mock_env, monkeypatch) -> None:
     monkeypatch.setattr(svc, "_remove_formula", lambda c, p, name: seen.append((c, p)))
     await svc.run_uninstall(MockRepo(), ["yazi"])  # No env=
     assert seen == [(mock_env.cellar / "yazi", mock_env.prefix)]
+
+
+async def test_locked_rack_skips_the_brew_fallback(mock_env, monkeypatch) -> None:
+    """brew locks the same rack, so falling back to it would fail identically."""
+
+    def remove(c, p, name) -> None:
+        """Raise as though a peer process held the rack lock.
+
+        Args:
+            c: The cellar directory
+            p: The prefix directory
+            name: The name of the formula
+
+        Raises:
+            OperationInProgressError: Always, standing in for a locked rack
+        """
+        raise OperationInProgressError(str(c))
+
+    monkeypatch.setattr(svc, "_remove_formula", remove)
+    repo = MockRepo()
+    await svc.run_uninstall(repo, ["yazi"], env=mock_env)  # Should not raise
+
+    assert repo.formula.calls == []
+
+
+def test_remove_formula_refuses_a_locked_rack(tmp_path) -> None:
+    """The rack lock is really taken: a peer's hold keeps the kegs in place."""
+    cellar = tmp_path / "Cellar" / "tool"
+    (cellar / "1.0" / "bin").mkdir(parents=True)
+    prefix = tmp_path / "prefix"
+
+    path = lock_path(prefix, "tool")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        with pytest.raises(OperationInProgressError):
+            svc._remove_formula(cellar, prefix, "tool")
+
+    finally:
+        os.close(fd)
+
+    assert cellar.exists()
 
 
 def test_remove_formula_missing_dir_is_noop(tmp_path) -> None:

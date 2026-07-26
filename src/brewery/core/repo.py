@@ -10,6 +10,7 @@ from brewery.core.catalog import Catalog
 from brewery.core.config import BreweryENV, get_brewery_env
 from brewery.core.decorators import log_operation
 from brewery.core.errors import PackageNotFoundError
+from brewery.core.logging import BreweryLogger, get_logger
 from brewery.core.models import Package, PackageKind, PackageStatus
 from brewery.core.shell import run_brew
 from brewery.providers import brew
@@ -17,6 +18,8 @@ from brewery.providers import brew
 if TYPE_CHECKING:
     from brewery.providers.linker import LinkResult, UnlinkResult
     from brewery.providers.orchestrator import ProgressPort
+
+log: BreweryLogger = get_logger(name=__name__)
 
 
 class Repository:
@@ -431,6 +434,8 @@ class Repository:
         """
         import asyncio
 
+        from brewery.core.errors import OperationInProgressError
+        from brewery.core.locks import formula_lock
         from brewery.core.settings import load_settings
         from brewery.providers.cellar import rmtree
         from brewery.providers.retention import cleanup_candidates
@@ -439,10 +444,20 @@ class Repository:
         age = s.age_days if max_age_days is None else max_age_days
 
         env = self.cache_mgr.env or get_brewery_env()
+
+        def remove(keg: Path, name: str) -> None:
+            """Delete one stale keg under its formula's rack lock.
+
+            Args:
+                keg: The keg to delete.
+                name: The name of the formula.
+            """
+            with formula_lock(name, prefix=env.prefix):
+                rmtree(keg)
+
         installed = self.cache_mgr.installed_packages(kind=PackageKind.FORMULA)
         active = {Path(p.path) for p in installed if p.path}
-        # Reuse the already-attached size cache so the size cap never re-measures
-        # the active cellar (see providers.keg_sizes.attach_sizes).
+        # Reuse the already-attached size cache so it never re-measures the active cellar
         active_sizes = {
             Path(p.path): p.size_kb
             for p in installed
@@ -461,8 +476,12 @@ class Repository:
         ):
             label = f"{c.name} {c.version}"
             try:
-                await asyncio.to_thread(rmtree, c.keg)
+                await asyncio.to_thread(remove, c.keg, c.name)
                 removed.append(label)
+
+            except OperationInProgressError:
+                # There is mid-install process on this rack; the next sweep picks it up
+                log.info(event="cleanup_skipped_locked", keg=str(c.keg))
 
             except OSError as e:
                 failures.append((label, str(e)))

@@ -24,8 +24,10 @@ from pathlib import Path
 import orjson
 
 from brewery.core.errors import LinkError
+from brewery.core.locks import structure_lock
 
-# Serialises the link operations that mutate ownership of shared prefix directories
+# Serialises the link operations that mutate ownership of shared prefix directories;
+# paired with `structure_lock`, which extends the same exclusion across processes
 _STRUCTURE_LOCK = threading.Lock()
 
 # Top-level keg directories
@@ -733,8 +735,12 @@ def link_keg(
 
     # If the plan touches a shared directory or has conflicts, apply under the structure lock
     shared = plan.touches_shared or bool(overwrite and plan.conflicts)
-    guard = _STRUCTURE_LOCK if shared else contextlib.nullcontext()
-    with guard:
+    with contextlib.ExitStack() as stack:
+        if shared:
+            # In-process first, so only one thread per process queues on the file lock
+            stack.enter_context(_STRUCTURE_LOCK)
+            stack.enter_context(structure_lock(prefix))
+
         _apply_dirs_and_links(plan, prefix, result)
 
         if plan.dir_links or plan.explosions or (overwrite and plan.conflicts):
@@ -935,8 +941,8 @@ def unlink_keg(
         manifest = None
         candidates, prune_targets = [], set()
 
-    # Serialised against concurrent linking
-    with _STRUCTURE_LOCK:
+    # Serialised against concurrent linking, in this process and in peers
+    with _STRUCTURE_LOCK, structure_lock(prefix):
         if manifest is not None:
             exploded: list[Path] = []
             for rel in candidates:

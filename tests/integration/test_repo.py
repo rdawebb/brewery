@@ -899,3 +899,44 @@ class TestCleanup:
         assert not old.exists()  # Old stale: removed
         assert recent.exists()  # Recent stale: kept
         assert (cellar / "wget" / "2.0").exists()  # Active: kept
+
+    async def test_cleanup_skips_a_locked_rack(
+        self, brew, empty_catalog, monkeypatch
+    ) -> None:
+        """A rack mid-install is left for the next sweep, not reported as a failure."""
+        import fcntl
+        import os
+        import time
+
+        from brewery.core import config
+        from brewery.core.locks import lock_path
+        from brewery.core.repo import Repository
+        from brewery.providers.retention import mark_replaced
+
+        brew.formula(
+            "wget",
+            "2.0",
+            receipt={"source": {"tap": "homebrew/core"}, "runtime_dependencies": []},
+            link_opt=True,
+        )
+        monkeypatch.setattr(config, "_env_cache", brew.env)
+
+        old = brew.cellar / "wget" / "1.0"
+        old.mkdir(parents=True)
+        mark_replaced(old, by="2.0", at=int(time.time()) - 40 * 86400)
+
+        path = lock_path(brew.env.prefix, "wget")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            removed, failures = await Repository(
+                catalog=empty_catalog
+            ).cleanup_packages()
+
+        finally:
+            os.close(fd)
+
+        assert removed == []
+        assert failures == []  # Opportunistic: the daemon retries tomorrow
+        assert old.exists()

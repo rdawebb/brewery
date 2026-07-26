@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import shutil
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 import orjson
 import pytest
 
+from brewery.core import locks as core_locks
+from brewery.core.errors import OperationInProgressError
 from brewery.providers import linker
 from brewery.providers.linker import (
     _LINK_MANIFEST,
@@ -593,6 +597,66 @@ class TestLinkConcurrency:
         for i, (keg, _) in enumerate(kegs):
             assert _points_to(x11 / f"h{i}.h", keg / f"include/X11/h{i}.h")
             assert _points_to(prefix / "bin" / f"tool{i}", keg / "bin" / f"tool{i}")
+
+
+class TestCrossProcessStructureLock:
+    """The shared-directory pass is serialised against peer processes, not just threads."""
+
+    @pytest.fixture
+    def peer(self, monkeypatch) -> Callable[[Path], int]:
+        """Return a factory that holds the prefix's structure lock from another fd.
+
+        Also shortens the wait, so a contended test fails fast instead of
+        blocking for the production timeout.
+
+        Returns:
+            A callable `peer(prefix)` returning the locked descriptor.
+        """
+        monkeypatch.setattr(core_locks, "_STRUCTURE_TIMEOUT", 0.05)
+
+        def _hold(prefix: Path) -> int:
+            """Lock the structure lock file for `prefix`."""
+            path = core_locks.lock_path(prefix, "brewery", kind="structure")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+
+            return fd
+
+        return _hold
+
+    def test_link_refuses_while_a_peer_holds_it(self, keg_and_prefix, peer) -> None:
+        """A keg touching shared dirs cannot be linked behind a peer's back."""
+        keg, prefix = keg_and_prefix
+        fd = peer(prefix)
+        try:
+            with pytest.raises(OperationInProgressError):
+                link_keg(keg, prefix=prefix, name="openssl@3")
+
+        finally:
+            os.close(fd)
+
+        assert not (prefix / "lib" / "pkgconfig").exists()
+
+    def test_unlink_refuses_while_a_peer_holds_it(self, keg_and_prefix, peer) -> None:
+        """Unlinking waits on the same lock, so removals cannot interleave either."""
+        keg, prefix = keg_and_prefix
+        fd = peer(prefix)
+        try:
+            with pytest.raises(OperationInProgressError):
+                unlink_keg(keg, prefix=prefix, name="openssl@3")
+
+        finally:
+            os.close(fd)
+
+    def test_link_proceeds_once_released(self, keg_and_prefix, peer) -> None:
+        """The lock is advisory only: released, linking behaves normally."""
+        keg, prefix = keg_and_prefix
+        os.close(peer(prefix))
+
+        result = link_keg(keg, prefix=prefix, name="openssl@3")
+
+        assert "bin/openssl" in result.linked
 
 
 class TestUnlink:

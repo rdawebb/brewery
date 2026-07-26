@@ -6,8 +6,12 @@ import asyncio
 import shutil
 
 from brewery.core.config import BreweryENV, get_brewery_env
-from brewery.core.errors import BrewCommandError
+from brewery.core.errors import BrewCommandError, OperationInProgressError
+from brewery.core.locks import formula_lock
+from brewery.core.logging import BreweryLogger, get_logger
 from brewery.providers.linker import unlink_keg
+
+log: BreweryLogger = get_logger(name=__name__)
 
 
 async def run_uninstall(
@@ -28,6 +32,11 @@ async def run_uninstall(
                 _remove_formula, env.cellar / name, env.prefix, name
             )
 
+        except OperationInProgressError as exc:
+            # brew locks the same rack, so falling back to it would fail too;
+            # repo._verify_removed reports the survivor as a failure
+            log.warning(event="uninstall_rack_locked", formula=name, error=str(exc))
+
         except OSError:
             try:
                 await repo.formula.uninstall(names=[name])
@@ -43,11 +52,15 @@ def _remove_formula(cellar_dir, prefix, name: str) -> None:
         cellar_dir: <prefix>/Cellar/<name>.
         prefix: The Homebrew prefix.
         name: The formula name.
+
+    Raises:
+        OperationInProgressError: Another process holds the formula's rack lock.
     """
     if not cellar_dir.exists():
         return
 
-    for keg in sorted(p for p in cellar_dir.iterdir() if p.is_dir()):
-        unlink_keg(keg, prefix=prefix, name=name)  # realpath filter no-ops old kegs
+    with formula_lock(name, prefix=prefix):
+        for keg in sorted(p for p in cellar_dir.iterdir() if p.is_dir()):
+            unlink_keg(keg, prefix=prefix, name=name)  # realpath no-ops old kegs
 
-    shutil.rmtree(cellar_dir)
+        shutil.rmtree(cellar_dir)

@@ -23,8 +23,10 @@ from brewery.core.errors import (
     ExtractionError,
     LinkError,
     ManifestError,
+    OperationInProgressError,
     RelocationError,
 )
+from brewery.core.locks import formula_lock
 from brewery.core.logging import BreweryLogger, get_logger
 from brewery.providers.cellar import install_to_cellar, rmtree
 from brewery.providers.downloader import BottleRef, ProgressCb
@@ -381,7 +383,7 @@ class InstallReport:
 class _NativeResult:
     """Result of the in-thread native pipeline for one formula."""
 
-    stage: str | None  # None = success; else 'install' | 'link'
+    stage: str | None  # None = success; else 'lock' | 'install' | 'link'
     dest: Path | None = None
     error: str | None = None
 
@@ -764,6 +766,12 @@ class Orchestrator:
                 old,
             )
 
+        if result.stage == "lock":
+            # brew would contend on the same rack lock, so there is no fallback
+            report.add_note(name, f"lock: {result.error}")
+
+            return Outcome.FAILED
+
         if old is not None and result.stage != "install":
             await asyncio.to_thread(mark_replaced, old, by=fr.version)
 
@@ -828,7 +836,60 @@ class Orchestrator:
         rt_deps: list[RuntimeDependency],
         old_keg: Path | None = None,
     ) -> _NativeResult:
-        """Install a formula natively.
+        """Run the native install while holding the formula's rack lock.
+
+        The lock excludes both peer brewery processes and `brew` itself, and is
+        released before the caller's `brew` fallback runs.
+
+        Args:
+            name: The name of the formula.
+            fr: The formula row information.
+            bottle_path: The path to the bottle file.
+            tab: The bottle tab information.
+            on_request: Whether the installation was triggered by a user request.
+            aliases: Known aliases for the formula, written into the receipt.
+            rt_deps: Pre-built runtime dependency entries for the receipt.
+            old_keg: Optional path of the old keg to be removed.
+
+        Returns:
+            The result of the installation, with `stage='lock'` if the rack is
+            already locked by another process.
+        """
+        try:
+            with formula_lock(name, prefix=self.cfg.prefix):
+                return self._pour_bottle(
+                    name,
+                    fr,
+                    bottle_path,
+                    tab,
+                    on_request,
+                    aliases,
+                    rt_deps,
+                    old_keg,
+                )
+
+        except OperationInProgressError as exc:
+            log.warning(event="rack_locked", formula=name, error=str(exc))
+
+            return _NativeResult(stage="lock", error=str(exc))
+
+        except OSError as exc:
+            # The prefix itself is unusable (an unwritable lock directory or
+            # staging root), so hand the formula to brew rather than crashing
+            return _NativeResult(stage="install", error=str(exc))
+
+    def _pour_bottle(
+        self,
+        name: str,
+        fr: FormulaRowP,
+        bottle_path: Path,
+        tab: BottleTabInfo,
+        on_request: bool,
+        aliases: list[str],
+        rt_deps: list[RuntimeDependency],
+        old_keg: Path | None = None,
+    ) -> _NativeResult:
+        """Pour a bottle: extract, relocate, install to the Cellar, and link it.
 
         Args:
             name: The name of the formula.
@@ -887,7 +948,8 @@ class Orchestrator:
 
             link_keg(dest, prefix=self.cfg.prefix, name=name, keg_only=fr.keg_only)
 
-        except (LinkError, OSError) as exc:
+        # A contended structure lock is a link failure, not an install failure
+        except (LinkError, OperationInProgressError, OSError) as exc:
             return _NativeResult(stage="link", dest=dest, error=str(exc))
 
         return _NativeResult(stage=None, dest=dest)

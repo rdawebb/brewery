@@ -331,6 +331,39 @@ class ManifestParseError(ManifestError):
         super().__init__(message, context=ctx)
 
 
+class OperationInProgressError(SysError):
+    """Another process holds the lock for a path we need to mutate.
+
+    Raised when `flock` on `<prefix>/var/homebrew/locks/<rack>.formula.lock` is contended.
+    Retrying is pointless while the holder lives, so callers report it per-formula rather
+    than falling back to `brew`, which would contend on the same lock.
+    """
+
+    def __init__(
+        self,
+        subject: str,
+        *,
+        path: Path | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> None:
+        """Initialise OperationInProgressError.
+
+        Args:
+            subject: What is locked, in user-facing terms.
+            path: The lock file itself, for diagnostics.
+            context: Additional context information.
+        """
+        ctx: dict[str, Any] = context or {}
+        if path is not None:
+            ctx["lock"] = path
+
+        super().__init__(
+            f"another brew or brewery process has already locked {subject} - "
+            "wait for it to finish or terminate it to continue",
+            context=ctx,
+        )
+
+
 class RelocationError(SysError):
     """Raised when a keg cannot be relocated natively; per-formula fallback signal.
 
