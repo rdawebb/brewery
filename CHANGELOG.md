@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Changed
+
+- Install timestamps in the table view are shown as `YYYY-MM-DD HH:MM` local time instead of a full ISO-8601 string
+
 ### Fixed
 
 - A corrupt or older-schema installed-records cache now rebuilds itself instead of failing the command

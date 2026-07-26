@@ -80,7 +80,7 @@ def _resolve_brew_path(flag: str, cache_file: Path, fallback: Path) -> Path:
         try:
             return Path(cache_file.read_text().strip())
 
-        except Exception:
+        except (OSError, UnicodeDecodeError):
             log.warning(event=f"brew_{flag.lstrip('-')}_cache_read_failure")
 
     log.info(event=f"brew_{flag.lstrip('-')}_discover_start")

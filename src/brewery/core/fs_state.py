@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import orjson
@@ -16,9 +16,9 @@ log: BreweryLogger = get_logger(name=__name__)
 _RECEIPT_NAME = "INSTALL_RECEIPT.json"
 _CASK_METADATA_DIR = ".metadata"
 
-# Directories where linked kegs/casks are stored (current + legacy).
+# Directories where linked kegs/casks are stored (current + legacy)
 # Prefix-relative. Also stat'd by the cache token, so link/pin state changes
-# made by brew are seen by brewery — keep these two in sync with that token.
+# made by brew are seen by brewery and kept in sync
 LINKED_DIRS: tuple[Path, ...] = (
     Path("var/homebrew/linked"),
     Path("Library/LinkedKegs"),
@@ -397,27 +397,29 @@ def _mtime_dt(path: Path) -> datetime | None:
         path: Path to stat.
 
     Returns:
-        Path's mtime as a datetime, or None if it cannot be stat'd.
+        Path's mtime as a timezone-aware datetime in local time, or None if it
+        cannot be stat'd.
     """
     try:
-        return datetime.fromtimestamp(path.stat().st_mtime)
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=UTC).astimezone()
 
     except OSError:
         return None
 
 
-def _epoch_dt(value: int | float | str | None) -> datetime | None:
+def _epoch_dt(value: float | str | None) -> datetime | None:
     """Convert a receipt epoch value to a datetime, tolerating bad input.
 
     Args:
         value: Receipt epoch value to convert.
 
     Returns:
-        Datetime corresponding to the receipt epoch value, or None if it cannot be converted.
+        Timezone-aware local datetime corresponding to the receipt epoch value,
+        or None if it cannot be converted.
     """
     try:
         if value is not None:
-            return datetime.fromtimestamp(float(value))
+            return datetime.fromtimestamp(float(value), tz=UTC).astimezone()
 
     except (TypeError, ValueError, OSError):
         return None

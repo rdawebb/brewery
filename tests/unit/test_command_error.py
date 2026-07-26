@@ -7,6 +7,7 @@ commands, so each branch of `command_error` is exercised in isolation.
 from __future__ import annotations
 
 import re
+from typing import Annotated
 
 import pytest
 from typer.testing import CliRunner
@@ -170,6 +171,14 @@ class TestWarnings:
         assert result.exit_code == EXIT_USER_ERROR
 
 
+# `Annotated` metadata is evaluated as a string under `from __future__ import
+# annotations`, so it must resolve against module globals — a test-local app
+# would not be visible. One app per command: a single-command Typer app is
+# invoked directly, which is the surface these tests assert on.
+_sig_app = ExtendedTyper()
+_enum_app = ExtendedTyper()
+
+
 class TestSignatureTransparency:
     """Typer must see the wrapped function's signature, not `*args, **kwargs`.
 
@@ -180,38 +189,42 @@ class TestSignatureTransparency:
     """
 
     def test_options_and_arguments_survive_the_wrapper(self) -> None:
-        app = ExtendedTyper()
+        """Test that options and arguments survive the wrapper."""
 
-        @app.command()
+        @_sig_app.command()
         @command_error()
         def decorated(
-            names: list[str] = app.Argument(...),
-            kind: PackageKind | None = app.Option(None, "--kind"),
-            yes: bool = app.Option(False, "--yes", "-y"),
+            names: Annotated[list[str], _sig_app.Argument()],
+            kind: Annotated[PackageKind | None, _sig_app.Option("--kind")] = None,
+            yes: Annotated[bool, _sig_app.Option("--yes", "-y")] = False,
         ) -> None:
             """Decorated docstring."""
             print(f"names={names} kind={kind} yes={yes}")
 
-        help_out = _plain(runner.invoke(app, ["--help"]).output)
+        help_out = _plain(runner.invoke(_sig_app, ["--help"]).output)
         assert "--kind" in help_out
         assert "--yes" in help_out
         assert "NAMES" in help_out
         assert "Decorated docstring." in help_out
 
     def test_enum_option_still_parses(self) -> None:
-        app = ExtendedTyper()
+        """Test that enum options still parse correctly."""
 
-        @app.command()
+        @_enum_app.command()
         @command_error()
-        def decorated(kind: PackageKind | None = app.Option(None, "--kind")) -> None:
+        def decorated(
+            kind: Annotated[PackageKind | None, _enum_app.Option("--kind")] = None,
+        ) -> None:
             print(f"kind={kind}")
 
-        result = runner.invoke(app, ["--kind", "cask"])
+        result = runner.invoke(_enum_app, ["--kind", "cask"])
 
         assert result.exit_code == 0
         assert "PackageKind.CASK" in result.output
 
     def test_name_is_preserved_for_known_commands_derivation(self) -> None:
+        """Test that name is preserved for known commands derivation."""
+
         # main._derive_known_commands falls back to `info.callback.__name__` for
         # commands registered without an explicit `name=`
         @command_error()

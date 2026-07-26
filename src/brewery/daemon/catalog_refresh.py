@@ -82,7 +82,8 @@ async def _maybe_cleanup(catalog: Catalog) -> None:
         if removed:
             log.info(event="daemon_cleanup", removed=len(removed))
 
-    except Exception as e:
+    # A cleanup failure must never abort the refresh that already succeeded
+    except Exception as e:  # noqa: BLE001
         log.warning(event="daemon_cleanup_failed", error=str(e))
 
 
@@ -109,7 +110,7 @@ def main() -> None:
 
     except Exception:
         # KeyboardInterrupt/SystemExit are BaseException and still propagate
-        log.error(event="catalog_refresh_crashed", exc_info=True)
+        log.exception(event="catalog_refresh_crashed")
 
 
 if __name__ == "__main__":

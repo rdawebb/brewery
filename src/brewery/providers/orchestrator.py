@@ -527,11 +527,10 @@ class Orchestrator:
                         raise
 
                     except Exception as exc:
-                        log.error(
+                        log.exception(
                             event="install_task_crashed",
                             formula=name,
                             error=str(exc),
-                            exc_info=True,
                         )
                         report.add_note(name, f"unexpected error: {exc}")
                         outcome = Outcome.FAILED
@@ -692,7 +691,7 @@ class Orchestrator:
         fr: FormulaRowP | None,
         fetch: dict[str, asyncio.Task],
         requested: set[str],
-        report: "InstallReport",
+        report: InstallReport,
         old_kegs: dict[str, Path] | None = None,
     ) -> Outcome:
         """Install a single formula.

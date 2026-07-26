@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Self
+
 
 class MockClient:
     """Async context manager stub that records whether it was closed."""
@@ -10,7 +12,7 @@ class MockClient:
         """Initialise with no closed state."""
         self.closed = False
 
-    async def __aenter__(self) -> MockClient:
+    async def __aenter__(self) -> Self:
         """Return self when entering the context.
 
         Returns:
@@ -40,4 +42,4 @@ class MockRepo:
 
 async def _run_brew(args) -> None:
     """No-op brew runner stub used to construct a BrewAdapter in tests."""
-    return None
+    return

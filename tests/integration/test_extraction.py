@@ -4,8 +4,8 @@ import gzip
 import io
 import os
 import tarfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import pytest
 import zstandard

@@ -100,11 +100,10 @@ class Cache:
             raw: bytes = f.read_bytes()
 
         except OSError as e:
-            log.error(
+            log.exception(
                 event="cache_read_error",
                 key=key,
                 namespace=self.cache_path.name,
-                exc_info=True,
             )
             raise CacheError(
                 key=key,
@@ -163,12 +162,11 @@ class Cache:
             )
 
         except Exception as e:
-            log.error(
+            log.exception(
                 event="cache_write_error",
                 key=key,
                 namespace=self.cache_path.name,
                 error=str(object=e),
-                exc_info=True,
             )
             raise CacheError(
                 key=key,

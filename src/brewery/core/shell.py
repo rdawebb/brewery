@@ -98,7 +98,7 @@ async def run_brew(
             await asyncio.wait_for(proc.wait(), timeout)
             out, err = "", ""
 
-    except (asyncio.TimeoutError, TimeoutError):
+    except TimeoutError:
         proc.kill()
         await proc.wait()
         raise BrewTimeoutError(command=" ".join(cmd), timeout=timeout)

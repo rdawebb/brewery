@@ -23,7 +23,7 @@ def no_sleep(monkeypatch) -> None:
             *_args: Variable length argument list.
             **_kwargs: Arbitrary keyword arguments.
         """
-        return None
+        return
 
     monkeypatch.setattr(asyncio, "sleep", _instant)
 
@@ -222,9 +222,11 @@ class TestLogOperation:
             """
             raise RuntimeError("kaboom")
 
-        with caplog.at_level(logging.ERROR, logger="brewery.core.decorators"):
-            with pytest.raises(RuntimeError):
-                await op()
+        with (
+            caplog.at_level(logging.ERROR, logger="brewery.core.decorators"),
+            pytest.raises(RuntimeError),
+        ):
+            await op()
 
         assert any("myop_failed" in r.getMessage() for r in caplog.records)
 

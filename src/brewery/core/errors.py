@@ -68,8 +68,6 @@ class SysError(BrewError):
     CLI should display diagnostic information for troubleshooting.
     """
 
-    pass
-
 
 class TransientError(BrewError):
     """Errors that should be retried immediately.
@@ -80,8 +78,6 @@ class TransientError(BrewError):
     Operations raising this exception should be idempotent.
     """
 
-    pass
-
 
 class UserError(BrewError):
     """Errors caused by user actions or inputs.
@@ -91,8 +87,6 @@ class UserError(BrewError):
 
     CLI should display helpful messages to guide the user.
     """
-
-    pass
 
 
 ## Specific Exceptions ##

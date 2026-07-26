@@ -6,6 +6,7 @@ import contextlib
 import os
 import platform
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -107,8 +108,8 @@ def build_receipt(
     time: int,
     source: Source,
     aliases: list[str],
-    used_options: list[str] = [],
-    unused_options: list[str] = [],
+    used_options: Sequence[str] = (),
+    unused_options: Sequence[str] = (),
     built_as_bottle: bool = True,
     poured_from_bottle: bool = True,
     loaded_from_api: bool = True,

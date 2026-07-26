@@ -159,7 +159,10 @@ def brew_env() -> dict:
 
     if _FETCH:
         subprocess.run(
-            ["brew", "fetch", *REAL_FORMULAE], capture_output=True, text=True
+            ["brew", "fetch", *REAL_FORMULAE],
+            capture_output=True,
+            text=True,
+            check=False,
         )
 
     try:
@@ -232,7 +235,10 @@ class TestRelocatorIntegration:
 
         # The install name now points into the target prefix
         out = subprocess.run(
-            ["otool", "-D", str(real_dylib)], capture_output=True, text=True
+            ["otool", "-D", str(real_dylib)],
+            capture_output=True,
+            text=True,
+            check=False,
         ).stdout
         assert f"{tmp_path}/lib/libfoo.dylib" in out
         assert "@@HOMEBREW" not in out
@@ -242,6 +248,7 @@ class TestRelocatorIntegration:
             ["codesign", "--verify", "--strict", str(real_dylib)],
             capture_output=True,
             text=True,
+            check=False,
         )
         assert verify.returncode == 0, verify.stderr
 
@@ -351,6 +358,7 @@ class TestRelocationRealKegs:
                 ["codesign", "--verify", "--strict", str(binary)],
                 capture_output=True,
                 text=True,
+                check=False,
             )
             assert res.returncode == 0, f"{binary}: {res.stderr.strip()}"
 

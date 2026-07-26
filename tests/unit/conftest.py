@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Callable, Sequence
 
 import pytest
 
@@ -99,8 +99,8 @@ def brew_paths() -> dict:
     Returns:
         A dict with `prefix`, `cellar`, and `repository` Path values.
     """
-    return dict(
-        prefix=Path("/opt/homebrew"),
-        cellar=Path("/opt/homebrew/Cellar"),
-        repository=Path("/opt/homebrew/Library/Homebrew"),
-    )
+    return {
+        "prefix": Path("/opt/homebrew"),
+        "cellar": Path("/opt/homebrew/Cellar"),
+        "repository": Path("/opt/homebrew/Library/Homebrew"),
+    }

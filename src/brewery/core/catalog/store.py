@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import orjson
 
@@ -666,7 +666,7 @@ class Catalog:
 
         self._conn.close()
 
-    def __enter__(self) -> Catalog:
+    def __enter__(self) -> Self:
         """Context manager entry point.
 
         Returns:

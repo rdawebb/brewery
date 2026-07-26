@@ -488,7 +488,7 @@ class TestMetaAndLifecycle:
             assert cat.get_formula("wget") is not None
 
         # After exit the connection is closed, so further use raises
-        with pytest.raises(Exception):
+        with pytest.raises(sqlite3.ProgrammingError):
             cat.get_formula("wget")
 
 

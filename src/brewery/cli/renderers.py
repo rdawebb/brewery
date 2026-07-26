@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import shutil
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 import orjson
 import readchar
@@ -16,7 +16,10 @@ from rich.table import Table
 from rich.text import Text
 
 from brewery.core.config import ensure_cache_dir
+from brewery.core.logging import BreweryLogger, get_logger
 from brewery.core.models import Package, PackageKind, PackageStatus
+
+log: BreweryLogger = get_logger(name=__name__)
 
 # flag -> (colour, label)
 _STATUS_STYLES: dict[PackageStatus, tuple[str, str]] = {
@@ -48,14 +51,17 @@ _SUMMARY_ORDER: tuple[PackageStatus, ...] = (
 )
 
 COLUMN_DEFINITIONS: list[dict] = [
-    dict(header="Kind"),
-    dict(header="Name", style="bold"),
-    dict(header="Installed"),
-    dict(header="Latest"),
-    dict(header="Status"),
-    dict(header="Size (MB)", justify="right"),
-    dict(header="Installed On", style="dim"),
+    {"header": "Kind"},
+    {"header": "Name", "style": "bold"},
+    {"header": "Installed"},
+    {"header": "Latest"},
+    {"header": "Status"},
+    {"header": "Size (MB)", "justify": "right"},
+    {"header": "Installed On", "style": "dim"},
 ]
+
+# Local wall-clock, without the offset an aware isoformat would append
+_INSTALLED_ON_FORMAT = "%Y-%m-%d %H:%M"
 
 _WIDTHS_FILENAME = "column_widths.json"
 
@@ -85,8 +91,9 @@ def _load_width_cache() -> None:
             data: dict[int, tuple[int, ...]] = orjson.loads(path.read_bytes())
             _width_cache.update({int(k): tuple(v) for k, v in data.items()})
 
-    except Exception:
-        pass
+    # An unreadable or malformed cache just means widths get recomputed
+    except (OSError, ValueError, TypeError, AttributeError) as e:
+        log.debug(event="width_cache_read_failed", error=str(object=e))
 
 
 def _ensure_width_cache_loaded() -> None:
@@ -369,8 +376,9 @@ def _save_width_cache() -> None:
             orjson.dumps({str(k): list(v) for k, v in _width_cache.items()})
         )
 
-    except Exception:
-        pass
+    # The cache is an optimisation; failing to persist it is not an error
+    except (OSError, TypeError) as e:
+        log.debug(event="width_cache_write_failed", error=str(object=e))
 
 
 def package_table(pkgs: Iterable[Package]) -> Table:
@@ -423,7 +431,7 @@ def _populate_rows(table: Table, pkgs: list[Package]) -> None:
             latest,
             status_to_str(p.status),
             size_mb,
-            p.installed_on.isoformat() if p.installed_on else "",
+            p.installed_on.strftime(_INSTALLED_ON_FORMAT) if p.installed_on else "",
         )
 
 

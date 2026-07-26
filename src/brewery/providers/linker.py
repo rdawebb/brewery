@@ -34,7 +34,7 @@ _ELIGIBLE = ("bin", "sbin", "etc", "include", "lib", "share", "Frameworks")
 # Files brew refuses to link
 _LIB_SKIP_FILE = frozenset({"charset.alias"})
 
-# Exact dir names: mkpath ONLY at top level; their subdirs are linked whole.
+# Exact dir names: mkpath ONLY at top level; their subdirs are linked whole
 _LIB_EXACT = frozenset({"cps", "pkgconfig", "cmake", "dtrace", "ghc", "php"})
 
 # Prefix families: matched (^-anchored) against the FULL relative path
@@ -172,7 +172,7 @@ def _strategy_share(rel: Path, is_dir: bool) -> Action:
 
     if not is_dir:
         # Includes INFOFILE matches: brew runs install-info on them, but for the
-        # purpose of the prefix link they are ordinary relative symlinks.
+        # purpose of the prefix link they are ordinary relative symlinks
         return Action.LINK
 
     if (
@@ -278,7 +278,7 @@ class _Plan:
             is_link = stat.S_ISLNK(dst_stat.st_mode)
             exists = True
 
-        # dst resolves to the same real path as src (e.g, metapackages)
+        # dst resolves to the same real path as src (e.g. metapackages)
         if exists and os.path.realpath(dst) == os.path.realpath(src):
             self.already.append(dst)
             return

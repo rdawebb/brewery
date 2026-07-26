@@ -56,7 +56,7 @@ def _systemctl(*args: str) -> subprocess.CompletedProcess:
     """
     try:
         return subprocess.run(
-            ["systemctl", "--user", *args], capture_output=True, text=True
+            ["systemctl", "--user", *args], capture_output=True, text=True, check=False
         )
 
     except FileNotFoundError:

@@ -536,7 +536,7 @@ class TestUpgrade:
 
     async def test_upgrade_unknown_name_is_failure(self, repo) -> None:
         """Test that upgrading a non-installed name is reported as not found."""
-        upgraded, current, advisories, failures = await repo.upgrade_packages(
+        upgraded, _current, _advisories, failures = await repo.upgrade_packages(
             ["ripgrep"]
         )
         assert upgraded == []
@@ -551,7 +551,7 @@ class TestUpgrade:
         """
         assert repo.pin_packages(["act"])[0] == ["act"]
 
-        upgraded, current, advisories, failures = await repo.upgrade_packages()
+        upgraded, _current, advisories, failures = await repo.upgrade_packages()
         assert ("act", "pinned - not upgraded") in advisories
         assert failures == []
         assert all(p.name != "act" for p in upgraded)
@@ -565,7 +565,7 @@ class TestUpgrade:
         """
         assert repo.pin_packages(["act"])[0] == ["act"]
 
-        upgraded, current, advisories, failures = await repo.upgrade_packages(["act"])
+        upgraded, _current, _advisories, failures = await repo.upgrade_packages(["act"])
         assert ("act", "pinned - skipped") in failures
         assert all(p.name != "act" for p in upgraded)
 
@@ -577,7 +577,7 @@ class TestUpgrade:
         repo.pin_packages(["act"])
         assert repo.unpin_packages(["act"])[0] == ["act"]
 
-        upgraded, current, advisories, failures = await repo.upgrade_packages()
+        upgraded, _current, advisories, _failures = await repo.upgrade_packages()
         assert ("act", "pinned - not upgraded") not in advisories
         assert all(p.name != "act" for p in upgraded)
 
@@ -615,7 +615,7 @@ class TestUpgrade:
             return names
 
         repo = _repo_with_providers(catalog, formula=mock_formula_upgrade)
-        upgraded, current, advisories, failures = await repo.upgrade_packages(["act"])
+        upgraded, current, _advisories, _failures = await repo.upgrade_packages(["act"])
         assert [p.name for p in upgraded] == ["act"]
         assert current == []
 
@@ -691,7 +691,6 @@ class TestUpgrade:
         class MockDownloader:
             def __init__(self, cache_dir, client):  # build_orchestrator's call shape
                 """Initialise the mock downloader with a cache directory and client."""
-                pass
 
             async def fetch(self, ref, *, on_progress=None) -> Path:
                 """Return a mock Path for the wget tarball.

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Coroutine, Iterator
 from contextlib import contextmanager
-from typing import Any, Coroutine
+from typing import Any
 
 from rich.console import Console
 from typer_extensions import ExtendedTyper
@@ -61,7 +61,8 @@ def _ensure_catalog_populated(repo: Repository) -> None:
         with spinner("Building the package catalog..."):
             run_async(coro=refresh_catalog(catalog=repo.catalog))
 
-    except Exception as e:
+    # Bootstrapping is best-effort: the command still runs on an empty catalog
+    except Exception as e:  # noqa: BLE001
         log.warning(event="catalog_bootstrap_failed", error=str(object=e))
 
 

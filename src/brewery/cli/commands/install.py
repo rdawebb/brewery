@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from typing import Annotated
 
 from brewery.cli.context import _repository, app, console, run_async
 from brewery.cli.error_formatting import CommandFailed, command_error
@@ -22,11 +23,14 @@ from brewery.core.models import PackageKind
     warnings=(AlreadyInstalledWarning,), interrupt_hint="brewery install <name>"
 )
 def install(
-    names: list[str] = app.Argument(...),
-    kind: PackageKind | None = app.Option(
-        None, "--kind", help="formula | cask (default: formula)"
-    ),
-    yes: bool = app.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+    names: Annotated[list[str], app.Argument()],
+    kind: Annotated[
+        PackageKind | None,
+        app.Option("--kind", help="formula | cask (default: formula)"),
+    ] = None,
+    yes: Annotated[
+        bool, app.Option("--yes", "-y", help="Skip confirmation prompt")
+    ] = False,
 ) -> None:
     """Install a package or list of packages.
 

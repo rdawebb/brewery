@@ -263,7 +263,7 @@ def no_backoff(monkeypatch) -> None:
 
     async def instant(_delay: float) -> None:
         """No-op sleep function that returns instantly."""
-        return None
+        return
 
     monkeypatch.setattr("brewery.core.retry.asyncio.sleep", instant)
 

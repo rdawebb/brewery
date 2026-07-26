@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typer_extensions import ExtendedTyper
 
+from brewery import daemon
 from brewery.cli.context import console
 from brewery.cli.error_formatting import command_error
-from brewery import daemon
 from brewery.daemon import SERVICE_LABEL
 
 daemon_app = ExtendedTyper(help="Manage the brewery background daemon.")

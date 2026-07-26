@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 
@@ -77,7 +77,7 @@ class TestRecordCacheRoundTrip:
             version="1.21.4",
             revision=2,
             version_scheme=1,
-            installed_on=datetime(2024, 1, 2, 3, 4, 5),
+            installed_on=datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC),
             installed_on_request=True,
             installed_as_dependency=True,
             deps=["openssl", "libidn2"],
@@ -127,10 +127,10 @@ class TestRecordCacheRoundTrip:
             name="jq",
             kind=PackageKind.FORMULA,
             version="1.7",
-            installed_on=datetime(2024, 1, 2, 3, 4, 5),
+            installed_on=datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC),
         )
         data = InstalledRecord._record_to_cache_dict(record)
-        assert data["installed_on"] == "2024-01-02T03:04:05"
+        assert data["installed_on"] == "2024-01-02T03:04:05+00:00"
 
     def test_installed_on_none_serialises_to_none(self) -> None:
         """Test that a missing install date serialises to None, not a string."""
@@ -144,12 +144,12 @@ class TestRecordCacheRoundTrip:
             name="jq",
             kind=PackageKind.FORMULA,
             version="1.7",
-            installed_on=datetime(2024, 1, 2, 3, 4, 5),
+            installed_on=datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC),
         )
         restored = InstalledRecord._record_from_cache_dict(
             InstalledRecord._record_to_cache_dict(record)
         )
-        assert restored.installed_on == datetime(2024, 1, 2, 3, 4, 5)
+        assert restored.installed_on == datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)
 
     def test_missing_optional_keys_use_defaults(self) -> None:
         """Test that a sparse cache dict (only required keys) restores with defaults."""

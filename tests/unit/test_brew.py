@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import pytest
 
-import brewery.providers.brew as brew
 from brewery.core.errors import (
     AlreadyInstalledWarning,
     BrewCommandError,
     PinnedPackageWarning,
 )
 from brewery.core.shell import BrewResult
+from brewery.providers import brew
 from brewery.providers.brew import cask_backend, formula_backend
 
 pytestmark = pytest.mark.asyncio

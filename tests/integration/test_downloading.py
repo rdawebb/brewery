@@ -114,7 +114,6 @@ class _RaisingStream(httpx.AsyncByteStream):
 
     async def aclose(self) -> None:
         """Close the stream."""
-        pass
 
 
 class _LiveCounter:
@@ -169,7 +168,6 @@ class _SlowStream(httpx.AsyncByteStream):
 
     async def aclose(self) -> None:
         """Close the stream."""
-        pass
 
 
 class _PlainStream(httpx.AsyncByteStream):
@@ -193,7 +191,6 @@ class _PlainStream(httpx.AsyncByteStream):
 
     async def aclose(self) -> None:
         """Close the stream."""
-        pass
 
 
 @pytest.fixture
@@ -206,7 +203,7 @@ def no_backoff(monkeypatch):
         Args:
             _seconds: The number of seconds to sleep (ignored).
         """
-        return None
+        return
 
     monkeypatch.setattr(d.asyncio, "sleep", _instant)
 

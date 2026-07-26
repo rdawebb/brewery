@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Annotated
+
 from brewery.cli.context import _repository, app, console
 from brewery.cli.error_formatting import command_error
 from brewery.cli.output import spinner
@@ -11,13 +13,16 @@ from brewery.core.models import Package, PackageKind
 @app.command(name="list", aliases=["l", "ls"])
 @command_error()
 def list_pkgs(
-    kind: PackageKind | None = app.Option(
-        None, "--kind", "-k", help="formula | cask | all"
-    ),
-    refresh: bool = app.Option(False, "--refresh", "-r", help="Refresh cache"),
-    table: bool = app.Option(
-        False, "--table", "-t", "--verbose", "-v", help="Show the full table view"
-    ),
+    kind: Annotated[
+        PackageKind | None, app.Option("--kind", "-k", help="formula | cask | all")
+    ] = None,
+    refresh: Annotated[
+        bool, app.Option("--refresh", "-r", help="Refresh cache")
+    ] = False,
+    table: Annotated[
+        bool,
+        app.Option("--table", "-t", "--verbose", "-v", help="Show the full table view"),
+    ] = False,
 ) -> None:
     """List packages in the repository.
 
@@ -61,9 +66,9 @@ def list_pkgs(
 @command_error()
 def info(
     name: str,
-    kind: PackageKind | None = app.Option(
-        None, "--kind", help="formula | cask | auto (default)"
-    ),
+    kind: Annotated[
+        PackageKind | None, app.Option("--kind", help="formula | cask | auto (default)")
+    ] = None,
 ) -> None:
     """Show detailed information about a package.
 

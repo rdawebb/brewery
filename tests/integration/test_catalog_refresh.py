@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Self
 
 import httpx
 import orjson
@@ -384,7 +385,7 @@ class TestBackgroundRefresh:
         class StubCatalog:
             """Records whether the daemon closed it."""
 
-            def __enter__(self) -> StubCatalog:
+            def __enter__(self) -> Self:
                 """Enter the context manager.
 
                 Returns:
@@ -415,7 +416,7 @@ class TestBackgroundRefresh:
         class StubCatalog:
             """Records whether the daemon closed it."""
 
-            def __enter__(self) -> StubCatalog:
+            def __enter__(self) -> Self:
                 """Enter the context manager.
 
                 Returns:
@@ -490,12 +491,11 @@ class TestMain:
 
         monkeypatch.setattr(cr, "background_refresh", boom)
         errors: list = []
-        monkeypatch.setattr(cr.log, "error", lambda **kw: errors.append(kw))
+        monkeypatch.setattr(cr.log, "exception", lambda **kw: errors.append(kw))
 
         cr.main()  # Should not raise
 
         assert errors and errors[0]["event"] == "catalog_refresh_crashed"
-        assert errors[0]["exc_info"] is True  # Traceback reaches the log
 
     def test_keyboard_interrupt_still_propagates(self, monkeypatch) -> None:
         """Tests that the catch-all does not swallow interpreter shutdown signals."""

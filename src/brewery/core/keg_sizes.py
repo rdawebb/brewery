@@ -103,7 +103,7 @@ def du_many(paths: list[Path]) -> dict[str, int]:
             log.warning(event="keg_size_timeout", count=len(batch), timeout=_DU_TIMEOUT)
             continue
 
-        except Exception as e:
+        except OSError as e:
             log.warning(event="keg_size_error", count=len(batch), error=str(object=e))
             continue
 

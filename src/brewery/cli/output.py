@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING, Iterable, Sequence
+from collections.abc import Iterable, Sequence
+from typing import TYPE_CHECKING
 
 from rich.prompt import Confirm
 from rich.text import Text

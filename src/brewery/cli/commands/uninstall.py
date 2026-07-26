@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from typing import Annotated
 
 from brewery.cli.context import _repository, app, run_async
 from brewery.cli.error_formatting import CommandFailed, command_error
@@ -19,10 +20,12 @@ from brewery.core.models import PackageKind
 @command_error(interrupt_hint="brewery uninstall <name>")
 def uninstall(
     names: list[str],
-    kind: PackageKind | None = app.Option(
-        None, "--kind", help="formula | cask | auto (default)"
-    ),
-    yes: bool = app.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+    kind: Annotated[
+        PackageKind | None, app.Option("--kind", help="formula | cask | auto (default)")
+    ] = None,
+    yes: Annotated[
+        bool, app.Option("--yes", "-y", help="Skip confirmation prompt")
+    ] = False,
 ) -> None:
     """Uninstall a package or list of packages.
 

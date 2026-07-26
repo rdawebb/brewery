@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-import brewery.core.shell as shell
+from brewery.core import shell
 from brewery.core.errors import BrewCommandError, BrewTimeoutError
 from brewery.core.shell import BrewOutput, run_brew
 

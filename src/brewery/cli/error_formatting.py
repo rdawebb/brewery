@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import sys
-from typing import Callable, ParamSpec
+from collections.abc import Callable
+from typing import ParamSpec
 
 from brewery.core.errors import (
     EXIT_SYSTEM_ERROR,
@@ -134,16 +136,15 @@ def handle_error(error: Exception) -> int:
         An integer exit code.
     """
     if isinstance(error, BrewError):
-        try:
+        # A broken log sink must not stop the user seeing the error itself
+        with contextlib.suppress(Exception):
             log.error(
                 event="cli_error",
                 error_type=type(error).__name__,
                 message=error.message,
                 context=getattr(error, "context", {}),
-                exc_info=True,
+                exc_info=error,
             )
-        except Exception:
-            pass
 
         console.print(f"\n{format_error_message(error)}\n", style="bold red")
 
@@ -164,7 +165,7 @@ def handle_error(error: Exception) -> int:
             return EXIT_USER_ERROR
 
     else:
-        log.error(event="unexpected_error", error=str(object=error), exc_info=True)
+        log.error(event="unexpected_error", error=str(object=error), exc_info=error)
         console.print(f"\n⚠ Unexpected error occurred: {error}\n", style="bold red")
         return EXIT_SYSTEM_ERROR
 
@@ -208,7 +209,8 @@ def command_error(
                     )
                 sys.exit(EXIT_INTERRUPTED)
 
-            except Exception as e:
+            # Last-resort boundary: every command failure becomes an exit code
+            except Exception as e:  # noqa: BLE001
                 sys.exit(handle_error(error=e))
 
         return wrapper

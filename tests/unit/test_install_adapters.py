@@ -228,8 +228,6 @@ class MockRunBrew:
         if args and args[0] in self.fail_on:
             raise BrewCommandError(command="brew " + " ".join(args), returncode=1)
 
-        return None
-
 
 async def test_install_success_returns_true() -> None:
     """Test that a successful backend install returns True."""

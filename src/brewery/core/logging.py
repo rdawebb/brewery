@@ -104,6 +104,17 @@ class BreweryLogger:
         """
         self._log(level=logging.ERROR, event=event, **kwargs)
 
+    def exception(self, event: str = "", **kwargs: Any) -> None:
+        """Log an error message with the active exception's traceback.
+
+        Args:
+            event: The message to log - defaults to an empty string.
+            **kwargs: Additional contextual information. Pass `exc_info` to
+                attach a specific exception instead of the one being handled.
+        """
+        kwargs.setdefault("exc_info", True)
+        self._log(level=logging.ERROR, event=event, **kwargs)
+
     def critical(self, event: str = "", **kwargs: Any) -> None:
         """Log a critical message with optional context.
 

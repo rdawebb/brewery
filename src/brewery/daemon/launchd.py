@@ -60,6 +60,7 @@ def is_running() -> bool:
         subprocess.run(
             ["launchctl", "print", _service_target()],
             capture_output=True,
+            check=False,
         ).returncode
         == 0
     )
@@ -127,12 +128,14 @@ def start() -> list[str]:
     LAUNCH_AGENTS.mkdir(parents=True, exist_ok=True)
 
     if is_running():
-        subprocess.run(["launchctl", "bootout", _service_target()])
+        subprocess.run(["launchctl", "bootout", _service_target()], check=False)
 
     shutil.copy2(_plist_source(), PLIST_DEST)
     warnings = patch_plist(PLIST_DEST)
 
-    result = subprocess.run(["launchctl", "bootstrap", _gui_domain(), str(PLIST_DEST)])
+    result = subprocess.run(
+        ["launchctl", "bootstrap", _gui_domain(), str(PLIST_DEST)], check=False
+    )
     if result.returncode != 0:
         raise SysError(
             "launchctl bootstrap failed",
@@ -151,5 +154,5 @@ def stop() -> None:
     if not PLIST_DEST.exists():
         raise UserError("Daemon is not installed")
 
-    subprocess.run(["launchctl", "bootout", _service_target()])
+    subprocess.run(["launchctl", "bootout", _service_target()], check=False)
     PLIST_DEST.unlink()

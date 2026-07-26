@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol
 from urllib.parse import quote
 
@@ -286,4 +286,4 @@ def _now_iso() -> str:
     Returns:
         The current UTC time as an ISO-8601 string.
     """
-    return datetime.now(tz=timezone.utc).isoformat()
+    return datetime.now(tz=UTC).isoformat()

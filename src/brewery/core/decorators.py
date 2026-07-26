@@ -5,8 +5,8 @@ from __future__ import annotations
 import functools
 import inspect
 import time
-from collections.abc import Sized
-from typing import Any, Awaitable, Callable, TypeVar, cast
+from collections.abc import Awaitable, Callable, Sized
+from typing import Any, TypeVar, cast
 
 from brewery.core.errors import TransientError
 from brewery.core.logging import BreweryLogger, get_logger
@@ -78,11 +78,10 @@ def log_operation(
 
             except Exception as e:
                 duration_ms = int((time.perf_counter() - start) * 1000)
-                log.error(
+                log.exception(
                     event=f"{event_prefix}_failed",
                     error=str(object=e),
                     duration_ms=duration_ms,
-                    exc_info=True,
                     **log_context,
                 )
                 raise
@@ -124,11 +123,10 @@ def log_operation(
 
             except Exception as e:
                 duration_ms = int((time.perf_counter() - start) * 1000)
-                log.error(
+                log.exception(
                     event=f"{event_prefix}_failed",
                     error=str(object=e),
                     duration_ms=duration_ms,
-                    exc_info=True,
                     **log_context,
                 )
                 raise

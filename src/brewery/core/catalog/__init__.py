@@ -2,4 +2,4 @@
 
 from brewery.core.catalog.store import SCHEMA_VERSION, CaskRow, Catalog, FormulaRow
 
-__all__ = ["Catalog", "CaskRow", "FormulaRow", "SCHEMA_VERSION"]
+__all__ = ["SCHEMA_VERSION", "CaskRow", "Catalog", "FormulaRow"]

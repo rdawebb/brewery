@@ -30,18 +30,25 @@ _MH_CIGAM = 0xCEFAEDFE  # 32-bit, swapped
 _MH_CIGAM_64 = 0xCFFAEDFE  # 64-bit, swapped
 
 _FAT_MAGIC = 0xCAFEBABE  # Fat header, big-endian
-_FAT_CIGAM = 0xBEBAFECA
-_FAT_MAGIC_64 = 0xCAFEBABF
-_FAT_CIGAM_64 = 0xBFBAFECA
+_FAT_CIGAM = 0xBEBAFECA  # Fat header, big-endian, swapped
+_FAT_MAGIC_64 = 0xCAFEBABF  # Fat header, big-endian
+_FAT_CIGAM_64 = 0xBFBAFECA  # Fat header, big-endian, swapped
 
-_LC_REQ_DYLD = 0x80000000
-_LC_ID_DYLIB = 0x0D
-_LC_LOAD_DYLIB = 0x0C
-_LC_LOAD_WEAK_DYLIB = 0x18 | _LC_REQ_DYLD
-_LC_REEXPORT_DYLIB = 0x1F | _LC_REQ_DYLD
-_LC_LAZY_LOAD_DYLIB = 0x20
-_LC_LOAD_UPWARD_DYLIB = 0x23 | _LC_REQ_DYLD
-_LC_RPATH = 0x1C | _LC_REQ_DYLD
+# Load command constants
+_LC_REQ_DYLD = 0x80000000  # Load command flag indicating the command requires dyld
+_LC_ID_DYLIB = 0x0D  # Load command indicating the dylib's identity
+_LC_LOAD_DYLIB = 0x0C  # Load command indicating a dylib should be loaded
+_LC_LOAD_WEAK_DYLIB = (
+    0x18 | _LC_REQ_DYLD
+)  # Load command indicating a weak dylib should be loaded
+_LC_REEXPORT_DYLIB = (
+    0x1F | _LC_REQ_DYLD
+)  # Load command indicating a dylib should be re-exported
+_LC_LAZY_LOAD_DYLIB = 0x20  # Load command indicating a dylib should be lazily loaded
+_LC_LOAD_UPWARD_DYLIB = (
+    0x23 | _LC_REQ_DYLD
+)  # Load command indicating a dylib should be loaded upward
+_LC_RPATH = 0x1C | _LC_REQ_DYLD  # Load command indicating the rpath should be set
 
 # Load commands whose path strings reference dylibs
 _DYLIB_LOAD_CMDS = frozenset(
@@ -73,15 +80,15 @@ _AR_MAGIC = b"!<arch>\n"  # Static archive (ar) magic
 
 # ELF constants (Linux dynamic linkage; rewritten via patchelf, no signing)
 _ELF_MAGIC = b"\x7fELF"
-_ELFCLASS32, _ELFCLASS64 = 1, 2
+_ELFCLASS32, _ELFCLASS64 = 1, 2  # ELF class (32-bit or 64-bit)
 _ELFDATA2LSB = 1  # little-endian; anything else is treated big-endian
-_PT_LOAD = 1
-_PT_DYNAMIC = 2
-_PT_INTERP = 3
-_DT_NULL = 0
-_DT_STRTAB = 5
-_DT_RPATH = 15
-_DT_RUNPATH = 29
+_PT_LOAD = 1  # Load segment
+_PT_DYNAMIC = 2  # Dynamic linking segment
+_PT_INTERP = 3  # Interpreter segment
+_DT_NULL = 0  # Null entry
+_DT_STRTAB = 5  # String table
+_DT_RPATH = 15  # RPATH entry
+_DT_RUNPATH = 29  # RUNPATH entry
 
 # Matches brew's Version.formula_optionally_versioned_regex(:openjdk)
 _OPENJDK_RE = re.compile(r"\Aopenjdk(@\d+(?:\.\d+)*)?\Z")
@@ -108,8 +115,8 @@ _CODESIGN_ARGS = (
 
 # Per-call limits for batched codesign, kept well under ARG_MAX (argv+envp
 # share ~1 MiB on macOS); a conservative budget leaves room for the environment.
-_CODESIGN_ARG_BUDGET = 256 * 1024
-_CODESIGN_MAX_ARGS = 4096
+_CODESIGN_ARG_BUDGET = 256 * 1024  # 256 KiB
+_CODESIGN_MAX_ARGS = 4096  # 4 KiB
 
 
 class NameKind(Enum):
@@ -572,6 +579,7 @@ def _run(cmd: list[str]) -> None:
         text=True,
         stdin=subprocess.DEVNULL,
         start_new_session=True,
+        check=False,
     )
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(

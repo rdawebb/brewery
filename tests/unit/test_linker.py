@@ -12,7 +12,7 @@ from pathlib import Path
 import orjson
 import pytest
 
-import brewery.providers.linker as linker
+from brewery.providers import linker
 from brewery.providers.linker import (
     _LINK_MANIFEST,
     LinkError,
