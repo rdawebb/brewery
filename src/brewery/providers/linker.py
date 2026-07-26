@@ -372,8 +372,7 @@ def _walk(
             continue
 
         # A directory whose prefix path already exists as a real (non-symlink)
-        # dir is descended into, walking the rest of the tree, regardless of the
-        # strategy's verdict.
+        # dir is descended into, walking the rest of the tree
         descend = is_dir and (
             action is Action.MKPATH or (dst.is_dir() and not dst.is_symlink())
         )

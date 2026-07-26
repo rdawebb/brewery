@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import hashlib
 import os
 import tempfile
@@ -15,17 +16,17 @@ from urllib.parse import urlsplit
 import httpx
 
 from brewery.core.errors import DownloadError, SysError
+from brewery.core.retry import RETRYABLE_STATUS, retry_async
 
 # Homebrew's hardcoded anonymous bearer for pulling bottles from ghcr.io
 DEFAULT_GHCR_TOKEN = "QQ=="
 _GHCR_HOSTS = frozenset({"ghcr.io"})
 _OCI_LAYER_ACCEPT = "application/vnd.oci.image.layer.v1.tar+gzip"
 _CHUNK = 1 << 20  # 1 MiB
-_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 
 # Hard ceiling on a downloaded bottle: the sha256 can only be checked once the
 # whole body is on disk, so a hostile or wedged response fills the disk before
-# integrity is ever consulted; set well above any real bottle.
+# integrity is ever consulted; set well above any real bottle
 _MAX_BOTTLE_BYTES = 8_589_934_592  # 8 GiB
 
 # (downloaded_bytes, total_bytes_or_None)
@@ -103,6 +104,9 @@ class Downloader:
     def cache_path(self, sha256: str) -> Path:
         """Return the cache path for a bottle with the given SHA256 checksum.
 
+        This is a path join only: neither the file nor its parent directory is
+        guaranteed to exist, `fetch` creates the cache directory.
+
         Args:
             sha256: The SHA256 checksum of the bottle.
 
@@ -138,6 +142,9 @@ class Downloader:
         Returns:
             The path to the cached bottle.
         """
+        # Ensure the cache directory exists before downloading
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+
         dest = self.cache_path(ref.sha256)
         if dest.exists():
             if not self._verify_cached or _sha256_file(dest) == ref.sha256:
@@ -145,7 +152,6 @@ class Downloader:
 
             dest.unlink()  # Corrupt entry; re-download
 
-        self._cache_dir.mkdir(parents=True, exist_ok=True)
         async with self._sem:
             return await self._download(ref, dest, on_progress)
 
@@ -183,21 +189,24 @@ class Downloader:
         Returns:
             The path to the cached bottle.
         """
-        last: Exception | None = None
-        for attempt in range(1, self._max_retries + 1):
-            try:
-                return await self._attempt(ref, dest, on_progress)
+        try:
+            return await retry_async(
+                functools.partial(self._attempt, ref, dest, on_progress),
+                retry_on=lambda exc: isinstance(
+                    exc, (httpx.TransportError, _RetryableStatus)
+                ),
+                attempts=self._max_retries,
+                base=1.0,
+                cap=8.0,
+                label=f"download {ref.name}",
+            )
 
-            except (httpx.TransportError, _RetryableStatus) as exc:
-                last = exc
-                if attempt < self._max_retries:
-                    await asyncio.sleep(min(2 ** (attempt - 1), 8))
-
-        raise DownloadError(
-            f"failed after {self._max_retries} attempts: {last}",
-            name=ref.name,
-            url=ref.url,
-        )
+        except (httpx.TransportError, _RetryableStatus) as exc:
+            raise DownloadError(
+                f"failed after {self._max_retries} attempts: {exc}",
+                name=ref.name,
+                url=ref.url,
+            ) from exc
 
     async def _attempt(
         self, ref: BottleRef, dest: Path, on_progress: ProgressCb | None
@@ -227,14 +236,14 @@ class Downloader:
                     headers=self._headers(ref.url),
                     follow_redirects=True,
                 ) as resp:
-                    if resp.status_code in _RETRYABLE_STATUS:
+                    if resp.status_code in RETRYABLE_STATUS:
                         raise _RetryableStatus(resp.status_code)
 
                     resp.raise_for_status()
                     total = int(resp.headers.get("Content-Length", 0)) or None
 
                     # Trust the advertised length only as far as the hard cap;
-                    # an absent or oversized Content-Length falls back to it.
+                    # an absent or oversized Content-Length falls back to it
                     ceiling = min(total or _MAX_BOTTLE_BYTES, _MAX_BOTTLE_BYTES)
 
                     async for chunk in resp.aiter_bytes(_CHUNK):

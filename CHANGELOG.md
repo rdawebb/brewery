@@ -9,6 +9,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ### Fixed
 
 - A corrupt or older-schema installed-records cache now rebuilds itself instead of failing the command
+- An unexpected error installing one formula no longer discards the whole install report, and no longer lets worker threads keep writing to the Cellar after the command has returned
+- A formula that fell back to `brew` successfully is no longer reported as an error
+- The bottle cache directory is created before it is probed, so a first run with no existing Homebrew cache works
 
 ### Security
 

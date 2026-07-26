@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import platform
 import tempfile
@@ -209,8 +210,8 @@ def write_receipt(keg_dir: Path, receipt: dict) -> Path:
         os.replace(tmp, dest)
 
     finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)  # No-op after a successful replace
 
     return dest
 

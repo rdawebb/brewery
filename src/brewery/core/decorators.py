@@ -10,6 +10,7 @@ from typing import Any, Awaitable, Callable, TypeVar, cast
 
 from brewery.core.errors import TransientError
 from brewery.core.logging import BreweryLogger, get_logger
+from brewery.core.retry import retry_async
 
 log: BreweryLogger = get_logger(name=__name__)
 
@@ -161,7 +162,6 @@ def retry_on_transient(
         - Works only with async functions.
         - Delays: 1s, 2s, 4s with default settings.
     """
-    import asyncio
 
     def decorator(func: F) -> F:
         """Decorator to apply retry logic to the function."""
@@ -170,31 +170,23 @@ def retry_on_transient(
 
         @functools.wraps(wrapped=func)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            for attempt in range(1, max_retries + 1):
-                try:
-                    return await func(*args, **kwargs)
-                except TransientError as e:
-                    if attempt == max_retries:
-                        log.error(
-                            event="retry_exhausted",
-                            function=getattr(func, "__name__", repr(func)),
-                            attempts=max_retries,
-                            error=str(object=e),
-                            context=getattr(e, "context", {}),
-                        )
-                        raise
+            """Retry the wrapped async function on transient errors.
 
-                    delay: float = base_delay * (backoff ** (attempt - 1))
-                    log.warning(
-                        event="retry_attempt",
-                        function=getattr(func, "__name__", repr(func)),
-                        attempt=attempt,
-                        max_attempts=max_retries,
-                        delay_seconds=delay,
-                        error=str(object=e),
-                        context=getattr(e, "context", {}),
-                    )
-                    await asyncio.sleep(delay)
+            Args:
+                *args: Positional arguments to pass to the wrapped function.
+                **kwargs: Keyword arguments to pass to the wrapped function.
+
+            Returns:
+                The result of the wrapped function after retries.
+            """
+            return await retry_async(
+                functools.partial(func, *args, **kwargs),
+                retry_on=lambda exc: isinstance(exc, TransientError),
+                attempts=max_retries,
+                base=base_delay,
+                factor=backoff,
+                label=getattr(func, "__name__", repr(func)),
+            )
 
         return cast(typ=F, val=wrapper)
 

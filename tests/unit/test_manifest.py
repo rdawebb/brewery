@@ -257,6 +257,54 @@ async def test_http_error_raises_manifest_error() -> None:
         await _fetch(_handler(b"", status=404))
 
 
+@pytest.fixture
+def no_backoff(monkeypatch) -> None:
+    """Collapse the retry sleeps so the retry tests run instantly."""
+
+    async def instant(_delay: float) -> None:
+        """No-op sleep function that returns instantly."""
+        return None
+
+    monkeypatch.setattr("brewery.core.retry.asyncio.sleep", instant)
+
+
+async def test_index_retries_transient_status(no_backoff) -> None:
+    """A 503 is retried, and a later success is returned."""
+    body = _index([{"digest": DIGEST, "tab": TAB_PLATFORM}])
+    calls = {"n": 0}
+
+    def handler(req) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return httpx.Response(503, content=b"")
+
+        return httpx.Response(200, content=body)
+
+    info = await _fetch(handler)
+    assert isinstance(info, BottleTabInfo)
+    assert calls["n"] == 3
+
+
+async def test_index_gives_up_after_three_attempts(no_backoff) -> None:
+    """Retryable statuses are not retried forever."""
+    reqs: list = []
+
+    with pytest.raises(ManifestError, match="manifest fetch failed"):
+        await _fetch(_handler(b"", status=503, requests=reqs))
+
+    assert len(reqs) == 3
+
+
+async def test_index_does_not_retry_a_404(no_backoff) -> None:
+    """A 404 is genuine, not transient."""
+    reqs: list = []
+
+    with pytest.raises(ManifestError, match="manifest fetch failed"):
+        await _fetch(_handler(b"", status=404, requests=reqs))
+
+    assert len(reqs) == 1
+
+
 async def test_unparseable_index_raises() -> None:
     """Test unparseable index raises a manifest error."""
     with pytest.raises(ManifestError, match="manifest fetch failed"):

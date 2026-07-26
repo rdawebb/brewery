@@ -14,6 +14,7 @@ from brewery.providers.linker import link_keg
 from brewery.providers.manifest import BottleTabInfo
 from brewery.providers.orchestrator import (
     InstallConfig,
+    InstallReport,
     Orchestrator,
     Outcome,
     _NativeResult,
@@ -492,6 +493,7 @@ class TestKegOnlyPostInstall:
     """Tests for keg-only formulas and their post-install behavior."""
 
     async def test_aliases_resolved_on_loop_thread_not_worker(self) -> None:
+        """Tests that aliases are resolved on the loop thread, not the worker thread."""
         import threading
 
         cat = MockCatalog(
@@ -542,6 +544,7 @@ class TestKegOnlyPostInstall:
         assert isinstance(seen["rt_deps_arg"], list)
 
     async def test_report_records_failure_reasons(self) -> None:
+        """Tests that failure reasons are recorded in the report."""
         deps = {"app": ["badlib"], "badlib": []}
         cat = MockCatalog(_graph(deps), deps)
         brew = MockBrew(install_ok=False)
@@ -558,6 +561,58 @@ class TestKegOnlyPostInstall:
             "badlib" in report.errors["app"]
             and "dependency failed" in report.errors["app"]
         )
+
+    async def test_successful_brew_fallback_is_a_note_not_an_error(self) -> None:
+        """A formula brew poured successfully is diagnosed but not an error."""
+        cat = MockCatalog({"x": MockFormula("x")}, {"x": []})
+        o = _make(
+            cat,
+            MockDownloader(),
+            MockTab(),
+            MockBrew(),  # install_ok=True: the fallback succeeds
+            native={"x": _NativeResult(stage="install", error="relocate boom")},
+        )
+        report = await o.install(["x"])
+
+        assert report.outcomes["x"] is Outcome.BREW_INSTALL
+        assert report.installed == ["x"]
+        assert "relocate boom" in report.notes["x"][0]  # Why it fell back is kept
+        assert report.errors == {}  # ...but it did not fail
+
+    async def test_notes_accumulate_rather_than_clobber(self) -> None:
+        """A second diagnostic for one formula does not overwrite the first."""
+        report = InstallReport()
+        report.add_note("x", "first")
+        report.add_note("x", "second")
+
+        assert report.notes["x"] == ["first", "second"]
+
+        report.outcomes["x"] = Outcome.FAILED
+        assert report.errors["x"] == "first; second"
+
+    async def test_unexpected_error_fails_one_formula_not_the_run(self) -> None:
+        """An uncaught exception degrades to FAILED instead of losing the report."""
+        deps = {"app": ["lib"], "lib": [], "other": []}
+        cat = MockCatalog(_graph(deps), deps)
+        o = _make(cat, MockDownloader(), MockTab(), MockBrew(install_ok=False))
+
+        def mock_native(
+            name, fr, bottle_path, tab, on_request, aliases, rt_deps, old_keg
+        ):
+            """Raises a RuntimeError for 'lib' to simulate an uncaught exception."""
+            if name == "lib":
+                raise RuntimeError("kaboom")  # Not in the caught error types
+
+            return _NativeResult(stage=None, dest=Path(f"/opt/hb/Cellar/{name}/1.0"))
+
+        o._native_install = mock_native  # ty: ignore[invalid-assignment]
+
+        report = await o.install(["app", "other"])
+
+        assert report.outcomes["lib"] is Outcome.FAILED
+        assert "kaboom" in report.errors["lib"]
+        assert report.outcomes["other"] is Outcome.NATIVE  # Sibling unaffected
+        assert report.outcomes["app"] is Outcome.SKIPPED_DEP_FAILED  # Dependent skipped
 
     async def test_keg_only_reports_native_keg_only(self) -> None:
         """Tests that keg-only formulas are reported as native keg-only."""

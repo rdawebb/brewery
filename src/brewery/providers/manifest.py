@@ -9,6 +9,7 @@ import orjson
 
 from brewery.core.errors import ManifestFetchError, ManifestParseError
 from brewery.core.host import current_platform
+from brewery.core.retry import RETRYABLE_STATUS, retry_async
 
 GHCR_BASE = "https://ghcr.io/v2/homebrew/core"
 
@@ -193,11 +194,24 @@ def manifest_tag(version: str, revision: int = 0, rebuild: int = 0) -> str:
     return tag
 
 
-_RETRY_STATUS = {429, 500, 502, 503, 504}
+def _index_retryable(exc: Exception) -> bool:
+    """Whether a manifest-index GET failure is worth another attempt.
+
+    Args:
+        exc: The exception raised by the GET.
+
+    Returns:
+        True for connection-level failures and retryable statuses; False for
+        genuine ones such as 404.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in RETRYABLE_STATUS
+
+    return isinstance(exc, httpx.TransportError)
 
 
 async def _get_index_with_retry(
-    client: httpx.AsyncClient, url: str, headers: dict, *, max_retries: int = 3
+    client: httpx.AsyncClient, url: str, headers: dict, *, attempts: int = 3
 ) -> httpx.Response:
     """GET the manifest index, retrying transient failures with exponential backoff.
 
@@ -205,7 +219,7 @@ async def _get_index_with_retry(
         client: The shared async HTTP client to use for the request.
         url: The full GHCR manifest URL to fetch.
         headers: Request headers (Authorization, Accept) to include.
-        max_retries: Number of additional attempts after the first failure.
+        attempts: Total number of GETs, including the first.
 
     Returns:
         The successful `httpx.Response` object.
@@ -215,30 +229,21 @@ async def _get_index_with_retry(
         httpx.TransportError: If all retry attempts are exhausted due to
             connection-level failures.
     """
-    import asyncio
-    import random
 
-    last_exc: Exception | None = None
-    for attempt in range(max_retries + 1):
-        try:
-            resp = await client.get(url, headers=headers, follow_redirects=True)
-            resp.raise_for_status()
+    async def get() -> httpx.Response:
+        resp = await client.get(url, headers=headers, follow_redirects=True)
+        resp.raise_for_status()
 
-            return resp
+        return resp
 
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code not in _RETRY_STATUS:
-                raise  # 404 etc, are genuine, not transient
-            last_exc = exc
-
-        except httpx.TransportError as exc:  # Timeouts, connection resets
-            last_exc = exc
-
-        if attempt < max_retries:
-            await asyncio.sleep((2**attempt) * 0.5 + random.random() * 0.25)
-
-    assert last_exc is not None
-    raise last_exc
+    return await retry_async(
+        get,
+        retry_on=_index_retryable,
+        attempts=attempts,
+        base=0.5,
+        jitter=0.25,
+        label="manifest index",
+    )
 
 
 async def fetch_bottle_tab(

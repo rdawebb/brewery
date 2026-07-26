@@ -10,6 +10,7 @@ import functools
 import shutil
 import tempfile
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import Enum
 from graphlib import TopologicalSorter
@@ -24,6 +25,7 @@ from brewery.core.errors import (
     ManifestError,
     RelocationError,
 )
+from brewery.core.logging import BreweryLogger, get_logger
 from brewery.providers.cellar import install_to_cellar, rmtree
 from brewery.providers.downloader import BottleRef, ProgressCb
 from brewery.providers.extractor import extract_bottle
@@ -38,6 +40,8 @@ from brewery.providers.receipt import (
 )
 from brewery.providers.relocator import formula_tokens, relocate_keg
 from brewery.providers.retention import mark_replaced
+
+log: BreweryLogger = get_logger(__name__)
 
 
 class FormulaRowP(Protocol):
@@ -320,10 +324,24 @@ _INSTALLED = {
 
 @dataclass
 class InstallReport:
-    """Report on the outcome of the installation process."""
+    """Report on the outcome of the installation process.
+
+    `notes` is diagnostic: a formula that fell back to brew successfully still
+    records why it fell back; `outcomes` is the sole source of truth for whether
+    a formula installed, `errors` is derived from it.
+    """
 
     outcomes: dict[str, Outcome] = field(default_factory=dict)
-    errors: dict[str, str] = field(default_factory=dict)
+    notes: dict[str, list[str]] = field(default_factory=dict)
+
+    def add_note(self, name: str, msg: str) -> None:
+        """Record a diagnostic for `name`, keeping any earlier ones.
+
+        Args:
+            name: The formula the note is about.
+            msg: The diagnostic message.
+        """
+        self.notes.setdefault(name, []).append(msg)
 
     @property
     def installed(self) -> list[str]:
@@ -346,6 +364,17 @@ class InstallReport:
             for n, o in self.outcomes.items()
             if o in (Outcome.FAILED, Outcome.SKIPPED_DEP_FAILED)
         ]
+
+    @property
+    def errors(self) -> dict[str, str]:
+        """Notes for the formulae that actually failed.
+
+        Returns:
+            Failed formula name -> its notes, joined.
+        """
+        failed = set(self.failed)
+
+        return {n: "; ".join(m) for n, m in self.notes.items() if n in failed}
 
 
 @dataclass
@@ -403,7 +432,7 @@ class Orchestrator:
             InstallReport: The report on the installation outcome.
         """
         req = {self.catalog.resolve_alias(n) for n in requested}
-        closure = self._closure(req)
+        closure = self._closure(req, include_roots=True)
         to_install = {n for n in closure if not self.catalog.is_satisfied(n)}
 
         return await self._run_pipeline(to_install, req)
@@ -426,7 +455,7 @@ class Orchestrator:
         req = {self.catalog.resolve_alias(n) for n in requested}
         to_install = {
             n
-            for n in self._closure(req)
+            for n in self._closure(req, include_roots=True)
             if n in req or not self.catalog.is_satisfied(n)
         }
 
@@ -489,7 +518,24 @@ class Orchestrator:
                 )
                 for task in done:
                     name = pending.pop(task)
-                    outcome = task.result()
+
+                    # An unexpected error degrades this formula to FAILED
+                    try:
+                        outcome = task.result()
+
+                    except asyncio.CancelledError:
+                        raise
+
+                    except Exception as exc:
+                        log.error(
+                            event="install_task_crashed",
+                            formula=name,
+                            error=str(exc),
+                            exc_info=True,
+                        )
+                        report.add_note(name, f"unexpected error: {exc}")
+                        outcome = Outcome.FAILED
+
                     report.outcomes[name] = outcome
                     self.progress.finish(name, outcome.value)
                     ts.done(name)
@@ -499,21 +545,35 @@ class Orchestrator:
                 t.cancel()
 
             await asyncio.gather(*fetch.values(), return_exceptions=True)
+
+            # Drain any pending tasks
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
             self.progress.end()
 
         return report
 
-    def _closure(self, requested: set[str]) -> set[str]:
-        """Computes the closure of the requested formulae.
+    def _closure(self, names: Iterable[str], *, include_roots: bool) -> set[str]:
+        """The transitive runtime-dependency closure of `names`.
 
         Args:
-            requested: The set of requested formulae.
+            names: The formula names to walk from; aliases are resolved.
+            include_roots: Whether the roots themselves are part of the result.
+                When False a root still appears if it is genuinely its own
+                transitive dependency.
 
         Returns:
-            The closure of the requested formulae.
+            The set of canonical names in the closure.
         """
+        roots = [self.catalog.resolve_alias(n) for n in names]
+        stack = (
+            list(roots)
+            if include_roots
+            else [d for r in roots for d in self.catalog.runtime_deps(r)]
+        )
+
         seen: set[str] = set()
-        stack = list(requested)
         while stack:
             name = self.catalog.resolve_alias(stack.pop())
             if name in seen:
@@ -521,31 +581,6 @@ class Orchestrator:
 
             seen.add(name)
             stack.extend(self.catalog.runtime_deps(name))
-
-        return seen
-
-    def _runtime_closure(self, name: str) -> set[str]:
-        """Transitive runtime-dependency names of `name` (excluding itself).
-
-        Args:
-            name: The canonical formula name whose dependency tree to walk.
-
-        Returns:
-            The set of all transitive runtime dependency names, not including
-            `name` itself.
-        """
-        seen: set[str] = set()
-        stack = [self.catalog.resolve_alias(d) for d in self.catalog.runtime_deps(name)]
-
-        while stack:
-            dep = stack.pop()
-            if dep in seen:
-                continue
-
-            seen.add(dep)
-            stack.extend(
-                self.catalog.resolve_alias(d) for d in self.catalog.runtime_deps(dep)
-            )
 
         return seen
 
@@ -562,7 +597,7 @@ class Orchestrator:
         """
         direct = set(self.catalog.runtime_deps(name))
         entries: list[RuntimeDependency] = []
-        for dep in sorted(self._runtime_closure(name)):
+        for dep in sorted(self._closure([name], include_roots=False)):
             dfr = self.catalog.get_formula(dep)
             if dfr is None:
                 continue
@@ -686,7 +721,9 @@ class Orchestrator:
 
         if failed_deps:
             fetch[name].cancel()
-            report.errors[name] = f"dependency failed: {', '.join(sorted(failed_deps))}"
+            report.add_note(
+                name, f"dependency failed: {', '.join(sorted(failed_deps))}"
+            )
 
             return Outcome.SKIPPED_DEP_FAILED
 
@@ -701,7 +738,7 @@ class Orchestrator:
                 if bottle_path is None
                 else f"manifest tab unavailable: {tab_error}"
             )
-            report.errors[name] = f"{reason} -> brew"
+            report.add_note(name, f"{reason} -> brew")
 
             return await self._brew_pour(name, upgrade=old is not None)
 
@@ -738,7 +775,7 @@ class Orchestrator:
             return Outcome.NATIVE_KEG_ONLY if fr.keg_only else Outcome.NATIVE
 
         if result.stage == "link":
-            report.errors[name] = f"link stage: {result.error}"
+            report.add_note(name, f"link stage: {result.error}")
 
             # Native install succeeded but linking didn't: try brew link, then
             # leave installed-but-unlinked (brew's own behaviour)
@@ -748,7 +785,7 @@ class Orchestrator:
             return Outcome.INSTALLED_UNLINKED
 
         # An install-stage failure -> brew pours this formula
-        report.errors[name] = f"install stage: {result.error}"
+        report.add_note(name, f"install stage: {result.error}")
 
         return await self._brew_pour(name, upgrade=old is not None)
 
