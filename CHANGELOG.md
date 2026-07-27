@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 - Install, upgrade, uninstall, link/unlink and cleanup now take Homebrew's own per-formula lock, so brewery and a concurrent `brew` no longer modify the same formula at the same time; a formula another process is holding is reported rather than waited on
 - Changes to shared prefix directories are serialised across brewery processes, so a background cleanup or a second brewery run can no longer interleave with linking
+- Two formulae installing at once that both provide the same file are now reported as a conflict instead of one silently overwriting the other's link; the formula that loses the race leaves the prefix untouched and falls back to `brew link`
 - A corrupt or older-schema installed-records cache now rebuilds itself instead of failing the command
 - An unexpected error installing one formula no longer discards the whole install report, and no longer lets worker threads keep writing to the Cellar after the command has returned
 - A formula that fell back to `brew` successfully is no longer reported as an error

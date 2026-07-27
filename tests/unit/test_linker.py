@@ -372,9 +372,8 @@ class TestLinkExplosion:
         assert "include/X11/Xlib.h" in res.linked
 
     def test_explosion_relinks_valid_under_symlinked_prefix(self, tmp_path) -> None:
-        """The displaced keg is relinked correctly even when a prefix ancestor is a
-        symlink that redirects to a different depth (like macOS /var ->
-        /private/var): the relink must not dangle."""
+        """Test that the displaced keg is relinked correctly even when a prefix ancestor is a
+        symlink that redirects to a different depth."""
         real = tmp_path / "private" / "var"
         real.mkdir(parents=True)
         linkroot = tmp_path / "var"
@@ -539,15 +538,15 @@ class TestLinkExplosion:
 
 
 class TestLinkConcurrency:
-    """The structure lock keeps concurrent links from clobbering shared dirs."""
+    """Tests for concurrent link concurrency and shared directory handling."""
 
     def test_plan_routes_whole_dir_and_leaf_links_separately(
         self, tmp_path, prefix
     ) -> None:
-        """A whole-dir link lands in dir_links (serialised); leaf files in links."""
+        """Test that a whole-dir link lands in dir_links (serialised); leaf files in links."""
         keg = tmp_path / "Cellar" / "libx11" / "1.8"
         _mk(keg, "include/X11/Xlib.h")  # include/X11 -> whole-dir symlink
-        _mk(keg, "bin/xtool")  # leaf file -> lock-free
+        _mk(keg, "bin/xtool")  # Leaf file -> lock-free
 
         plan = linker._build_plan(keg, prefix)
         dir_dsts = {dst for dst, _ in plan.dir_links}
@@ -560,33 +559,30 @@ class TestLinkConcurrency:
     def test_concurrent_links_sharing_a_dir_dont_clobber(
         self, tmp_path, prefix
     ) -> None:
-        """Many kegs sharing a whole-dir directory link without losing any keg.
-
-        All plans are built against the empty prefix (so each independently wants
-        to own include/X11), then applied from threads released together. Without
-        the structure lock the whole-dir symlinks race and clobber; with it the
-        first owns it and the rest explode/descend into a merged real directory.
-        """
+        """Test that concurrent links sharing a whole-dir directory do not clobber."""
         cellar = tmp_path / "Cellar"
         n = 8
         kegs = [(cellar / f"lib{i}" / "1.0", f"lib{i}") for i in range(n)]
         for i, (keg, _) in enumerate(kegs):
-            _mk(keg, f"include/X11/h{i}.h")  # shared whole-dir directory
-            _mk(keg, f"bin/tool{i}")  # distinct leaf file
+            _mk(keg, f"include/X11/h{i}.h")  # Shared whole-dir directory
+            _mk(keg, f"bin/tool{i}")  # Distinct leaf file
 
         barrier = threading.Barrier(n)
         errors: list[Exception] = []
 
         def worker(keg: Path, name: str) -> None:
+            """Worker function for concurrent link operations."""
             barrier.wait()  # Maximise overlap of the apply phase
             try:
                 link_keg(keg, prefix=prefix, name=name)
+
             except Exception as exc:  # noqa: BLE001
                 errors.append(exc)
 
         threads = [threading.Thread(target=worker, args=kv) for kv in kegs]
         for t in threads:
             t.start()
+
         for t in threads:
             t.join()
 
@@ -599,8 +595,203 @@ class TestLinkConcurrency:
             assert _points_to(prefix / "bin" / f"tool{i}", keg / "bin" / f"tool{i}")
 
 
+class TestLeafLinkRaces:
+    """Tests for leaf link races and the behavior of `link_keg` under contention."""
+
+    @pytest.fixture
+    def race(self, monkeypatch) -> Callable[[Callable[[], None]], None]:
+        """Run `act` in the window between building the plan and applying it.
+
+        Models a peer (another brewery thread, or `brew`) taking a path the
+        pre-pass saw as free.
+
+        Returns:
+            A callable `race(act)` that arms the injection for the next link.
+        """
+
+        def _arm(act: Callable[[], None]) -> None:
+            build = linker._build_plan
+
+            def planted(keg: Path, prefix: Path):
+                plan = build(keg, prefix)
+                act()
+
+                return plan
+
+            monkeypatch.setattr(linker, "_build_plan", planted)
+
+        return _arm
+
+    @pytest.fixture
+    def kegs(self, tmp_path) -> tuple[Path, Path]:
+        """Mock two kegs that both ship `bin/tool`.
+
+        Returns:
+            A tuple of (our keg, peer keg).
+        """
+        mine = tmp_path / "Cellar" / "mine" / "1.0"
+        _mk(mine, "bin/aaa")  # Sorts before the contested path, so it links first
+        _mk(mine, "bin/tool")
+        _mk(mine, "share/man/man1/mine.1")
+
+        peer = tmp_path / "Cellar" / "peer" / "1.0"
+        _mk(peer, "bin/tool")
+
+        return mine, peer
+
+    def test_a_leaf_taken_after_the_plan_conflicts(self, prefix, kegs, race) -> None:
+        """Test that a peer's file at a planned-free path is detected, not silently clobbered."""
+        mine, peer = kegs
+        race(
+            lambda: linker.make_relative_symlink(prefix / "bin/tool", peer / "bin/tool")
+        )
+
+        with pytest.raises(LinkError):
+            link_keg(mine, prefix=prefix, name="mine")
+
+        assert _points_to(prefix / "bin/tool", peer / "bin/tool")  # Peer keeps it
+
+    def test_a_late_conflict_rolls_back(self, prefix, kegs, race) -> None:
+        """Test that the loser leaves nothing behind, so `brew link` still sees a clean prefix."""
+        mine, peer = kegs
+        race(
+            lambda: linker.make_relative_symlink(prefix / "bin/tool", peer / "bin/tool")
+        )
+
+        with pytest.raises(LinkError):
+            link_keg(mine, prefix=prefix, name="mine")
+
+        assert not (prefix / "bin/aaa").exists()  # Linked before the conflict
+        assert not (prefix / "share" / "man").exists()  # mkpath'd, then pruned
+        assert not (mine / _LINK_MANIFEST).exists()
+
+    def test_overwrite_takes_a_leaf_taken_after_the_plan(
+        self, prefix, kegs, race
+    ) -> None:
+        """Test that --overwrite claims the path from the peer rather than failing."""
+        mine, peer = kegs
+        race(
+            lambda: linker.make_relative_symlink(prefix / "bin/tool", peer / "bin/tool")
+        )
+
+        result = link_keg(mine, prefix=prefix, name="mine", overwrite=True)
+
+        assert "bin/tool" in result.linked
+        assert _points_to(prefix / "bin/tool", mine / "bin/tool")
+
+    def test_a_leaf_already_pointing_here_is_already_linked(
+        self, prefix, kegs, race
+    ) -> None:
+        """Test that a peer that linked the same real file is agreement, not conflict."""
+        mine, _ = kegs
+        race(
+            lambda: linker.make_relative_symlink(prefix / "bin/tool", mine / "bin/tool")
+        )
+
+        result = link_keg(mine, prefix=prefix, name="mine")
+
+        assert "bin/tool" in result.already_linked
+        assert "bin/tool" not in result.linked
+
+    def test_an_etc_file_created_after_the_plan_is_preserved(
+        self, tmp_path, prefix, race
+    ) -> None:
+        """Test that etc keeps the user's file, whenever it appeared."""
+        keg = tmp_path / "Cellar" / "mine" / "1.0"
+        _mk(keg, "etc/my.conf", "packaged")
+        race(lambda: _mk(prefix, "etc/my.conf", "user"))
+
+        result = link_keg(keg, prefix=prefix, name="mine")
+
+        assert "etc/my.conf" in result.already_linked
+        assert (prefix / "etc" / "my.conf").read_text() == "user"
+
+    def test_only_one_of_many_kegs_wins_a_contested_leaf(
+        self, tmp_path, prefix
+    ) -> None:
+        """Test threads racing for one path: exactly one links it, the rest are told.
+
+        Every keg ships the same `bin/tool` and plans against the empty prefix, so
+        all of them believe they own it. Replacing rather than creating would let
+        each overwrite the last and report success, leaving one winner by accident
+        and no way for the callers to know they had been displaced.
+        """
+        n = 8
+        kegs = [(tmp_path / "Cellar" / f"k{i}" / "1.0", f"k{i}") for i in range(n)]
+        for i, (keg, _) in enumerate(kegs):
+            _mk(keg, "bin/tool")  # The single contested path
+            _mk(keg, f"bin/own{i}")  # Uncontested, so it should survive
+
+        barrier = threading.Barrier(n)
+        won: list[str] = []
+        lost: list[str] = []
+        errors: list[Exception] = []
+
+        def worker(keg: Path, name: str) -> None:
+            barrier.wait()  # Maximise overlap of the apply phase
+            try:
+                result = link_keg(keg, prefix=prefix, name=name)
+
+            except LinkError:
+                lost.append(name)
+
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+            else:
+                won.append(name if "bin/tool" in result.linked else "")
+
+        threads = [threading.Thread(target=worker, args=kv) for kv in kegs]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, errors
+        assert len(won) == 1, f"expected one winner, got {won}"
+        assert len(lost) == n - 1
+
+        winner = won[0]
+        assert _points_to(
+            prefix / "bin/tool", tmp_path / "Cellar" / winner / "1.0" / "bin/tool"
+        )
+
+        # Every loser rolled back; only the winner's own link remains
+        for i, (keg, name) in enumerate(kegs):
+            assert (prefix / f"bin/own{i}").exists() == (name == winner)
+
+
+class TestAtomicReplace:
+    """Tests for atomic replace behavior and staging file cleanup."""
+
+    def test_replacing_a_link_leaves_no_staging_file(self, tmp_path) -> None:
+        """Test that the staged link is renamed into place, never left beside the target."""
+        src = _mk(tmp_path, "keg/bin/tool")
+        other = _mk(tmp_path, "other/bin/tool")
+        dst = tmp_path / "prefix" / "bin" / "tool"
+
+        linker.make_relative_symlink(dst, other)
+        linker.make_relative_symlink(dst, src)
+
+        assert _points_to(dst, src)
+        assert [p.name for p in dst.parent.iterdir()] == ["tool"]
+
+    def test_a_stale_staging_file_does_not_block_a_replace(self, tmp_path) -> None:
+        """Test that a stale staging file left by a crashed peer is cleared, not fatal."""
+        src = _mk(tmp_path, "keg/bin/tool")
+        dst = tmp_path / "prefix" / "bin" / "tool"
+        dst.parent.mkdir(parents=True)
+        stale = dst.with_name(f".{dst.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        stale.symlink_to("nowhere")
+
+        linker.make_relative_symlink(dst, src)
+
+        assert _points_to(dst, src)
+        assert not stale.exists()
+
+
 class TestCrossProcessStructureLock:
-    """The shared-directory pass is serialised against peer processes, not just threads."""
+    """Tests for cross-process structure lock behavior and lock file cleanup."""
 
     @pytest.fixture
     def peer(self, monkeypatch) -> Callable[[Path], int]:
@@ -626,7 +817,7 @@ class TestCrossProcessStructureLock:
         return _hold
 
     def test_link_refuses_while_a_peer_holds_it(self, keg_and_prefix, peer) -> None:
-        """A keg touching shared dirs cannot be linked behind a peer's back."""
+        """Test that a keg touching shared dirs cannot be linked behind a peer's back."""
         keg, prefix = keg_and_prefix
         fd = peer(prefix)
         try:
@@ -639,7 +830,7 @@ class TestCrossProcessStructureLock:
         assert not (prefix / "lib" / "pkgconfig").exists()
 
     def test_unlink_refuses_while_a_peer_holds_it(self, keg_and_prefix, peer) -> None:
-        """Unlinking waits on the same lock, so removals cannot interleave either."""
+        """Test that unlinking waits on the same lock, so removals cannot interleave either."""
         keg, prefix = keg_and_prefix
         fd = peer(prefix)
         try:
@@ -650,7 +841,7 @@ class TestCrossProcessStructureLock:
             os.close(fd)
 
     def test_link_proceeds_once_released(self, keg_and_prefix, peer) -> None:
-        """The lock is advisory only: released, linking behaves normally."""
+        """Test that the lock is advisory only: released, linking behaves normally."""
         keg, prefix = keg_and_prefix
         os.close(peer(prefix))
 
@@ -663,7 +854,7 @@ class TestUnlink:
     """Tests for unlink_keg's manifest fast-path, realpath filter, and fallback."""
 
     def test_manifest_written_on_link(self, tmp_path, prefix) -> None:
-        """link_keg records the candidate set in the keg."""
+        """Test that link_keg records the candidate set in the keg."""
         cellar = tmp_path / "Cellar"
         keg = cellar / "tool/1.0"
         _mk(keg, "bin/tool", "x")
@@ -673,7 +864,7 @@ class TestUnlink:
         assert set(data["linked"]) == {"bin/tool", "lib/libfoo.dylib"}
 
     def test_unlink_removes_recorded_links(self, tmp_path, prefix) -> None:
-        """The fast path removes every recorded link without scanning."""
+        """Test that the fast path removes every recorded link without scanning."""
         cellar = tmp_path / "Cellar"
         keg = cellar / "tool/1.0"
         _mk(keg, "bin/tool", "x")
@@ -686,7 +877,7 @@ class TestUnlink:
         assert not (prefix / "lib" / "libfoo.dylib").exists()
 
     def test_unlink_skips_foreign_owned_path(self, tmp_path, prefix) -> None:
-        """A recorded link now resolving into another keg is left alone."""
+        """Test that a recorded link now resolving into another keg is left alone."""
         cellar = tmp_path / "Cellar"
         a = cellar / "a/1.0"
         _mk(a, "bin/shared", "a")
@@ -701,7 +892,7 @@ class TestUnlink:
         assert os.path.realpath(link) == os.path.realpath(b / "bin" / "shared")
 
     def test_unlink_explosion_stragglers(self, tmp_path, prefix) -> None:
-        """When a whole-dir link was exploded by a later keg, only our files go."""
+        """Test that when a whole-dir link was exploded by a later keg, only our files go."""
         cellar = tmp_path / "Cellar"
         a = cellar / "a/1.0"
         _mk(a, "lib/shared/a.txt", "a")
@@ -719,7 +910,7 @@ class TestUnlink:
         assert shared.is_dir()
 
     def test_unlink_no_manifest_falls_back_to_scan(self, tmp_path, prefix) -> None:
-        """A keg with no manifest is unlinked by scanning the eligible roots."""
+        """Test that a keg with no manifest is unlinked by scanning the eligible roots."""
         cellar = tmp_path / "Cellar"
         keg = cellar / "tool/1.0"
         _mk(keg, "bin/tool", "x")
@@ -731,7 +922,7 @@ class TestUnlink:
         assert not (prefix / "bin" / "tool").exists()
 
     def test_unlink_prunes_emptied_dirs(self, tmp_path, prefix) -> None:
-        """Emptied mkpath dirs are pruned; the eligible root is kept."""
+        """Test that emptied mkpath dirs are pruned; the eligible root is kept."""
         cellar = tmp_path / "Cellar"
         keg = cellar / "tool/1.0"
         _mk(keg, "share/man/man1/tool.1", "x")
@@ -742,7 +933,7 @@ class TestUnlink:
         assert "share/man/man1" in res.pruned
 
     def test_unlink_clears_linked_record_when_ours(self, tmp_path, prefix) -> None:
-        """The linked-keg pointer is removed when it points at this keg."""
+        """Test that the linked-keg pointer is removed when it points at this keg."""
         cellar = tmp_path / "Cellar"
         keg = cellar / "tool/1.0"
         _mk(keg, "bin/tool", "x")
@@ -753,7 +944,7 @@ class TestUnlink:
         assert not record.is_symlink()
 
     def test_unlink_keeps_foreign_linked_record(self, tmp_path, prefix) -> None:
-        """The pointer is left alone when it points at a different keg."""
+        """Test that the pointer is left alone when it points at a different keg."""
         cellar = tmp_path / "Cellar"
         v1 = cellar / "a/1.0"
         _mk(v1, "bin/a", "x")
@@ -767,7 +958,7 @@ class TestUnlink:
         assert record.is_symlink()
 
     def test_unlink_keg_only_is_noop(self, tmp_path, prefix) -> None:
-        """A keg-only keg has nothing linked and unlinks to an empty result."""
+        """Test that a keg-only keg has nothing linked and unlinks to an empty result."""
         cellar = tmp_path / "Cellar"
         keg = cellar / "tool/1.0"
         _mk(keg, "lib/libtool.dylib", "x")
@@ -779,7 +970,7 @@ class TestUnlink:
         assert res.scanned is True  # No manifest -> scan finds nothing
 
     def test_points_into(self, tmp_path) -> None:
-        """_points_into is True for a link into the keg, False otherwise."""
+        """Test that _points_into is True for a link into the keg, False otherwise."""
         keg = tmp_path / "keg"
         (keg / "bin").mkdir(parents=True)
         (keg / "bin" / "x").write_text("x")
@@ -792,7 +983,7 @@ class TestUnlink:
         assert _points_into(outside, keg.resolve()) is False
 
     def test_unlink_removes_opt_link(self, tmp_path, prefix) -> None:
-        """The opt link is removed so no broken symlink survives the keg."""
+        """Test that the opt link is removed so no broken symlink survives the keg."""
         cellar = tmp_path / "Cellar"
         keg = cellar / "openssl@3" / "3.0"
         _mk(keg, "bin/openssl", "x")
@@ -803,7 +994,7 @@ class TestUnlink:
         assert not (prefix / "opt" / "openssl@3").exists()
 
     def test_unlink_keeps_opt_link_for_other_version(self, tmp_path, prefix) -> None:
-        """Unlinking a stale keg leaves opt pointing at the active one."""
+        """Test that unlinking a stale keg leaves opt pointing at the active one."""
         cellar = tmp_path / "Cellar"
         old = cellar / "openssl@3" / "3.0"
         new = cellar / "openssl@3" / "3.1"
@@ -837,10 +1028,10 @@ def _tree(root: Path) -> set[tuple[str, str]]:
 
 
 class TestDryRun:
-    """A dry run reports what would happen and touches nothing."""
+    """Tests for dry run behavior and the preview output."""
 
     def test_link_dry_run_mutates_nothing(self, keg_and_prefix) -> None:
-        """The prefix tree is byte-identical before and after a dry-run link."""
+        """Test that the prefix tree is byte-identical before and after a dry-run link."""
         keg, prefix = keg_and_prefix
         before = _tree(prefix)
 
@@ -850,7 +1041,7 @@ class TestDryRun:
         assert _tree(prefix) == before
 
     def test_link_dry_run_writes_no_record_or_manifest(self, keg_and_prefix) -> None:
-        """Neither the linked-keg pointer nor the unlink manifest is written."""
+        """Test that neither the linked-keg pointer nor the unlink manifest is written."""
         keg, prefix = keg_and_prefix
         link_keg(keg, prefix=prefix, name="openssl@3", dry_run=True)
 
@@ -860,7 +1051,7 @@ class TestDryRun:
     def test_link_dry_run_previews_the_same_paths_it_would_link(
         self, keg_and_prefix
     ) -> None:
-        """Every path the preview names is one a real link goes on to create."""
+        """Test that every path the preview names is one a real link goes on to create."""
         keg, prefix = keg_and_prefix
         preview = link_keg(keg, prefix=prefix, name="openssl@3", dry_run=True)
         actual = link_keg(keg, prefix=prefix, name="openssl@3")
@@ -871,7 +1062,7 @@ class TestDryRun:
     def test_link_dry_run_reports_conflicts_instead_of_raising(
         self, keg_and_prefix
     ) -> None:
-        """Conflicts land on the result, so --overwrite --dry-run can show them."""
+        """Test that conflicts land on the result, so --overwrite --dry-run can show them."""
         keg, prefix = keg_and_prefix
         _mk(prefix, "bin/openssl", "a real file in the way")
 
@@ -883,7 +1074,7 @@ class TestDryRun:
     def test_link_without_dry_run_still_raises_on_conflict(
         self, keg_and_prefix
     ) -> None:
-        """The dry-run carve-out must not disarm the real conflict guard."""
+        """Test that the dry-run carve-out must not disarm the real conflict guard."""
         keg, prefix = keg_and_prefix
         _mk(prefix, "bin/openssl", "a real file in the way")
 
@@ -891,7 +1082,7 @@ class TestDryRun:
             link_keg(keg, prefix=prefix, name="openssl@3")
 
     def test_unlink_dry_run_lists_without_removing(self, keg_and_prefix) -> None:
-        """The paths a real unlink would remove are reported but left in place."""
+        """Test that the paths a real unlink would remove are reported but left in place."""
         keg, prefix = keg_and_prefix
         link_keg(keg, prefix=prefix, name="openssl@3")
         before = _tree(prefix)
@@ -902,7 +1093,7 @@ class TestDryRun:
         assert _tree(prefix) == before
 
     def test_unlink_dry_run_keeps_opt_and_linked_record(self, keg_and_prefix) -> None:
-        """The opt link and linked-keg pointer survive a dry run."""
+        """Test that the opt link and linked-keg pointer survive a dry run."""
         keg, prefix = keg_and_prefix
         (prefix / "opt").mkdir(parents=True, exist_ok=True)
         (prefix / "opt" / "openssl@3").symlink_to(keg)
@@ -914,7 +1105,7 @@ class TestDryRun:
         assert (prefix / "var" / "homebrew" / "linked" / "openssl@3").is_symlink()
 
     def test_unlink_dry_run_matches_what_unlink_removes(self, keg_and_prefix) -> None:
-        """The preview names exactly the paths the real unlink goes on to remove."""
+        """Test that the preview names exactly the paths the real unlink goes on to remove."""
         keg, prefix = keg_and_prefix
         link_keg(keg, prefix=prefix, name="openssl@3")
 
@@ -925,10 +1116,10 @@ class TestDryRun:
 
 
 class TestOptLink:
-    """`opt/<name>` is brew's stable path; link must restore what unlink removes."""
+    """Tests for `opt/<name>` linking behavior and `unlink`-`link` consistency."""
 
     def test_link_creates_the_opt_record(self, keg_and_prefix) -> None:
-        """Brew's Keg#link optlinks before linking; so must ours."""
+        """Test linking matches Brew's Keg#link optlinks before linking behaviour."""
         keg, prefix = keg_and_prefix
         link_keg(keg, prefix=prefix, name="openssl@3")
 
@@ -938,11 +1129,7 @@ class TestOptLink:
         assert _points_to(opt, keg)
 
     def test_unlink_then_link_restores_opt(self, keg_and_prefix) -> None:
-        """`unlink && link` must leave the prefix as it found it.
-
-        unlink_keg drops opt/<name>, so a link that did not rewrite it would
-        leave every `$(brew --prefix)/opt/<name>` reference dangling.
-        """
+        """Test `unlink && link` restores `opt/<name>` to its original state."""
         keg, prefix = keg_and_prefix
         link_keg(keg, prefix=prefix, name="openssl@3")
         unlink_keg(keg, prefix=prefix, name="openssl@3")
@@ -952,14 +1139,14 @@ class TestOptLink:
         assert _points_to(prefix / "opt" / "openssl@3", keg)
 
     def test_link_dry_run_writes_no_opt_record(self, keg_and_prefix) -> None:
-        """Brew skips optlink on a dry run (`unless dry_run`); so do we."""
+        """Test linking does not create `opt/<name>` on a dry run."""
         keg, prefix = keg_and_prefix
         link_keg(keg, prefix=prefix, name="openssl@3", dry_run=True)
 
         assert not (prefix / "opt" / "openssl@3").exists()
 
     def test_link_repoints_a_stale_opt_record(self, keg_and_prefix) -> None:
-        """An opt link left pointing at an older keg is re-pointed, not left stale."""
+        """Test an opt link left pointing at an older keg is re-pointed, not left stale."""
         keg, prefix = keg_and_prefix
         old = prefix / "Cellar" / "openssl@3" / "2.0"
         old.mkdir(parents=True)
@@ -980,7 +1167,7 @@ _CANDIDATES = ["gettext", "python@3.13", "python@3.14", "node", "openssl@3"]
     reason="requires macOS with Homebrew",
 )
 def test_plan_matches_brew_links() -> None:
-    """Non-destructive check: planned links must match those brew actually created."""
+    """Test that the linker plan matches the actual brew links."""
     prefix = Path(
         subprocess.run(
             ["brew", "--prefix"], capture_output=True, text=True, check=True
@@ -999,6 +1186,7 @@ def test_plan_matches_brew_links() -> None:
         if versions and record.is_symlink():
             formula, keg = cand, versions[-1]
             break
+
     if keg is None:
         pytest.skip("none of the candidate formulae are installed and linked")
 
@@ -1028,10 +1216,10 @@ def test_plan_matches_brew_links() -> None:
 
 
 def _symlinks_into(root: Path, keg_real: str) -> set[str]:
-    """Collect symlinks under *root* that resolve into *keg_real*, descending only real directories.
+    """Collect symlinks under root that resolve into keg_real, descending only real directories.
 
     Args:
-        root: The prefix subdirectory to scan (e.g. ``prefix / 'bin'``).
+        root: The prefix subdirectory to scan (e.g. `prefix/'bin'`).
         keg_real: The real (resolved) path of the keg as a string; only symlinks
             whose real target starts with this prefix are collected.
 

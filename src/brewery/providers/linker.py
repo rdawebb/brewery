@@ -2,6 +2,12 @@
 
 Conflict detection is a pre-pass: nothing is mutated if the link would conflict,
 so the caller can fall back to `brew link` without a partially linked prefix.
+
+The pre-pass runs outside the structure lock, so a peer (brewery or `brew`, which
+takes no lock of ours) can take a path between planning and applying. Leaf links
+are therefore created, never replaced: `EEXIST` reports the loser of a race, which
+re-decides against the live prefix and, if the path is genuinely conflicted,
+unwinds this keg's links so the mutate-nothing guarantee survives concurrency.
 """
 
 # This file contains code derived from Homebrew (https://github.com/Homebrew/brew)
@@ -103,6 +109,12 @@ _PYC_EXT = (".pyc", ".pyo")
 
 # Stored symlink set for fast unlinking
 _LINK_MANIFEST = ".brewery_links.json"
+
+# `consider_link`'s wording for a non-symlink occupying a link target
+_EXISTING_FILE = "an existing file"
+
+# Bounds the create/arbitrate cycle when a peer keeps taking and dropping a path
+_LINK_RACE_RETRIES = 3
 
 
 class Action(Enum):
@@ -231,6 +243,10 @@ def _strategy_link_all(rel: Path, is_dir: bool) -> Action:
     return Action.LINK
 
 
+# Load-bearing for concurrency: every strategy decides from the relative path alone,
+# so MKPATH-ness is identical for every keg regardless of prefix state. Explosion
+# targets are thus never MKPATH paths, which confines the unlocked apply path to
+# leaf files and keeps it from racing the shared pass
 _STRATEGIES = {
     "bin": _strategy_link_all,
     "sbin": _strategy_link_all,
@@ -312,7 +328,7 @@ class _Plan:
                 self.already.append(dst)  # etc: keep the user's file
 
             else:
-                self.conflicts.append((str(dst), "an existing file"))
+                self.conflicts.append((str(dst), _EXISTING_FILE))
 
         elif is_dir:
             self.dir_links.append((dst, src))
@@ -585,18 +601,118 @@ def _explode(dst: Path, src: Path) -> list[Path]:
 
 
 def make_relative_symlink(dst: Path, src: Path) -> None:
-    """Create a relative symlink, replacing whatever is already at `dst`.
+    """Create a relative symlink, atomically replacing whatever is already at `dst`.
+
+    The link is staged beside `dst` and renamed over it, so a concurrent reader
+    never sees `dst` missing, as it would between an unlink and a symlink.
 
     Args:
         dst: The destination path.
         src: The source path.
     """
-    target = os.path.relpath(src, dst.parent)
     dst.parent.mkdir(parents=True, exist_ok=True)
-    if dst.is_symlink() or dst.exists():
-        dst.unlink()
 
-    dst.symlink_to(target)
+    # Unique per (process, thread)
+    tmp = dst.with_name(f".{dst.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.unlink(missing_ok=True)  # Stale stage from a crashed peer
+
+    os.symlink(os.path.relpath(src, dst.parent), tmp)
+    try:
+        os.replace(tmp, dst)
+
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _try_symlink(dst: Path, src: Path) -> bool:
+    """Create a relative symlink at `dst` only if nothing occupies it yet.
+
+    Args:
+        dst: The destination path.
+        src: The source path.
+
+    Returns:
+        True if the link was created, False if something is already at `dst`.
+    """
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.symlink(os.path.relpath(src, dst.parent), dst)
+
+    except FileExistsError:
+        return False
+
+    return True
+
+
+def _describe_existing(dst: Path) -> str:
+    """The conflict reason for whatever now occupies `dst`, as `consider_link` words it.
+
+    Args:
+        dst: The occupied path.
+
+    Returns:
+        The symlink's target, or `_EXISTING_FILE` for anything else.
+
+    Raises:
+        FileNotFoundError: `dst` was removed again while being inspected.
+    """
+    if stat.S_ISLNK(os.lstat(dst).st_mode):
+        return os.readlink(dst)
+
+    return _EXISTING_FILE
+
+
+def _link_leaf(
+    result: LinkResult, prefix: Path, dst: Path, src: Path, *, overwrite: bool
+) -> None:
+    """Create one leaf symlink, arbitrating a peer that won the race for `dst`.
+
+    The plan saw `dst` absent, but it is built outside the structure lock, so a
+    concurrent linker may have taken the path since. `EEXIST` retakes the decision
+    `_Plan.consider_link` made at plan time against the now-current prefix.
+
+    Args:
+        result: The result accumulated so far; extended in place.
+        prefix: The prefix being linked into.
+        dst: The prefix path of the symlink to create.
+        src: The keg path the symlink points at.
+        overwrite: Whether to replace a target a peer has taken.
+
+    Raises:
+        LinkError: A peer owns `dst` with different contents, and `overwrite` is unset.
+    """
+    rel = dst.relative_to(prefix).as_posix()
+    preserve_existing, _ = _walk_opts(rel.split("/", 1)[0])
+
+    for _ in range(_LINK_RACE_RETRIES):
+        if _try_symlink(dst, src):
+            result.linked.append(rel)
+            return
+
+        try:
+            existing = _describe_existing(dst)
+
+        except FileNotFoundError:
+            continue  # Removed again mid-arbitration; the create is retried
+
+        # Both kegs ship the same real file (e.g. metapackages)
+        if os.path.realpath(dst) == os.path.realpath(src):
+            result.already_linked.append(rel)
+            return
+
+        if preserve_existing and existing == _EXISTING_FILE:
+            result.already_linked.append(rel)  # etc: keep the user's file
+            return
+
+        if overwrite:
+            make_relative_symlink(dst, src)
+            result.linked.append(rel)
+            return
+
+        raise LinkError([(str(dst), existing)])
+
+    raise LinkError([(str(dst), "contended by a concurrent link")])
 
 
 def _record_link(result: LinkResult, prefix: Path, dst: Path, src: Path) -> None:
@@ -612,23 +728,28 @@ def _record_link(result: LinkResult, prefix: Path, dst: Path, src: Path) -> None
     result.linked.append(dst.relative_to(prefix).as_posix())
 
 
-def _apply_dirs_and_links(plan: _Plan, prefix: Path, result: LinkResult) -> None:
+def _apply_dirs_and_links(
+    plan: _Plan, prefix: Path, result: LinkResult, *, overwrite: bool
+) -> None:
     """mkpath `plan.dirs` and create `plan.links`, recording both into `result`.
 
-    Whole-dir symlinks (`plan.dir_links`) are deliberately not applied, they
-    are shared targets handled under the structure lock by `_apply_shared_dirs`.
+    Leaf links run unlocked (a plan that touches no shared directory takes no
+    lock at all), so each one is created rather than replaced and arbitrates its
+    own races. Whole-dir symlinks (`plan.dir_links`) are deliberately not applied,
+    they are shared targets handled under the structure lock by `_apply_shared_dirs`.
 
     Args:
         plan: The plan whose dirs and leaf-file links to apply.
         prefix: The prefix being linked into.
         result: The result accumulated so far; extended in place.
+        overwrite: Whether to replace a target a peer has taken since plan time.
     """
     for d in plan.dirs:
         d.mkdir(parents=True, exist_ok=True)
         result.created_dirs.append(d.relative_to(prefix).as_posix())
 
     for dst, src in plan.links:
-        _record_link(result, prefix, dst, src)
+        _link_leaf(result, prefix, dst, src, overwrite=overwrite)
 
 
 def _preview(plan: _Plan, prefix: Path) -> LinkResult:
@@ -692,6 +813,28 @@ def _write_link_manifest(keg: Path, result: LinkResult) -> None:
     os.replace(tmp, manifest)
 
 
+def _rollback(keg: Path, prefix: Path, result: LinkResult) -> None:
+    """Undo what this call created, after a conflict surfaced part-way through.
+
+    Only entries still resolving into this keg are removed, the same test
+    `unlink_keg` applies, so a path a peer has since taken over is ignored.
+    An explosion is not reversed, it preserves both kegs' files.
+
+    Args:
+        keg: The keg being linked.
+        prefix: The prefix being linked into.
+        result: The result accumulated so far, naming everything to undo.
+    """
+    keg_real = Path(os.path.realpath(keg))
+    for rel in reversed(result.linked):
+        dst = prefix / rel
+        if dst.is_symlink() and _points_into(dst, keg_real):
+            with contextlib.suppress(OSError):
+                dst.unlink()
+
+    _prune_dirs(prefix, set(result.created_dirs))
+
+
 def link_keg(
     keg_dir: Path,
     *,
@@ -741,10 +884,17 @@ def link_keg(
             stack.enter_context(_STRUCTURE_LOCK)
             stack.enter_context(structure_lock(prefix))
 
-        _apply_dirs_and_links(plan, prefix, result)
+        # A conflict a peer created after the plan was built surfaces mid-apply,
+        # so unwind under whatever lock is held to keep the mutate-nothing contract
+        try:
+            _apply_dirs_and_links(plan, prefix, result, overwrite=overwrite)
 
-        if plan.dir_links or plan.explosions or (overwrite and plan.conflicts):
-            _apply_shared_dirs(keg_dir, prefix, plan, result, overwrite=overwrite)
+            if plan.dir_links or plan.explosions or (overwrite and plan.conflicts):
+                _apply_shared_dirs(keg_dir, prefix, plan, result, overwrite=overwrite)
+
+        except LinkError:
+            _rollback(keg_dir, prefix, result)
+            raise
 
     for dst in plan.already:
         result.already_linked.append(dst.relative_to(prefix).as_posix())
@@ -823,7 +973,7 @@ def _apply_shared_dirs(
     if fresh.conflicts and not overwrite:
         raise LinkError(fresh.conflicts)
 
-    _apply_dirs_and_links(fresh, prefix, result)
+    _apply_dirs_and_links(fresh, prefix, result, overwrite=overwrite)
 
     for dst, src in fresh.dir_links:
         _record_link(result, prefix, dst, src)
