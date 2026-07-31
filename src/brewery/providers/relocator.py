@@ -104,6 +104,10 @@ _LINUX_JAVA_HOME_SUFFIX = "libexec"
 # Bounded thread pool for the regular-file relocation phase
 _RELOCATE_WORKERS = min(8, os.cpu_count() or 4)
 
+# Escape hatch: force every Mach-O through install_name_tool instead of the
+# in-process rewriter
+_NATIVE_MACHO = os.environ.get("BREWERY_NO_NATIVE_MACHO") != "1"
+
 # Ad-hoc re-sign, preserving what install_name_tool would otherwise strip
 _CODESIGN_ARGS = (
     "codesign",
@@ -142,6 +146,16 @@ class InstallName:
 
     kind: NameKind
     value: str
+
+
+@dataclass(frozen=True, slots=True)
+class _NameSlot:
+    """One install name plus the file region its string occupies."""
+
+    kind: NameKind
+    value: str
+    offset: int  # File offset of the string's first byte
+    limit: int  # Exclusive end of the writable region (cmd_off + cmdsize)
 
 
 def build_substitutions(
@@ -329,7 +343,7 @@ def _read_cstr(data: mmap.mmap, start: int, end: int) -> bytes:
     return bytes(data[start : start + nul]) if nul != -1 else bytes(data[start:end])
 
 
-def _parse_thin(data: mmap.mmap, base: int) -> list[InstallName]:
+def _parse_thin(data: mmap.mmap, base: int) -> list[_NameSlot]:
     """Parse one thin Mach-O slice starting at `base`.
 
     Args:
@@ -337,7 +351,7 @@ def _parse_thin(data: mmap.mmap, base: int) -> list[InstallName]:
         base: The base offset to start parsing.
 
     Returns:
-        A list of InstallName objects found in the slice.
+        A list of _NameSlot objects found in the slice.
     """
     # Read the magic in each byte order
     le_magic = struct.unpack_from("<I", data, base)[0]
@@ -356,7 +370,7 @@ def _parse_thin(data: mmap.mmap, base: int) -> list[InstallName]:
     # mach_header[_64]: magic, cputype, cpusubtype, filetype, ncmds, sizeofcmds...
     ncmds = struct.unpack_from(f"{bo}I", data, base + 16)[0]
 
-    names: list[InstallName] = []
+    names: list[_NameSlot] = []
     cmd_off = base + header_size
     for _ in range(ncmds):
         cmd, cmdsize = struct.unpack_from(f"{bo}II", data, cmd_off)
@@ -366,23 +380,29 @@ def _parse_thin(data: mmap.mmap, base: int) -> list[InstallName]:
         if cmd == _LC_ID_DYLIB or cmd in _DYLIB_LOAD_CMDS:
             # dylib_command: cmd, cmdsize, name.offset, timestamp, cur, compat
             name_off = struct.unpack_from(f"{bo}I", data, cmd_off + 8)[0]
-            s = _read_cstr(data, cmd_off + name_off, cmd_off + cmdsize)
+            start, end = cmd_off + name_off, cmd_off + cmdsize
+            s = _read_cstr(data, start, end)
             kind = NameKind.ID if cmd == _LC_ID_DYLIB else NameKind.DYLIB
-            names.append(InstallName(kind, s.decode("utf-8", "surrogateescape")))
+            names.append(
+                _NameSlot(kind, s.decode("utf-8", "surrogateescape"), start, end)
+            )
 
         elif cmd == _LC_RPATH:
             # rpath_command: cmd, cmdsize, path.offset
             path_off = struct.unpack_from(f"{bo}I", data, cmd_off + 8)[0]
-            s = _read_cstr(data, cmd_off + path_off, cmd_off + cmdsize)
+            start, end = cmd_off + path_off, cmd_off + cmdsize
+            s = _read_cstr(data, start, end)
             names.append(
-                InstallName(NameKind.RPATH, s.decode("utf-8", "surrogateescape"))
+                _NameSlot(
+                    NameKind.RPATH, s.decode("utf-8", "surrogateescape"), start, end
+                )
             )
         cmd_off += cmdsize
 
     return names
 
 
-def _collect_names(data: mmap.mmap) -> list[InstallName]:
+def _collect_names(data: mmap.mmap) -> list[_NameSlot]:
     """Parse every dylib/rpath install name from a live mapping.
 
     Dispatches between fat and thin layouts. Shared by `find_install_names`
@@ -393,14 +413,14 @@ def _collect_names(data: mmap.mmap) -> list[InstallName]:
         data: A readable mapping positioned at the start of the file.
 
     Returns:
-        A list of InstallName objects found in the file.
+        A list of _NameSlot objects found in the file.
     """
     raw_magic = struct.unpack_from(">I", data, 0)[0]
 
     if raw_magic in (_FAT_MAGIC, _FAT_CIGAM, _FAT_MAGIC_64, _FAT_CIGAM_64):
         is64 = raw_magic in (_FAT_MAGIC_64, _FAT_CIGAM_64)
         nfat = struct.unpack_from(">I", data, 4)[0]  # Fat header is BE
-        names: list[InstallName] = []
+        names: list[_NameSlot] = []
         arch_off = 8
 
         for _ in range(nfat):
@@ -415,14 +435,15 @@ def _collect_names(data: mmap.mmap) -> list[InstallName]:
                 arch_off += 20
             names.extend(_parse_thin(data, offset))
 
-        # De-duplicate identical names shared across slices
-        return list(dict.fromkeys(names))
+        return names
 
     return _parse_thin(data, 0)
 
 
 def find_install_names(path: Path) -> list[InstallName]:
     """Return every dylib/rpath install name in a Mach-O (handles fat binaries).
+
+    Identical names shared across fat slices collapse to one entry.
 
     Args:
         path: The path to the Mach-O file.
@@ -435,7 +456,11 @@ def find_install_names(path: Path) -> list[InstallName]:
             return []
 
         with mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-            return _collect_names(mm)
+            return list(
+                dict.fromkeys(
+                    InstallName(slot.kind, slot.value) for slot in _collect_names(mm)
+                )
+            )
 
 
 @dataclass(frozen=True)
@@ -609,8 +634,12 @@ def _writable(path: Path):
                 os.chmod(path, mode)
 
 
-def _build_macho_args(names: list[InstallName], subs: dict[bytes, bytes]) -> list[str]:
+def _build_macho_args(names: list[_NameSlot], subs: dict[bytes, bytes]) -> list[str]:
     """Build the install_name_tool argument list for a Mach-O file.
+
+    The fallback path, for files the in-process rewriter declines. Names shared
+    across fat slices yield one argument pair, since install_name_tool rewrites
+    every matching command in every slice.
 
     Args:
         names: The install names parsed from the file.
@@ -620,7 +649,7 @@ def _build_macho_args(names: list[InstallName], subs: dict[bytes, bytes]) -> lis
         The install_name_tool arguments (empty if nothing needs rewriting).
     """
     args: list[str] = []
-    for name in names:
+    for name in dict.fromkeys(InstallName(n.kind, n.value) for n in names):
         old = name.value
         old_b = old.encode("utf-8", "surrogateescape")
         new_b = _apply(old_b, subs)
@@ -668,6 +697,130 @@ def _run_install_name_tool(path: Path, args: list[str]) -> None:
                 "install_name_tool not found on PATH; "
                 "install the Xcode Command Line Tools",
             )
+
+
+def _plan_macho_patches(
+    slots: list[_NameSlot], subs: dict[bytes, bytes]
+) -> list[tuple[int, bytes]] | None:
+    """Plan the in-place byte writes that relocate a Mach-O's install names.
+
+    A load command's path string is NUL-padded out to `cmdsize`, so a
+    replacement that fits in `[offset, limit)` can be written over the top with
+    no change to the file's layout.
+
+    Args:
+        slots: The install-name slots parsed from the file.
+        subs: A mapping of placeholder bytes to their replacements.
+
+    Returns:
+        The (offset, bytes) writes, empty if nothing needs rewriting, or None if
+        any replacement is too long for its region and falls back to install_name_tool.
+    """
+    patches: list[tuple[int, bytes]] = []
+    for slot in slots:
+        old_b = slot.value.encode("utf-8", "surrogateescape")
+        new_b = _apply(old_b, subs)
+        if new_b == old_b:
+            continue  # No placeholder in this entry
+
+        room = slot.limit - slot.offset
+        if len(new_b) + 1 > room:  # +1 for the NUL terminator
+            return None
+
+        patches.append((slot.offset, new_b + b"\x00" * (room - len(new_b))))
+
+    return patches
+
+
+def _patch_macho(path: Path, patches: list[tuple[int, bytes]]) -> None:
+    """Apply planned install-name writes to a Mach-O in place.
+
+    Args:
+        path: The path to the Mach-O file.
+        patches: A non-empty list of (offset, bytes) writes.
+
+    Raises:
+        OSError: If the file could not be opened or written.
+    """
+    with _writable(path), path.open("r+b") as fh:
+        for offset, data in patches:
+            os.pwrite(fh.fileno(), data, offset)
+
+
+def _verify_macho(path: Path) -> bool:
+    """Re-read a patched Mach-O and confirm no install name kept a placeholder.
+
+    Cheap insurance against a mis-parsed header having sent a write to the wrong offset.
+
+    Args:
+        path: The path to the patched Mach-O file.
+
+    Returns:
+        True if every install name is placeholder-free.
+    """
+    marker = _PLACEHOLDER_MARKER.decode()
+    try:
+        with (
+            path.open("rb") as fh,
+            mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm,
+        ):
+            return all(marker not in slot.value for slot in _collect_names(mm))
+
+    except (OSError, ValueError, struct.error):
+        return False
+
+
+def _relocate_macho(
+    path: Path, slots: list[_NameSlot], subs: dict[bytes, bytes]
+) -> bool:
+    """Rewrite one Mach-O's install names, in process where possible.
+
+    Falls back to install_name_tool when a replacement outgrows the padding its
+    load command reserves, or when the in-place write does not verify. The file
+    is left unsigned either way; the caller batches the re-sign.
+
+    Args:
+        path: The path to the Mach-O file.
+        slots: The install-name slots parsed from the file.
+        subs: A mapping of placeholder bytes to their replacements.
+
+    Returns:
+        True if the file was rewritten, False if it needed no change.
+
+    Raises:
+        RelocationError: If the fallback rewrite fails.
+    """
+    if _NATIVE_MACHO:
+        patches = _plan_macho_patches(slots, subs)
+        if patches is not None:
+            if not patches:
+                return False  # Marker present, but not in any install name
+
+            try:
+                with path.open("rb") as fh:
+                    original = [
+                        (off, os.pread(fh.fileno(), len(data), off))
+                        for off, data in patches
+                    ]
+                _patch_macho(path, patches)
+
+            except OSError as exc:
+                raise RelocationError(path, f"install-name rewrite failed: {exc}")
+
+            if _verify_macho(path):
+                return True
+
+            # Put the file back the way it was and let the real tool try
+            with contextlib.suppress(OSError):
+                _patch_macho(path, original)
+
+    args = _build_macho_args(slots, subs)
+    if not args:
+        return False
+
+    _run_install_name_tool(path, args)
+
+    return True
 
 
 def _rewrite_str(path: Path, old: str, subs: dict[bytes, bytes]) -> str | None:
@@ -926,7 +1079,7 @@ def _process_file(
         RelocationError: If the file could not be relocated.
     """
     path = Path(path_str)
-    macho_args: list[str] | None = None
+    macho_slots: list[_NameSlot] | None = None
     elf_args: list[str] | None = None
     new_text: bytes | None = None
     text_rel: str | None = None
@@ -950,7 +1103,7 @@ def _process_file(
                     if skip_linkage:
                         return None, None, False  # :any_skip_relocation
 
-                    macho_args = _build_macho_args(_collect_names(mm), subs)
+                    macho_slots = _collect_names(mm)
 
                 elif kind is _Kind.ELF:
                     if skip_linkage:
@@ -973,12 +1126,11 @@ def _process_file(
         raise RelocationError(path, f"read failed: {exc}") from exc
 
     # Mapping is closed here, so safe to mutate the file
-    if macho_args is not None:
-        if not macho_args:
+    if macho_slots is not None:
+        # Install names now; re-signing is batched by relocate_keg
+        if not _relocate_macho(path, macho_slots, subs):
             return None, None, False  # Marker present but not in any install name
 
-        # install_name_tool now; re-signing is batched by relocate_keg
-        _run_install_name_tool(path, macho_args)
         return path, None, False
 
     if elf_args is not None:

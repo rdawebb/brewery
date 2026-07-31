@@ -117,6 +117,32 @@ def _fat_macho(slices: list[bytes]) -> bytes:
 
 
 @pytest.fixture
+def force_install_name_tool(monkeypatch) -> None:
+    """Disable the in-process rewriter, as `BREWERY_NO_NATIVE_MACHO=1` does.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    monkeypatch.setattr(r, "_NATIVE_MACHO", False)
+
+
+def _slots(path: Path) -> list:
+    """Parse a Mach-O's install-name slots, offsets included.
+
+    Args:
+        path: The path to the Mach-O file.
+
+    Returns:
+        The file's _NameSlot list, one entry per load command per slice.
+    """
+    with (
+        path.open("rb") as fh,
+        mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm,
+    ):
+        return r._collect_names(mm)
+
+
+@pytest.fixture
 def subs(brew_paths) -> dict[bytes, bytes]:
     """Fixture for building substitution mappings.
 
@@ -226,6 +252,37 @@ class TestMachOParsing:
 
         # Same install name in both arch slices collapses to one entry
         assert names == [InstallName(NameKind.ID, "@@HOMEBREW_PREFIX@@/lib/libu.dylib")]
+
+    def test_slots_locate_the_padded_string_region(self, tmp_path) -> None:
+        """Tests each slot's [offset, limit) must span the string and its NUL padding."""
+        p = tmp_path / "libfoo.dylib"
+        p.write_bytes(
+            _thin_macho(
+                [
+                    _lc_dylib(r._LC_ID_DYLIB, "@@HOMEBREW_PREFIX@@/lib/libfoo.dylib"),
+                    _lc_rpath("@@HOMEBREW_CELLAR@@/foo/1.0/lib"),
+                ]
+            )
+        )
+        raw = p.read_bytes()
+
+        for slot in _slots(p):
+            region = raw[slot.offset : slot.limit]
+            assert region.startswith(slot.value.encode())
+            # Everything past the string is padding, so the region is writable
+            assert set(region[len(slot.value) :]) == {0}
+
+    def test_fat_slots_keep_every_slice(self, tmp_path) -> None:
+        """Tests a name shared by two slices is two patch sites, not one."""
+        slice_ = _thin_macho(
+            [_lc_dylib(r._LC_ID_DYLIB, "@@HOMEBREW_PREFIX@@/lib/u.dylib")]
+        )
+        p = tmp_path / "fat.dylib"
+        p.write_bytes(_fat_macho([slice_, slice_]))
+
+        slots = _slots(p)
+        assert [s.value for s in slots] == ["@@HOMEBREW_PREFIX@@/lib/u.dylib"] * 2
+        assert slots[0].offset != slots[1].offset
 
     def test_parse_empty_file(self, tmp_path) -> None:
         """Tests parsing of an empty Mach-O file."""
@@ -463,8 +520,103 @@ def _keg_with_dylib(root: Path, load_commands: list[bytes], name: str = "libfoo.
 class TestMachORewrite:
     """Tests for Mach-O relocation, driven through the real keg walker."""
 
-    def test_relocate_keg_builds_correct_macho_argv(
+    def test_relocate_keg_rewrites_install_names_in_place(
         self, tmp_path, brew_paths, mock_run
+    ) -> None:
+        """Tests the in-process rewriter patches the header without spawning a tool."""
+        runs = mock_run()
+        keg, dylib = _keg_with_dylib(
+            tmp_path,
+            [
+                _lc_dylib(r._LC_ID_DYLIB, "@@HOMEBREW_PREFIX@@/lib/libfoo.dylib"),
+                _lc_dylib(r._LC_LOAD_DYLIB, "@@HOMEBREW_PREFIX@@/lib/libbar.dylib"),
+                _lc_dylib(r._LC_LOAD_DYLIB, "/usr/lib/libSystem.B.dylib"),  # untouched
+                _lc_rpath("@@HOMEBREW_CELLAR@@/foo/1.0/lib"),
+            ],
+        )
+        before = dylib.stat().st_size
+
+        result = r.relocate_keg(keg, **brew_paths)
+        assert result.macho_relocated == 1
+
+        # Only the batched re-sign; install_name_tool never ran
+        assert [cmd[0] for cmd in runs] == ["codesign"]
+
+        assert [(n.kind, n.value) for n in r.find_install_names(dylib)] == [
+            (NameKind.ID, "/opt/homebrew/lib/libfoo.dylib"),
+            (NameKind.DYLIB, "/opt/homebrew/lib/libbar.dylib"),
+            (NameKind.DYLIB, "/usr/lib/libSystem.B.dylib"),
+            (NameKind.RPATH, "/opt/homebrew/Cellar/foo/1.0/lib"),
+        ]
+
+        # In place means in place: the layout is untouched and no stale tail survives
+        assert dylib.stat().st_size == before
+        assert b"@@HOMEBREW" not in dylib.read_bytes()
+
+    def test_relocate_keg_patches_every_fat_slice(
+        self, tmp_path, brew_paths, mock_run
+    ) -> None:
+        """Tests a name shared across slices must be rewritten in both of them."""
+        mock_run()
+        keg = tmp_path / "keg"
+        (keg / "lib").mkdir(parents=True)
+        dylib = keg / "lib" / "fat.dylib"
+        slice_ = _thin_macho(
+            [_lc_dylib(r._LC_ID_DYLIB, "@@HOMEBREW_PREFIX@@/lib/fat.dylib")]
+        )
+        dylib.write_bytes(_fat_macho([slice_, slice_]))
+
+        assert r.relocate_keg(keg, **brew_paths).macho_relocated == 1
+        assert [s.value for s in _slots(dylib)] == ["/opt/homebrew/lib/fat.dylib"] * 2
+
+    def test_relocate_keg_falls_back_when_name_outgrows_its_padding(
+        self, tmp_path, brew_paths, mock_run
+    ) -> None:
+        """Tests a replacement too long for its load command goes to install_name_tool."""
+        runs = mock_run()
+        keg, dylib = _keg_with_dylib(
+            tmp_path, [_lc_dylib(r._LC_ID_DYLIB, "@@HOMEBREW_CELLAR@@/lib")]
+        )
+        original = dylib.read_bytes()
+
+        assert r.relocate_keg(keg, **brew_paths).macho_relocated == 1
+        assert [cmd[0] for cmd in runs] == ["install_name_tool", "codesign"]
+        assert runs[0][:3] == ["install_name_tool", "-id", "/opt/homebrew/Cellar/lib"]
+
+        # The stubbed tool is a no-op, so the file must be exactly as it was
+        assert dylib.read_bytes() == original
+
+    def test_relocate_keg_falls_back_when_verification_fails(
+        self, tmp_path, brew_paths, mock_run, monkeypatch
+    ) -> None:
+        """Tests a patch that does not verify is rolled back, then retried with the tool."""
+        runs = mock_run()
+        keg, dylib = _keg_with_dylib(
+            tmp_path,
+            [_lc_dylib(r._LC_ID_DYLIB, "@@HOMEBREW_PREFIX@@/lib/libfoo.dylib")],
+        )
+        original = dylib.read_bytes()
+        monkeypatch.setattr(r, "_verify_macho", lambda path: False)
+
+        assert r.relocate_keg(keg, **brew_paths).macho_relocated == 1
+        assert [cmd[0] for cmd in runs] == ["install_name_tool", "codesign"]
+        assert dylib.read_bytes() == original  # Rolled back before the fallback
+
+    def test_kill_switch_forces_install_name_tool(
+        self, tmp_path, brew_paths, mock_run, force_install_name_tool
+    ) -> None:
+        """Tests BREWERY_NO_NATIVE_MACHO routes even a fitting rewrite to the tool."""
+        runs = mock_run()
+        keg, _ = _keg_with_dylib(
+            tmp_path,
+            [_lc_dylib(r._LC_ID_DYLIB, "@@HOMEBREW_PREFIX@@/lib/libfoo.dylib")],
+        )
+
+        assert r.relocate_keg(keg, **brew_paths).macho_relocated == 1
+        assert [cmd[0] for cmd in runs] == ["install_name_tool", "codesign"]
+
+    def test_fallback_builds_correct_macho_argv(
+        self, tmp_path, brew_paths, mock_run, force_install_name_tool
     ) -> None:
         """Tests that the correct arguments are passed to the relocation commands."""
         runs = mock_run()
@@ -534,7 +686,7 @@ class TestMachORewrite:
         assert runs == []
 
     def test_install_name_tool_failure_raises_relocation_error(
-        self, tmp_path, brew_paths, mock_run
+        self, tmp_path, brew_paths, mock_run, force_install_name_tool
     ) -> None:
         """A failing install_name_tool aborts with the offending file and reason."""
         keg, dylib = _keg_with_dylib(
@@ -559,7 +711,7 @@ class TestMachORewrite:
         )
         os.chmod(dylib, 0o555)  # Typical read-only executable mode in a keg
 
-        # Both install_name_tool and codesign must see a writable file
+        # codesign must see a writable file
         seen_mode: list[int] = []
 
         def record(cmd) -> None:
@@ -574,7 +726,11 @@ class TestMachORewrite:
         result = r.relocate_keg(keg, **brew_paths)
         assert result.macho_relocated == 1
 
-        assert seen_mode and all(seen_mode), "file was not writable during the rewrite"
+        # The in-place write went through despite the missing owner-write bit
+        assert r.find_install_names(dylib) == [
+            InstallName(NameKind.ID, "/opt/homebrew/lib/libro.dylib")
+        ]
+        assert seen_mode and all(seen_mode), "file was not writable during the re-sign"
         assert oct(dylib.stat().st_mode & 0o777) == "0o555"  # Mode restored
 
 
@@ -775,7 +931,7 @@ class TestOrchestration:
             r.relocate_keg(keg, **brew_paths)
 
     def test_relocate_keg_propagates_macho_failure(
-        self, tmp_path, mock_run, brew_paths
+        self, tmp_path, mock_run, brew_paths, force_install_name_tool
     ) -> None:
         """Tests that Mach-O relocation failures are propagated."""
         keg = tmp_path / "keg"
@@ -793,9 +949,9 @@ class TestOrchestration:
             r.relocate_keg(keg, **brew_paths)
 
     def test_relocate_keg_batches_codesign_across_machos(
-        self, tmp_path, mock_run, brew_paths
+        self, tmp_path, mock_run, brew_paths, force_install_name_tool
     ) -> None:
-        """All rewritten Mach-O files are re-signed in one codesign call, after
+        """Tests that all rewritten Mach-O files are re-signed in one codesign call, after
         every install_name_tool has run."""
         keg = tmp_path / "keg"
         (keg / "lib").mkdir(parents=True)

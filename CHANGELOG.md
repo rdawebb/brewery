@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Changed
 
+- Mach-O install names are rewritten natively instead of by spawning `install_name_tool` subprocesses, cutting the relocation step time of an install on binary-heavy formulae; `install_name_tool` is still used where a rewritten path no longer fits its load command, and `BREWERY_NO_NATIVE_MACHO=1` forces every binary through it
+- A binary that already lists the relocated search path no longer fails to install; the duplicate `LC_RPATH` entry is harmless to the dynamic loader, where `install_name_tool` rejected it outright
 - Install timestamps in the table view are shown as `YYYY-MM-DD HH:MM` local time instead of a full ISO-8601 string
 
 ### Fixed
