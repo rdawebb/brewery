@@ -5,8 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from brewery.core.config import BreweryENV
-from brewery.core.errors import LinkError
+from brewery.core.errors import LinkError, OperationInProgressError
 from brewery.core.fs_state import is_effectively_linked, linked_names
+from brewery.core.locks import formula_lock
 from brewery.core.models import Package, PackageStatus
 from brewery.providers.linker import LinkResult, UnlinkResult, link_keg, unlink_keg
 
@@ -97,18 +98,19 @@ def run_link(
                 continue
 
         try:
-            result: LinkResult = link_keg(
-                _keg(pkg),
-                prefix=env.prefix,
-                name=pkg.name,
-                overwrite=overwrite,
-                dry_run=dry_run,
-            )
+            with formula_lock(pkg.name, prefix=env.prefix):
+                result: LinkResult = link_keg(
+                    _keg(pkg),
+                    prefix=env.prefix,
+                    name=pkg.name,
+                    overwrite=overwrite,
+                    dry_run=dry_run,
+                )
 
         except LinkError as e:
             failures.append((pkg.name, _conflict_reason(name=pkg.name, error=e)))
 
-        except OSError as e:
+        except (OperationInProgressError, OSError) as e:
             failures.append((pkg.name, str(object=e)))
 
         else:
@@ -140,11 +142,12 @@ def run_unlink(
 
     for pkg in pkgs:
         try:
-            result: UnlinkResult = unlink_keg(
-                _keg(pkg), prefix=env.prefix, name=pkg.name, dry_run=dry_run
-            )
+            with formula_lock(pkg.name, prefix=env.prefix):
+                result: UnlinkResult = unlink_keg(
+                    _keg(pkg), prefix=env.prefix, name=pkg.name, dry_run=dry_run
+                )
 
-        except OSError as e:
+        except (OperationInProgressError, OSError) as e:
             failures.append((pkg.name, str(object=e)))
 
         else:

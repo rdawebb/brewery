@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
+import os
 from pathlib import Path
 
 import pytest
 
 import brewery.providers.orchestrator as orch_mod
 from brewery.core.errors import DownloadError, ManifestError
+from brewery.core.locks import lock_path
 from brewery.providers.downloader import BottleRef
 from brewery.providers.linker import link_keg
 from brewery.providers.manifest import BottleTabInfo
@@ -579,6 +582,23 @@ class TestKegOnlyPostInstall:
         assert "relocate boom" in report.notes["x"][0]  # Why it fell back is kept
         assert report.errors == {}  # ...but it did not fail
 
+    async def test_locked_rack_fails_without_a_brew_fallback(self) -> None:
+        """brew locks the same rack, so retrying through brew would fail too."""
+        cat = MockCatalog({"x": MockFormula("x")}, {"x": []})
+        brew = MockBrew()
+        o = _make(
+            cat,
+            MockDownloader(),
+            MockTab(),
+            brew,
+            native={"x": _NativeResult(stage="lock", error="already locked /Cellar/x")},
+        )
+        report = await o.install(["x"])
+
+        assert report.outcomes["x"] is Outcome.FAILED
+        assert "already locked" in report.errors["x"]
+        assert brew.calls == []  # No pointless fallback onto the same lock
+
     async def test_notes_accumulate_rather_than_clobber(self) -> None:
         """A second diagnostic for one formula does not overwrite the first."""
         report = InstallReport()
@@ -939,6 +959,42 @@ class TestUpgradeSwap:
         assert Path((prefix / "bin" / "foo").resolve()) == new / "bin" / "foo"
         assert Path((prefix / "opt" / "wget").resolve()) == new  # opt -> v2
         assert old.exists()  # Retained, no rmtree
+
+
+class TestRackLock:
+    """The native pour holds the formula's rack lock while it mutates the Cellar."""
+
+    async def test_locked_rack_stops_the_pour(self, tmp_path) -> None:
+        """A peer holding the rack lock aborts before anything is extracted."""
+        prefix = tmp_path / "prefix"
+        cfg = InstallConfig(
+            prefix=prefix,
+            repository=prefix / "Library",
+            api_path="/api",
+            staging_root=prefix / "var" / "staging",
+        )
+        o = Orchestrator(
+            catalog=MockCatalog({}, {}),
+            downloader=MockDownloader(),
+            tab_fetcher=MockTab(),
+            brew=MockBrew(),
+            config=cfg,
+        )
+
+        path = lock_path(prefix, "wget")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            res = o._native_install(
+                "wget", MockFormula("wget"), Path("bottle"), _tab("wget"), True, [], []
+            )
+
+        finally:
+            os.close(fd)
+
+        assert res.stage == "lock"
+        assert not (prefix / "Cellar").exists()  # Nothing was poured
 
 
 class _RecordingProgress:

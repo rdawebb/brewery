@@ -40,7 +40,7 @@ skip_no_brew = pytest.mark.skipif(
 )
 
 # Test list: many dylibs, an rpath/executable-heavy keg, a keg-only lib,
-# and one typically marked :any_skip_relocation to exercise the no-op path.
+# and one typically marked :any_skip_relocation to exercise the no-op path
 REAL_FORMULAE = ["openssl@3", "sqlite", "node", "zlib"]
 
 
@@ -56,25 +56,6 @@ def _brew(*args: str) -> str:
     return subprocess.run(
         ["brew", *args], capture_output=True, text=True, check=True
     ).stdout.strip()
-
-
-def _installed_keg(formula: str, prefix: Path) -> Path | None:
-    """Get the installed keg path for a formula.
-
-    Args:
-        formula: The formula to check.
-        prefix: The Homebrew prefix path.
-
-    Returns:
-        The path to the installed keg, or None if not found.
-    """
-    cellar = prefix / "Cellar" / formula
-    if not cellar.is_dir():
-        return None
-
-    versions = sorted(p for p in cellar.iterdir() if p.is_dir())
-
-    return versions[-1] if versions else None
 
 
 def _macho_files(root: Path) -> list[Path]:
@@ -196,15 +177,14 @@ def relocated_real_keg(request, tmp_path_factory, brew_env) -> tuple[Path, Path]
     formula = request.param
     prefix = brew_env["prefix"]
 
-    installed = _installed_keg(formula, prefix)
-    if installed is None:
-        pytest.skip(f"{formula} not installed")
-
     bottle = brew_env["bottles"].get(formula)
     if bottle is None:
         pytest.skip(f"{formula} bottle not cached (set BREWERY_FETCH=1 to fetch)")
 
     keg = extract_bottle(bottle, tmp_path_factory.mktemp(formula.replace("@", "_")))
+    installed = prefix / "Cellar" / formula / keg.name
+    if not installed.is_dir():
+        pytest.skip(f"{formula} {keg.name} not installed (cached bottle is stale)")
 
     r.relocate_keg(
         keg,
@@ -372,12 +352,12 @@ class TestRelocationRealKegs:
             if not ref.exists():
                 continue  # Symlinked/version-specific path differences
 
-            ours = {(n.kind, n.value) for n in r.find_install_names(binary)}
-            theirs = {(n.kind, n.value) for n in r.find_install_names(ref)}
-            if ours != theirs:
+            br = {(n.kind, n.value) for n in r.find_install_names(binary)}
+            brew = {(n.kind, n.value) for n in r.find_install_names(ref)}
+            if br != brew:
                 mismatches.append(
-                    f"{rel}\n  Only brewery's:   {sorted(ours - theirs)}"
-                    f"\n  Only brew's: {sorted(theirs - ours)}"
+                    f"{rel}\n  Only brewery's:   {sorted(br - brew)}"
+                    f"\n  Only brew's: {sorted(brew - br)}"
                 )
 
         # A diff here reveals any fixups brew performs beyond placeholder substitution

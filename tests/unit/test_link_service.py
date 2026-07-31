@@ -2,15 +2,36 @@
 
 from __future__ import annotations
 
+import fcntl
+import os
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
+from brewery.core.locks import lock_path
 from brewery.core.models import Package, PackageKind, PackageStatus
 from brewery.providers.link_service import run_link, run_unlink
 
 pytestmark = pytest.mark.unit
+
+
+def _hold_rack(prefix: Path, name: str) -> int:
+    """Lock a formula's rack from an unrelated fd, as a peer process would.
+
+    Args:
+        prefix: The Homebrew prefix.
+        name: The formula whose rack to lock.
+
+    Returns:
+        The locked descriptor; close it to release.
+    """
+    path = lock_path(prefix, name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+
+    return fd
 
 
 @pytest.fixture
@@ -176,4 +197,39 @@ class TestRunUnlink:
 
         assert "bin/wget" in unlinked[0][1].removed
         assert not failures
+        assert (prefix / "bin" / "wget").is_symlink()
+
+
+class TestRackLock:
+    """A rack locked by another process is a per-formula failure."""
+
+    def test_link_refuses_a_locked_rack(self, prefix, mock_env, make_pkg) -> None:
+        """The prefix is left untouched and the reason is reported."""
+        pkg = make_pkg("wget")
+        fd = _hold_rack(prefix, "wget")
+        try:
+            linked, _, failures = run_link([pkg], env=mock_env)
+
+        finally:
+            os.close(fd)
+
+        assert not linked
+        assert [name for name, _ in failures] == ["wget"]
+        assert "already locked" in failures[0][1]
+        assert not (prefix / "bin" / "wget").exists()
+
+    def test_unlink_refuses_a_locked_rack(self, prefix, mock_env, make_pkg) -> None:
+        """An in-progress operation on the rack keeps the symlinks in place."""
+        pkg = make_pkg("wget")
+        run_link([pkg], env=mock_env)
+
+        fd = _hold_rack(prefix, "wget")
+        try:
+            unlinked, _, failures = run_unlink([pkg], env=mock_env)
+
+        finally:
+            os.close(fd)
+
+        assert not unlinked
+        assert [name for name, _ in failures] == ["wget"]
         assert (prefix / "bin" / "wget").is_symlink()

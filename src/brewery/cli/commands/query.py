@@ -21,7 +21,7 @@ def list_pkgs(
     ] = False,
     table: Annotated[
         bool,
-        app.Option("--table", "-t", "--verbose", "-v", help="Show the full table view"),
+        app.Option("--table", "-t", "--verbose", help="Show the full table view"),
     ] = False,
 ) -> None:
     """List packages in the repository.

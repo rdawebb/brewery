@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Coroutine, Iterator
 from contextlib import contextmanager
-from typing import Any
+from typing import Annotated, Any
 
 from rich.console import Console
 from typer_extensions import ExtendedTyper
 
+from brewery import __version__
 from brewery.core.logging import BreweryLogger, configure_logging, get_logger
 from brewery.core.repo import Repository
 
@@ -20,8 +22,34 @@ app = ExtendedTyper(help="Brewery: A package management CLI tool")
 console = Console(emoji=False, highlight=False)
 
 
+def _print_version(value: bool) -> None:
+    """Print the Brewery version and exit, when --version was passed.
+
+    Args:
+        value: Whether the --version flag was present.
+    """
+    if not value:
+        return
+
+    console.print(f"\nBrewery [green]{__version__}[/green]\n", style="bold")
+    sys.exit(0)
+
+
 @app.callback()
-def setup() -> None:
+def setup(
+    # Unused by the body: the eager callback prints and exits during parsing
+    version: Annotated[
+        bool,
+        app.Option(
+            "--version",
+            "-v",
+            help="Show the Brewery version and exit",
+            callback=_print_version,
+            is_eager=True,
+            expose_value=False,
+        ),
+    ] = False,
+) -> None:
     """Set up the CLI environment"""
     configure_logging(console_level=os.environ.get("BREWERY_LOG_CONSOLE"))
 

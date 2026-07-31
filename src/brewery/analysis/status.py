@@ -2,24 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, TypedDict
-
 from brewery.core.models import PackageKind, PackageStatus
-
-InstalledFormula = list[dict[str, Any]]
-InstalledCask = str
-
-
-class StatusInfo(TypedDict, total=False):
-    """TypedDict for package status information."""
-
-    outdated: bool | None
-    version: dict
-    pinned: bool | None
-    keg_only: bool | None
-    linked_keg: str | None
-    installed: InstalledFormula | InstalledCask | None
-    service: dict | None
 
 
 def derive_local_status(
