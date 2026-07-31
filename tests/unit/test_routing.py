@@ -13,14 +13,17 @@ class _Recorder:
     """Records whether it was called and with what arguments."""
 
     def __init__(self) -> None:
+        """Initialise an empty call list."""
         self.calls: list[tuple] = []
 
     def __call__(self, *args) -> int:
+        """Record the call arguments and return 0."""
         self.calls.append(args)
         return 0
 
     @property
     def called(self) -> bool:
+        """Return whether the recorder has recorded any calls."""
         return bool(self.calls)
 
 
@@ -51,11 +54,11 @@ def routes(monkeypatch):
             main_mod.main(argv)
 
         except SystemExit:
-            pass  # passthrough path exits with the (stubbed) return code
+            pass  # Passthrough path exits with the (stubbed) return code
 
         if passthrough.called:
             assert not app_stub.called
-            assert passthrough.calls[0][0] == argv  # forwarded verbatim
+            assert passthrough.calls[0][0] == argv  # Forwarded verbatim
             return "brew"
 
         assert app_stub.called
@@ -83,9 +86,10 @@ class TestRouting:
             pytest.param(["doctor"], "brew", id="unknown_command"),
             pytest.param(["bogus", "x"], "brew", id="unknown_with_args"),
             pytest.param(["--help"], "app", id="flag_first"),
+            pytest.param(["--version"], "app", id="version_flag"),
             pytest.param([], "app", id="empty"),
         ],
     )
     def test_routes(self, routes, argv, expected) -> None:
-        """Known commands/aliases dispatch to Typer; unknown non-flags go to brew."""
+        """Test known commands/aliases dispatch to ExtendedTyper; unknown non-flags go to brew."""
         assert routes(argv) == expected

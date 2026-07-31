@@ -812,19 +812,6 @@ class Orchestrator:
 
         return Outcome.BREW_UPGRADE if upgrade else Outcome.BREW_INSTALL
 
-    async def _brew_install(self, name: str) -> Outcome:
-        """Install a formula using Homebrew.
-
-        Args:
-            name: The name of the formula.
-
-        Returns:
-            The outcome of the installation.
-        """
-        ok = await self.brew.install(name)
-
-        return Outcome.BREW_INSTALL if ok else Outcome.FAILED
-
     def _native_install(
         self,
         name: str,

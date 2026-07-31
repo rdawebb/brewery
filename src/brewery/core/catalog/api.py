@@ -9,12 +9,14 @@ from urllib.parse import quote
 
 import httpx
 
+from brewery import __version__
 from brewery.core.errors import CatalogFetchError
 from brewery.core.logging import BreweryLogger, get_logger
 
 log: BreweryLogger = get_logger(name=__name__)
 
-_USER_AGENT = "brewery/0.1.0"
+
+_USER_AGENT = f"brewery/{__version__}"
 _DEFAULT_TIMEOUT = 30.0
 _HTTP_OK = 200
 _HTTP_NOT_MODIFIED = 304

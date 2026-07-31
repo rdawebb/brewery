@@ -5,6 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
+import brewery
 from brewery.core.catalog.api import (
     FORMULA_FEED,
     CatalogFetchError,
@@ -86,17 +87,19 @@ class TestFetchFeed:
         """Test that stored validators become If-None-Match/If-Modified-Since."""
         client = http_client(httpx.Response(304))
         await fetch_feed(FORMULA_FEED, etag='"e1"', last_modified="when", client=client)
-        if client.last_headers is not None:
-            assert client.last_headers["If-None-Match"] == '"e1"'
-            assert client.last_headers["If-Modified-Since"] == "when"
+
+        assert client.last_headers is not None
+        assert client.last_headers["If-None-Match"] == '"e1"'
+        assert client.last_headers["If-Modified-Since"] == "when"
 
     async def test_no_validators_no_conditional_headers(self, http_client) -> None:
         """Test that absent validators send no conditional headers."""
         client = http_client(httpx.Response(200, content=b"[]"))
         await fetch_feed(FORMULA_FEED, client=client)
-        if client.last_headers is not None:
-            assert "If-None-Match" not in client.last_headers
-            assert "If-Modified-Since" not in client.last_headers
+
+        assert client.last_headers is not None
+        assert "If-None-Match" not in client.last_headers
+        assert "If-Modified-Since" not in client.last_headers
 
     async def test_unexpected_status_raises(self, http_client) -> None:
         """Test that a non-200/304 status raises CatalogFetchError."""
@@ -151,8 +154,31 @@ class TestFetchSingleFormula:
         """
         client = http_client(httpx.Response(200, content=b"{}"))
         await fetch_single_formula("foo bar@2", client=client)
-        if client.last_url is not None:
-            assert "foo%20bar@2" in client.last_url
+
+        assert client.last_url is not None
+        assert "foo%20bar@2" in client.last_url
+
+
+class TestUserAgent:
+    """Tests that the outgoing User-Agent tracks the packaged version, not a literal."""
+
+    async def test_feed_fetch_sends_versioned_user_agent(self, http_client) -> None:
+        """Test that fetch_feed identifies itself as brewery/<installed version>."""
+        client = http_client(httpx.Response(200, content=b"[]"))
+        await fetch_feed(FORMULA_FEED, client=client)
+
+        assert client.last_headers is not None
+        assert client.last_headers["User-Agent"] == f"brewery/{brewery.__version__}"
+
+    async def test_single_formula_fetch_sends_versioned_user_agent(
+        self, http_client
+    ) -> None:
+        """Test that fetch_single_formula sends the same header as the feed fetch."""
+        client = http_client(httpx.Response(200, content=b"{}"))
+        await fetch_single_formula("wget", client=client)
+
+        assert client.last_headers is not None
+        assert client.last_headers["User-Agent"] == f"brewery/{brewery.__version__}"
 
 
 class TestValidators:

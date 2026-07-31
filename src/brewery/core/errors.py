@@ -423,10 +423,10 @@ class BrewCommandError(SysError):
         ctx: dict[str, Any] = context or {}
         if command:
             ctx["command"] = command
-        if returncode is not None:
+        if returncode:
             ctx["returncode"] = returncode
         if error:
-            ctx["error"] = error if error is not None else ""
+            ctx["error"] = error
 
         if message is None:
             message = f"Brew command failed with exit code {returncode or 'unknown'}"
