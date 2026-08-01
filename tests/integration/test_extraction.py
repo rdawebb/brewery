@@ -64,6 +64,12 @@ def make_tar(entries: list[tuple]) -> bytes:
                 ti.linkname = target
                 t.addfile(ti)
 
+            elif kind == "fifo":
+                _, name = entry
+                ti = tarfile.TarInfo(name)
+                ti.type = tarfile.FIFOTYPE
+                t.addfile(ti)
+
             else:
                 raise ValueError(kind)
 
@@ -184,32 +190,36 @@ def test_extract_drops_setuid_bit(tmp_path, compress) -> None:
 
 
 def test_path_traversal_rejected(tmp_path) -> None:
-    # A file member whose name escapes the destination is still rejected.
+    """Test extraction rejects path traversal in member names."""
     raw = make_tar([("file", "../evil", b"bad", 0o644)])
     with pytest.raises(ExtractionError, match="unsafe"):
         extract_bottle(_archive(tmp_path, gzip.compress, raw), tmp_path / "stage")
 
 
 def test_absolute_symlink_allowed_for_bottles(tmp_path) -> None:
-    # brew creates absolute symlinks in kegs (some get relocated); for a
-    # sha-verified bottle we create them as-is rather than rejecting.
+    """Test extraction allows absolute symlinks in sha-verified bottle archives."""
     raw = make_tar([("link", "foo/1.0/bin/x", "/usr/local/opt/foo/bin/x")])
     keg = extract_bottle(_archive(tmp_path, gzip.compress, raw), tmp_path / "stage")
     assert os.readlink(keg / "bin" / "x") == "/usr/local/opt/foo/bin/x"
 
 
 def test_escaping_relative_symlink_allowed_for_bottles(tmp_path) -> None:
-    # hunspell ships a symlink whose relative target escapes the keg root; the
-    # stdlib data filter rejects it, but brew creates it, so we must too.
+    """Test escaping relative symlinks allowed in sha-verified bottle archives."""
     raw = make_tar([("link", "foo/1.0/share/foo", "../../../../share/foo")])
     keg = extract_bottle(_archive(tmp_path, gzip.compress, raw), tmp_path / "stage")
     assert os.readlink(keg / "share" / "foo") == "../../../../share/foo"
 
 
 def test_escaping_hardlink_rejected(tmp_path) -> None:
-    # Hardlinks that escape the destination remain rejected -- the relaxation is
-    # symlink-only (a hardlink to outside the tree is a genuine hazard).
+    """Test hardlinks escaping the destination are rejected."""
     raw = make_tar([("hardlink", "foo/1.0/bin/x", "../../../../../etc/passwd")])
+    with pytest.raises(ExtractionError, match="unsafe"):
+        extract_bottle(_archive(tmp_path, gzip.compress, raw), tmp_path / "stage")
+
+
+def test_absolute_hardlink_rejected(tmp_path) -> None:
+    """Test absolute hardlinks with a leading '/' are rejected."""
+    raw = make_tar([("hardlink", "foo/1.0/bin/x", "/etc/passwd")])
     with pytest.raises(ExtractionError, match="unsafe"):
         extract_bottle(_archive(tmp_path, gzip.compress, raw), tmp_path / "stage")
 
@@ -274,6 +284,167 @@ def test_extract_rejects_unsafe_or_malformed(tmp_path, entries, match) -> None:
     else:
         with pytest.raises(ExtractionError, match=match):
             extract_bottle(arc, tmp_path / "stage")
+
+
+def test_write_through_symlink_rejected(tmp_path) -> None:
+    """Test that write-through symlinks are rejected."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "passwd").write_bytes(b"original")
+    raw = make_tar(
+        [
+            ("link", "foo/1.0/x", str(outside)),
+            ("file", "foo/1.0/x/passwd", b"pwned", 0o644),
+        ]
+    )
+    with pytest.raises(ExtractionError, match="unsafe"):
+        extract_bottle(_archive(tmp_path, gzip.compress, raw), tmp_path / "stage")
+
+    assert (outside / "passwd").read_bytes() == b"original"
+
+
+def test_file_replacing_symlink_rejected(tmp_path) -> None:
+    """Test that file-replacing symlinks are rejected."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "passwd").write_bytes(b"original")
+    raw = make_tar(
+        [
+            ("link", "foo/1.0/x", str(outside / "passwd")),
+            ("file", "foo/1.0/x", b"pwned", 0o644),
+        ]
+    )
+    with pytest.raises(ExtractionError, match="unsafe"):
+        extract_bottle(_archive(tmp_path, gzip.compress, raw), tmp_path / "stage")
+
+    assert (outside / "passwd").read_bytes() == b"original"
+
+
+def test_write_through_symlink_rejected_case_insensitively(tmp_path) -> None:
+    """Test that write-through symlinks are rejected case-insensitively."""
+    # The default macOS volume is case-insensitive; the symlink check has to agree
+    # with the kernel rather than str.__eq__
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "passwd").write_bytes(b"original")
+    raw = make_tar(
+        [
+            ("link", "foo/1.0/X", str(outside)),
+            ("file", "foo/1.0/x/passwd", b"pwned", 0o644),
+        ]
+    )
+    with pytest.raises(ExtractionError, match="unsafe"):
+        extract_bottle(_archive(tmp_path, gzip.compress, raw), tmp_path / "stage")
+
+    assert (outside / "passwd").read_bytes() == b"original"
+
+
+def test_hardlink_through_symlink_rejected(tmp_path) -> None:
+    """Test that hardlinks through symlinks are rejected."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret").write_bytes(b"s3cret")
+    raw = make_tar(
+        [
+            ("link", "foo/1.0/x", str(outside)),
+            ("file", "foo/1.0/bin/real", b"ok", 0o644),
+            ("hardlink", "foo/1.0/bin/leak", "foo/1.0/x/secret"),
+        ]
+    )
+    stage = tmp_path / "stage"
+    with pytest.raises(ExtractionError, match="unsafe"):
+        extract_bottle(_archive(tmp_path, gzip.compress, raw), stage)
+
+    assert not (stage / "foo" / "1.0" / "bin" / "leak").exists()
+
+
+def test_symlink_may_replace_earlier_symlink(tmp_path) -> None:
+    """Test that symlinks over earlier symlinks are not rejected."""
+    # makelink() unlinks the existing entry rather than following it
+    raw = make_tar(
+        [
+            ("file", "foo/1.0/bin/a", b"a", 0o644),
+            ("link", "foo/1.0/bin/x", "a"),
+            ("link", "foo/1.0/bin/x", "b"),
+        ]
+    )
+    keg = extract_bottle(_archive(tmp_path, gzip.compress, raw), tmp_path / "stage")
+    assert os.readlink(keg / "bin" / "x") == "b"
+
+
+def test_hardlink_within_keg_still_works(tmp_path) -> None:
+    """Test that hardlinks within the keg (archive-root relative) still work."""
+    raw = make_tar(
+        [
+            ("file", "foo/1.0/bin/qmake", b"MACHO", 0o555),
+            ("hardlink", "foo/1.0/bin/qmake6", "foo/1.0/bin/qmake"),
+        ]
+    )
+    keg = extract_bottle(_archive(tmp_path, gzip.compress, raw), tmp_path / "stage")
+    assert (keg / "bin" / "qmake6").read_bytes() == b"MACHO"
+    assert (keg / "bin" / "qmake6").stat().st_ino == (
+        keg / "bin" / "qmake"
+    ).stat().st_ino
+
+
+def test_dangling_hardlink_reports_extraction_error(tmp_path) -> None:
+    """Test that dangling hardlinks report an extraction error."""
+    raw = make_tar(
+        [
+            ("file", "foo/1.0/bin/qmake", b"MACHO", 0o555),
+            ("hardlink", "foo/1.0/bin/qmake6", "foo/1.0/bin/absent"),
+        ]
+    )
+    with pytest.raises(ExtractionError, match="broken hard link"):
+        extract_bottle(_archive(tmp_path, gzip.compress, raw), tmp_path / "stage")
+
+
+def test_interior_traversal_rejected(tmp_path) -> None:
+    """Test that interior traversal is rejected (defensive, no bottle contains one)."""
+    raw = make_tar([("file", "foo/1.0/bin/../lib/x", b"ok", 0o644)])
+    with pytest.raises(ExtractionError, match="unsafe"):
+        extract_bottle(_archive(tmp_path, gzip.compress, raw), tmp_path / "stage")
+
+
+def test_special_file_rejected(tmp_path) -> None:
+    """Test that special files (fifo, device node) are rejected."""
+    raw = make_tar([("fifo", "foo/1.0/bin/pipe")])
+    with pytest.raises(ExtractionError, match="unsafe"):
+        extract_bottle(_archive(tmp_path, gzip.compress, raw), tmp_path / "stage")
+
+
+def test_absolute_member_name_lands_inside_staging(tmp_path) -> None:
+    """Test that a leading '/' member name lands inside the staging directory."""
+    raw = make_tar([("file", "/foo/1.0/bin/x", b"ok", 0o644)])
+    stage = tmp_path / "stage"
+    keg = extract_bottle(_archive(tmp_path, gzip.compress, raw), stage)
+    assert keg == stage / "foo" / "1.0"
+    assert (keg / "bin" / "x").read_bytes() == b"ok"
+
+
+def test_dot_prefixed_member_names(tmp_path) -> None:
+    """Test that './' prefixes and empty path segments are absorbed.
+
+    The member naming the archive root normalises away entirely, so it is
+    neither rejected as unsafe nor counted as a second top-level entry.
+    """
+    raw = make_tar(
+        [
+            ("dir", "./", 0o755),
+            ("file", "./foo/1.0//bin/x", b"ok", 0o644),
+        ]
+    )
+    stage = tmp_path / "stage"
+    keg = extract_bottle(_archive(tmp_path, gzip.compress, raw), stage)
+    assert keg == stage / "foo" / "1.0"
+    assert (keg / "bin" / "x").read_bytes() == b"ok"
+
+
+def test_locate_keg_rejects_symlink_top_level(tmp_path) -> None:
+    """Test that a symlink top-level entry is rejected."""
+    raw = make_tar([("link", "foo", str(tmp_path))])
+    with pytest.raises(ExtractionError, match="single top-level keg"):
+        extract_bottle(_archive(tmp_path, gzip.compress, raw), tmp_path / "stage")
 
 
 def test_extraction_stops_at_byte_ceiling(tmp_path, monkeypatch) -> None:

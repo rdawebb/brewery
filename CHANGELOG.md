@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Changed
 
+- Bottles extract in about half the time, by deciding that a tar member stays inside the staging directory from its name rather than by resolving every member against the filesystem
 - Mach-O install names are rewritten natively instead of by spawning `install_name_tool` subprocesses, cutting the relocation step time of an install on binary-heavy formulae; `install_name_tool` is still used where a rewritten path no longer fits its load command, and `BREWERY_NO_NATIVE_MACHO=1` forces every binary through it
 - A binary that already lists the relocated search path no longer fails to install; the duplicate `LC_RPATH` entry is harmless to the dynamic loader, where `install_name_tool` rejected it outright
 - Install timestamps in the table view are shown as `YYYY-MM-DD HH:MM` local time instead of a full ISO-8601 string
@@ -17,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Install, upgrade, uninstall, link/unlink and cleanup now take Homebrew's own per-formula lock, so brewery and a concurrent `brew` no longer modify the same formula at the same time; a formula another process is holding is reported rather than waited on
 - Changes to shared prefix directories are serialised across brewery processes, so a background cleanup or a second brewery run can no longer interleave with linking
 - Two formulae installing at once that both provide the same file are now reported as a conflict instead of one silently overwriting the other's link; the formula that loses the race leaves the prefix untouched and falls back to `brew link`
+- A bottle containing a hard link to a file it does not ship is now reported as a failed extraction instead of aborting the install with a traceback
 - A corrupt or older-schema installed-records cache now rebuilds itself instead of failing the command
 - An unexpected error installing one formula no longer discards the whole install report, and no longer lets worker threads keep writing to the Cellar after the command has returned
 - A formula that fell back to `brew` successfully is no longer reported as an error
@@ -26,6 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 - Bottle downloads are capped, so a response that overruns its advertised length is aborted rather than filling the disk before the checksum is verified
 - Bottle extraction is capped on total size and member count, rejecting a decompression bomb before anything is written
+- A bottle can no longer write outside the keg through a symlink it ships itself, and a bottle whose top-level entry is a symlink is rejected rather than followed into the Cellar
 
 ## [0.4.0] - 2026-07-21
 

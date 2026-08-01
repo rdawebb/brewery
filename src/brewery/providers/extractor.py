@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tarfile
+import unicodedata
 from collections.abc import Callable
 from pathlib import Path
 from typing import BinaryIO
@@ -46,16 +47,80 @@ def detect_format(archive: Path) -> str:
     )
 
 
-_TarFilter = Callable[[tarfile.TarInfo, str], tarfile.TarInfo]
+# A filter may return None to tell tarfile to skip the member entirely
+_TarFilter = Callable[[tarfile.TarInfo, str], tarfile.TarInfo | None]
+
+
+def _contained(name: str) -> str | None:
+    """Normalise a tar member name, or reject it for leaving the root.
+
+    tarfile joins the member name onto the destination directory verbatim, so
+    containment is decidable from the string alone as long as the destination
+    holds no symlinks the archive did not itself create (see `_keg_filter`).
+
+    Args:
+        name: The raw member name from the tar header.
+
+    Returns:
+        The normalised root-relative name; empty if the member names the
+        destination root itself, or None if the name is not safely contained.
+    """
+    if "\x00" in name:
+        # Paths with NUL bytes are rejected to avoid tarfile's ValueError
+        return None
+
+    # Leading slashes are stripped
+    parts = [part for part in name.lstrip("/").split("/") if part and part != "."]
+    if ".." in parts:
+        return None
+
+    return "/".join(parts)
+
+
+def _fold(name: str) -> str:
+    """Return `name` in the form the filesystem compares paths in.
+
+    Handles default macOS volumes being case-insensitive and Unicode
+    normalisation-insensitive. On a case-sensitive volume it can only reject an
+    archive that nests two differently-cased names, which no bottle does.
+
+    Args:
+        name: A destination-relative member name.
+
+    Returns:
+        A folded key, for comparison only -- never for building a path.
+    """
+    if name.isascii():
+        return name.lower()
+
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+def _under_symlink(folded: str, symlinks: set[str]) -> bool:
+    """Whether an ancestor directory of `folded` was created as a symlink.
+
+    Args:
+        folded: The folded member name to check, from `_fold`.
+        symlinks: Folded names this archive has already created as symlinks.
+
+    Returns:
+        True if `folded` sits under one of `symlinks`.
+    """
+    head = folded
+    while head := head.rpartition("/")[0]:
+        if head in symlinks:
+            return True
+
+    return False
 
 
 def _keg_filter(archive: Path | None = None) -> _TarFilter:
     """Build the per-member extraction filter for one archive.
 
-    The filter applies the data-filter security checks, but preserves the
-    member's exact mode, permits the symlinks brew creates verbatim, and
-    rejects the archive before anything is written once it exceeds the
-    decompression-bomb ceilings.
+    The filter keeps the member inside the destination, preserves the member's
+    exact mode, permits the symlinks brew creates verbatim, and rejects the
+    archive before anything is written once it exceeds the decompression-bomb
+    ceilings.
 
     Args:
         archive: The archive being extracted, for error context.
@@ -63,44 +128,97 @@ def _keg_filter(archive: Path | None = None) -> _TarFilter:
     Returns:
         A filter callable for `tarfile.extractall`, holding the running totals.
     """
-    totals = {"bytes": 0, "members": 0}
+    total_bytes = 0
+    total_members = 0
+    symlinks: set[str] = set()
 
-    def _filter(member: tarfile.TarInfo, dest_path: str) -> tarfile.TarInfo:
-        """Apply the data-filter security checks and track the running totals.
+    def _filter(member: tarfile.TarInfo, dest_path: str) -> tarfile.TarInfo | None:
+        """Apply the containment checks and track the running totals.
 
         Args:
             member: The tar member being filtered.
             dest_path: The destination path for the member.
 
         Returns:
-            The filtered tar member.
+            The filtered tar member, or None to skip it.
         """
-        totals["bytes"] += member.size
-        totals["members"] += 1
+        nonlocal total_bytes, total_members
+        total_bytes += member.size
+        total_members += 1
 
-        if totals["bytes"] > _MAX_EXTRACTED_BYTES:
+        if total_bytes > _MAX_EXTRACTED_BYTES:
             raise ExtractionError(
                 f"bottle expands past the {_MAX_EXTRACTED_BYTES} byte extraction "
                 f"limit at member {member.name!r}",
                 archive=archive,
             )
 
-        if totals["members"] > _MAX_MEMBERS:
+        if total_members > _MAX_MEMBERS:
             raise ExtractionError(
                 f"bottle holds more than {_MAX_MEMBERS} members",
                 archive=archive,
             )
 
-        try:
-            safe = tarfile.data_filter(member, dest_path)  # FilterError if unsafe
+        # A keg is files, directories and links; raise for device nodes and fifos
+        if not (member.isreg() or member.isdir() or member.issym() or member.islnk()):
+            raise tarfile.SpecialFileError(member)
 
-        except (tarfile.AbsoluteLinkError, tarfile.LinkOutsideDestinationError):
-            if member.issym():
-                return member.replace(mode=member.mode & 0o777, deep=False)
-            raise
+        name = _contained(member.name)
+        if name is None:
+            raise tarfile.OutsideDestinationError(member, member.name)
 
-        # Keep the bottle's real permission bits (read-only files stay read-only)
-        return safe.replace(mode=member.mode & 0o777, deep=False)
+        if not name:
+            # Reject the root directory itself
+            if member.isdir():
+                return None
+
+            raise tarfile.OutsideDestinationError(member, member.name)
+
+        folded = _fold(name)
+
+        # Symlink targets must be contained within the destination
+        if symlinks and (
+            (folded in symlinks and not member.issym())
+            or _under_symlink(folded, symlinks)
+        ):
+            raise tarfile.OutsideDestinationError(member, name)
+
+        if member.islnk():
+            # Leading slash indicates an absolute link target, not a member of the archive
+            if member.linkname.startswith("/"):
+                raise tarfile.AbsoluteLinkError(member)
+
+            # Target otherwise needs the same treatment as the member name
+            target = _contained(member.linkname)
+            if not target:
+                raise tarfile.LinkOutsideDestinationError(member, member.linkname)
+
+            folded_target = _fold(target)
+            if symlinks and (
+                folded_target in symlinks or _under_symlink(folded_target, symlinks)
+            ):
+                raise tarfile.LinkOutsideDestinationError(member, target)
+
+            member.linkname = target
+
+        elif member.issym():
+            # Leave symlinks as-is from sha-verified bottles
+            symlinks.add(folded)
+
+        # Mutated in place rather than via TarInfo.replace()
+        member.name = name
+
+        # Set to None so tarfile chown does nothing
+        member.uid = None  # ty: ignore[invalid-assignment]
+        member.gid = None  # ty: ignore[invalid-assignment]
+        member.uname = None  # ty: ignore[invalid-assignment]
+        member.gname = None  # ty: ignore[invalid-assignment]
+
+        if member.mode is not None:
+            # Keep the bottle's real permission bits
+            member.mode &= 0o777
+
+        return member
 
     return _filter
 
@@ -117,7 +235,7 @@ def _extract_stream(fileobj: BinaryIO, dest: Path, tar_filter: _TarFilter) -> No
     # passes an already-decompressed (raw) tar stream, which reads as
     # uncompressed; the gzip path is decompressed here
     with tarfile.open(fileobj=fileobj, mode="r|*") as tar:
-        tar.extractall(dest, filter=tar_filter)
+        tar.extractall(str(dest), filter=tar_filter)
 
 
 def extract_bottle(archive: Path, dest: Path) -> Path:
@@ -153,12 +271,32 @@ def extract_bottle(archive: Path, dest: Path) -> Path:
             f"unsafe tar member in {archive.name}: {exc}", archive=archive, dest=dest
         ) from exc
 
+    except KeyError as exc:
+        # Hard link whose target is not itself a member of the archive
+        raise ExtractionError(
+            f"broken hard link in {archive.name}: {exc.args[0]}",
+            archive=archive,
+            dest=dest,
+        ) from exc
+
     except (tarfile.TarError, zstandard.ZstdError, OSError) as exc:
         raise ExtractionError(
             f"failed to extract {archive.name}: {exc}", archive=archive, dest=dest
         ) from exc
 
     return _locate_keg(dest)
+
+
+def _real_dir(path: Path) -> bool:
+    """Whether `path` is a directory rather than a symlink to one.
+
+    Args:
+        path: The path to test.
+
+    Returns:
+        True if the path is a directory and not a symlink.
+    """
+    return path.is_dir() and not path.is_symlink()
 
 
 def _locate_keg(dest: Path) -> Path:
@@ -170,7 +308,7 @@ def _locate_keg(dest: Path) -> Path:
     Returns:
         The path to the resolved keg directory.
     """
-    top = [p for p in dest.iterdir() if p.is_dir() and not p.name.startswith(".")]
+    top = [p for p in dest.iterdir() if _real_dir(p) and not p.name.startswith(".")]
     if len(top) != 1:
         raise ExtractionError(
             f"expected a single top-level keg dir, found {[p.name for p in top]}",
@@ -179,7 +317,7 @@ def _locate_keg(dest: Path) -> Path:
 
     name_dir = top[0]
     versions = [
-        p for p in name_dir.iterdir() if p.is_dir() and not p.name.startswith(".")
+        p for p in name_dir.iterdir() if _real_dir(p) and not p.name.startswith(".")
     ]
 
     if len(versions) != 1:
