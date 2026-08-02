@@ -23,12 +23,12 @@ log: BreweryLogger = get_logger(name=__name__)
 
 # flag -> (colour, label)
 _STATUS_STYLES: dict[PackageStatus, tuple[str, str]] = {
-    PackageStatus.PINNED: ("yellow", "Pinned"),
-    PackageStatus.OUTDATED: ("red", "Outdated"),
-    PackageStatus.NOT_LINKED: ("blue", "Not Linked"),
-    PackageStatus.KEG_ONLY: ("magenta", "Keg-Only"),
-    PackageStatus.HEAD: ("cyan", "HEAD"),
-    PackageStatus.HAS_SERVICE: ("green", "Service"),
+    PackageStatus.PINNED: ("bold yellow", "Pinned"),
+    PackageStatus.OUTDATED: ("bold red", "Outdated"),
+    PackageStatus.NOT_LINKED: ("bold blue", "Not Linked"),
+    PackageStatus.KEG_ONLY: ("bold magenta", "Keg-Only"),
+    PackageStatus.HEAD: ("bold cyan", "HEAD"),
+    PackageStatus.HAS_SERVICE: ("bold green", "Service"),
 }
 
 STATUS_LABELS: dict[PackageStatus, str] = {
@@ -215,7 +215,7 @@ def status_to_str(status: PackageStatus) -> str:
         A human-readable string representation of the PackageStatus.
     """
     if status == PackageStatus.NONE:
-        return "[green]Up-to-date[/green]"
+        return "[bold green]Up-to-date[/bold green]"
     bits: list[str] = [label for flag, label in STATUS_LABELS.items() if flag in status]
 
     return ", ".join(bits)

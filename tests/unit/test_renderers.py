@@ -31,21 +31,29 @@ class TestStatusToStr:
         ("status", "expected"),
         [
             pytest.param(
-                PackageStatus.NONE, "[green]Up-to-date[/green]", id="none_up_to_date"
+                PackageStatus.NONE,
+                "[bold green]Up-to-date[/bold green]",
+                id="none_up_to_date",
             ),
-            pytest.param(PackageStatus.OUTDATED, "[red]Outdated[/red]", id="outdated"),
-            pytest.param(PackageStatus.PINNED, "[yellow]Pinned[/yellow]", id="pinned"),
             pytest.param(
-                PackageStatus.KEG_ONLY, "[magenta]Keg-Only[/magenta]", id="keg_only"
+                PackageStatus.OUTDATED, "[bold red]Outdated[/bold red]", id="outdated"
+            ),
+            pytest.param(
+                PackageStatus.PINNED, "[bold yellow]Pinned[/bold yellow]", id="pinned"
+            ),
+            pytest.param(
+                PackageStatus.KEG_ONLY,
+                "[bold magenta]Keg-Only[/bold magenta]",
+                id="keg_only",
             ),
             pytest.param(
                 PackageStatus.NOT_LINKED | PackageStatus.OUTDATED,
-                "[red]Outdated[/red], [blue]Not Linked[/blue]",
+                "[bold red]Outdated[/bold red], [bold blue]Not Linked[/bold blue]",
                 id="combined_follow_map_order",
             ),
             pytest.param(
                 PackageStatus.HAS_SERVICE | PackageStatus.HEAD,
-                "[cyan]HEAD[/cyan], [green]Service[/green]",
+                "[bold cyan]HEAD[/bold cyan], [bold green]Service[/bold green]",
                 id="head_before_service",
             ),
             pytest.param(
@@ -55,12 +63,12 @@ class TestStatusToStr:
                 | PackageStatus.KEG_ONLY
                 | PackageStatus.HEAD
                 | PackageStatus.HAS_SERVICE,
-                "[yellow]Pinned[/yellow], "
-                "[red]Outdated[/red], "
-                "[blue]Not Linked[/blue], "
-                "[magenta]Keg-Only[/magenta], "
-                "[cyan]HEAD[/cyan], "
-                "[green]Service[/green]",
+                "[bold yellow]Pinned[/bold yellow], "
+                "[bold red]Outdated[/bold red], "
+                "[bold blue]Not Linked[/bold blue], "
+                "[bold magenta]Keg-Only[/bold magenta], "
+                "[bold cyan]HEAD[/bold cyan], "
+                "[bold green]Service[/bold green]",
                 id="all_flags_in_map_order",
             ),
         ],
@@ -76,17 +84,17 @@ class TestStatusColour:
     @pytest.mark.parametrize(
         ("status", "colour"),
         [
-            pytest.param(PackageStatus.PINNED, "yellow", id="pinned"),
-            pytest.param(PackageStatus.OUTDATED, "red", id="outdated"),
-            pytest.param(PackageStatus.NOT_LINKED, "blue", id="not_linked"),
+            pytest.param(PackageStatus.PINNED, "bold yellow", id="pinned"),
+            pytest.param(PackageStatus.OUTDATED, "bold red", id="outdated"),
+            pytest.param(PackageStatus.NOT_LINKED, "bold blue", id="not_linked"),
             pytest.param(
                 PackageStatus.PINNED | PackageStatus.OUTDATED,
-                "yellow",
+                "bold yellow",
                 id="pinned_wins_over_outdated",
             ),
             pytest.param(
                 PackageStatus.OUTDATED | PackageStatus.NOT_LINKED,
-                "red",
+                "bold red",
                 id="outdated_wins_over_not_linked",
             ),
         ],
@@ -140,11 +148,11 @@ class TestSectionSummary:
         # (covered_text, style) for every span, in order.
         spans = [(summary.plain[s.start : s.end], s.style) for s in summary.spans]
         assert spans == [
-            ("1 outdated", "red"),
+            ("1 outdated", "bold red"),
             (" / ", "dim"),
-            ("1 pinned", "yellow"),
+            ("1 pinned", "bold yellow"),
             (" / ", "dim"),
-            ("1 not linked", "blue"),
+            ("1 not linked", "bold blue"),
         ]
 
 
@@ -158,7 +166,7 @@ class TestCompactEntry:
         )
         plain = _compact_entry(_pkg("b", PackageStatus.NONE), mark_installed=False)
 
-        assert (outdated.plain, str(outdated.style)) == ("a", "red")
+        assert (outdated.plain, str(outdated.style)) == ("a", "bold red")
         assert (plain.plain, str(plain.style)) == ("b", "")
 
     def test_tick_only_when_marking_and_installed(self) -> None:
