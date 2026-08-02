@@ -549,12 +549,12 @@ class TestLinkConcurrency:
         _mk(keg, "bin/xtool")  # Leaf file -> lock-free
 
         plan = linker._build_plan(keg, prefix)
-        dir_dsts = {dst for dst, _ in plan.dir_links}
-        leaf_dsts = {dst for dst, _ in plan.links}
+        dir_rels = {rel for rel, _ in plan.dir_links}
+        leaf_rels = {rel for rel, _ in plan.links}
 
-        assert prefix / "include/X11" in dir_dsts
-        assert prefix / "bin/xtool" in leaf_dsts
-        assert dir_dsts.isdisjoint(leaf_dsts)
+        assert "include/X11" in dir_rels
+        assert "bin/xtool" in leaf_rels
+        assert dir_rels.isdisjoint(leaf_rels)
 
     def test_concurrent_links_sharing_a_dir_dont_clobber(
         self, tmp_path, prefix
@@ -1193,11 +1193,14 @@ def test_plan_matches_brew_links() -> None:
     plan = linker._build_plan(keg, prefix)
 
     # Against an already-linked keg, every target lands in `already`, not `links`
-    brewery_links = (
-        {str(dst) for dst, _ in plan.links}
-        | {str(dst) for dst, _ in plan.dir_links}
-        | {str(p) for p in plan.already}
-    )
+    brewery_links = {
+        f"{prefix}/{rel}"
+        for rel in (
+            *(rel for rel, _ in plan.links),
+            *(rel for rel, _ in plan.dir_links),
+            *plan.already,
+        )
+    }
 
     # brew's real links into this keg, restricted to the eligible roots.
     keg_real = os.path.realpath(keg)

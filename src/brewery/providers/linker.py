@@ -23,6 +23,7 @@ import os
 import re
 import stat
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -148,40 +149,53 @@ class UnlinkResult:
     scanned: bool = False  # Fell back to a filesystem scan
 
 
-def _strategy_lib(rel: Path, is_dir: bool) -> Action:
+def _lstat(path: str) -> os.stat_result | None:
+    """`os.lstat`, reporting an absent path as None rather than raising.
+
+    Args:
+        path: The path to stat, without following a final symlink.
+
+    Returns:
+        The stat result, or None if nothing occupies `path`.
+    """
+    try:
+        return os.lstat(path)
+
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+
+
+def _strategy_lib(rel: str, is_dir: bool) -> Action:
     """Determine the linking strategy for a library file or directory.
 
     Args:
-        rel: The relative path of the file or directory.
+        rel: The relative posix path of the file or directory.
         is_dir: Whether the path is a directory.
 
     Returns:
         The action to take for the file or directory.
     """
-    posix = rel.as_posix()
     if not is_dir:
-        return Action.SKIP if posix in _LIB_SKIP_FILE else Action.LINK
+        return Action.SKIP if rel in _LIB_SKIP_FILE else Action.LINK
 
     # Exact names mkpath only the top level; prefix families the whole subtree
-    if posix in _LIB_EXACT or _LIB_PREFIX_RX.match(posix):
+    if rel in _LIB_EXACT or _LIB_PREFIX_RX.match(rel):
         return Action.MKPATH
 
     return Action.LINK
 
 
-def _strategy_share(rel: Path, is_dir: bool) -> Action:
+def _strategy_share(rel: str, is_dir: bool) -> Action:
     """Determine the linking strategy for a shared file or directory.
 
     Args:
-        rel: The relative path of the file or directory.
+        rel: The relative posix path of the file or directory.
         is_dir: Whether the path is a directory.
 
     Returns:
         The action to take for the file or directory.
     """
-    posix = rel.as_posix()
-
-    if posix in _SHARE_SKIP_FILE or _SHARE_SKIP_RX.search(posix):
+    if rel in _SHARE_SKIP_FILE or _SHARE_SKIP_RX.search(rel):
         return Action.SKIP
 
     if not is_dir:
@@ -189,21 +203,17 @@ def _strategy_share(rel: Path, is_dir: bool) -> Action:
         # purpose of the prefix link they are ordinary relative symlinks
         return Action.LINK
 
-    if (
-        posix in _SHARE_PATHS
-        or _LOCALEDIR_RX.search(posix)
-        or _SHARE_PREFIX_RX.match(posix)
-    ):
+    if rel in _SHARE_PATHS or _LOCALEDIR_RX.search(rel) or _SHARE_PREFIX_RX.match(rel):
         return Action.MKPATH
 
     return Action.LINK
 
 
-def _strategy_etc(rel: Path, is_dir: bool) -> Action:
+def _strategy_etc(rel: str, is_dir: bool) -> Action:
     """Determine the linking strategy for an etc file or directory.
 
     Args:
-        rel: The relative path of the file or directory.
+        rel: The relative posix path of the file or directory.
         is_dir: Whether the path is a directory.
 
     Returns:
@@ -213,28 +223,28 @@ def _strategy_etc(rel: Path, is_dir: bool) -> Action:
     return Action.MKPATH if is_dir else Action.LINK
 
 
-def _strategy_framework(rel: Path, is_dir: bool) -> Action:
+def _strategy_framework(rel: str, is_dir: bool) -> Action:
     """Determine the linking strategy for a framework file or directory.
 
     Args:
-        rel: The relative path of the file or directory.
+        rel: The relative posix path of the file or directory.
         is_dir: Whether the path is a directory.
 
     Returns:
         The action to take for the file or directory.
     """
     # Only the .framework bundle and its Versions dir are shared
-    if is_dir and _FRAMEWORK_RX.search(rel.as_posix()):
+    if is_dir and _FRAMEWORK_RX.search(rel):
         return Action.MKPATH
 
     return Action.LINK
 
 
-def _strategy_link_all(rel: Path, is_dir: bool) -> Action:
+def _strategy_link_all(rel: str, is_dir: bool) -> Action:
     """Determine the linking strategy for all files or directories.
 
     Args:
-        rel: The relative path of the file or directory.
+        rel: The relative posix path of the file or directory.
         is_dir: Whether the path is a directory.
 
     Returns:
@@ -242,6 +252,9 @@ def _strategy_link_all(rel: Path, is_dir: bool) -> Action:
     """
     return Action.LINK
 
+
+# Decides one entry from its path relative to the eligible root, plus its dir-ness
+_Strategy = Callable[[str, bool], Action]
 
 # Load-bearing for concurrency: every strategy decides from the relative path alone,
 # so MKPATH-ness is identical for every keg regardless of prefix state. Explosion
@@ -262,86 +275,90 @@ _STRATEGIES = {
 class _Plan:
     """Plan for linking files and directories."""
 
-    keg: Path
-    prefix: Path
-    links: list[tuple[Path, Path]] = field(default_factory=list)  # (dst, src) files
-    dir_links: list[tuple[Path, Path]] = field(
+    keg: str
+    prefix: str
+    links: list[tuple[str, str]] = field(default_factory=list)  # (rel, src) files
+    dir_links: list[tuple[str, str]] = field(
         default_factory=list
-    )  # (dst, src) whole-dir symlinks (shared, applied under the lock)
-    dirs: list[Path] = field(default_factory=list)
-    already: list[Path] = field(default_factory=list)
-    conflicts: list[tuple[str, str]] = field(default_factory=list)
-    explosions: list[tuple[Path, Path]] = field(default_factory=list)  # (dst, src)
+    )  # (rel, src) whole-dir symlinks (shared, applied under the lock)
+    dirs: list[str] = field(default_factory=list)  # rel
+    already: list[str] = field(default_factory=list)  # rel
+    conflicts: list[tuple[str, str]] = field(  # (absolute dst, reason), user-facing
+        default_factory=list
+    )
+    explosions: list[tuple[str, str]] = field(default_factory=list)  # (rel, src)
     # True once the walk links into a shared (non-mkpath) directory
     touches_shared: bool = False
 
     def consider_link(
-        self, dst: Path, src: Path, *, preserve_existing: bool, is_dir: bool
+        self,
+        rel: str,
+        dst: str,
+        src: str,
+        *,
+        preserve_existing: bool,
+        is_dir: bool,
+        src_is_symlink: bool,
+        dst_stat: os.stat_result | None,
     ) -> None:
         """Consider linking a source file or directory to a destination.
 
         Args:
-            dst: The destination path.
-            src: The source path.
+            rel: The destination's prefix-relative posix path.
+            dst: The absolute destination path.
+            src: The absolute source path.
             preserve_existing: Whether to preserve existing files.
             is_dir: Whether `src` is a real directory (a whole-directory symlink).
+            src_is_symlink: Whether `src` is a symlink.
+            dst_stat: `lstat` of `dst`, or None if nothing occupies it.
         """
-        try:
-            dst_stat = os.lstat(dst)
-
-        except (FileNotFoundError, NotADirectoryError):
-            is_link = exists = False
-
-        else:
-            is_link = stat.S_ISLNK(dst_stat.st_mode)
-            exists = True
+        exists = dst_stat is not None
+        is_link = dst_stat is not None and stat.S_ISLNK(dst_stat.st_mode)
 
         # dst resolves to the same real path as src (e.g. metapackages)
         if exists and os.path.realpath(dst) == os.path.realpath(src):
-            self.already.append(dst)
+            self.already.append(rel)
             return
 
         # A keg symlink aimed at its own prefix destination links to itself
-        if not exists and src.is_symlink() and _symlink_dest(src) == dst:
+        if not exists and src_is_symlink and _symlink_dest(src) == dst:
             return
 
         if is_link:
             real_dst = os.path.realpath(dst)
             if is_dir and os.path.isdir(real_dst):
-                # Re-link displaced keg's contents, then new keg
-                other = Path(real_dst)
-
-                # Pre-check for unsolvable collisions
-                collisions = _merge_collisions(dst, other, src)
+                # Pre-check for unsolvable collisions between the displaced and new keg
+                collisions = _merge_collisions(Path(dst), Path(real_dst), Path(src))
                 if collisions:
                     self.conflicts.extend(collisions)
 
                 else:
-                    self.explosions.append((dst, src))
+                    self.explosions.append((rel, src))
                     self.touches_shared = True
 
             else:
-                self.conflicts.append((str(dst), os.readlink(dst)))
+                self.conflicts.append((dst, os.readlink(dst)))
 
         elif exists:
             if preserve_existing:
-                self.already.append(dst)  # etc: keep the user's file
+                self.already.append(rel)  # etc: keep the user's file
 
             else:
-                self.conflicts.append((str(dst), _EXISTING_FILE))
+                self.conflicts.append((dst, _EXISTING_FILE))
 
         elif is_dir:
-            self.dir_links.append((dst, src))
+            self.dir_links.append((rel, src))
             self.touches_shared = True
 
         else:
-            self.links.append((dst, src))
+            self.links.append((rel, src))
 
 
 def _walk(
-    src_dir: Path,
-    sub_root: Path,
-    strategy,
+    src_dir: str,
+    rel_dir: str,
+    cut: int,
+    strategy: _Strategy,
     plan: _Plan,
     *,
     preserve_existing: bool,
@@ -350,8 +367,10 @@ def _walk(
     """Walk the source directory and apply the linking strategy.
 
     Args:
-        src_dir: The source directory to walk.
-        sub_root: The subdirectory to use as the root for relative paths.
+        src_dir: The absolute source directory to walk.
+        rel_dir: The prefix-relative posix path of `src_dir` (e.g. "lib/pkgconfig").
+        cut: Length of the eligible root plus its separator, so that `rel[cut:]` is
+            the path relative to that root, which is what the strategies match on.
         strategy: The linking strategy to apply.
         plan: The plan to modify with the results of the walk.
         preserve_existing: Whether to preserve existing files.
@@ -365,56 +384,63 @@ def _walk(
         if name == ".DS_Store":
             continue
 
-        path = Path(entry.path)
-        rel = path.relative_to(sub_root)
-        dst = plan.prefix / path.relative_to(plan.keg)
+        src = entry.path
+        rel = f"{rel_dir}/{name}"
         is_symlink = entry.is_symlink()
 
         # brew does not link a bin/sbin symlink whose target is absolute
-        if skip_abs_symlinks and is_symlink and os.path.isabs(os.readlink(entry.path)):
+        if skip_abs_symlinks and is_symlink and os.path.isabs(os.readlink(src)):
             continue
 
         is_dir = entry.is_dir(follow_symlinks=False)
 
         if not is_dir:
             # brew prunes cached bytecode under site-packages (Python rewrites it)
-            if name.endswith(_PYC_EXT) and "/site-packages/" in path.as_posix():
+            if name.endswith(_PYC_EXT) and "/site-packages/" in src:
                 continue
 
         elif name.endswith(".app"):
             continue  # brew never links .app bundles into the prefix
 
-        action = strategy(rel, is_dir)
+        action = strategy(rel[cut:], is_dir)
 
         if action is Action.SKIP:
             continue
 
-        # A directory whose prefix path already exists as a real (non-symlink)
-        # dir is descended into, walking the rest of the tree
-        descend = is_dir and (
-            action is Action.MKPATH or (dst.is_dir() and not dst.is_symlink())
+        # A shared directory is descended into without consulting the prefix at all
+        if is_dir and action is Action.MKPATH:
+            plan.dirs.append(rel)
+
+        else:
+            dst = f"{plan.prefix}/{rel}"
+            dst_stat = _lstat(dst)
+            real_dir = dst_stat is not None and stat.S_ISDIR(dst_stat.st_mode)
+
+            if not (is_dir and real_dir):
+                # LINK (whole dir or file), or a file under a mkpath dir
+                plan.consider_link(
+                    rel,
+                    dst,
+                    src,
+                    preserve_existing=preserve_existing,
+                    is_dir=is_dir,
+                    src_is_symlink=is_symlink,
+                    dst_stat=dst_stat,
+                )
+                continue
+
+            # Forced descent into a directory a peer keg already exploded into a real dir
+            plan.touches_shared = True
+
+        _walk(
+            src,
+            rel,
+            cut,
+            strategy,
+            plan,
+            preserve_existing=preserve_existing,
+            skip_abs_symlinks=skip_abs_symlinks,
         )
-
-        if descend:
-            if action is Action.MKPATH:
-                plan.dirs.append(dst)
-            else:
-                # Forced descent into a directory a peer keg already exploded into a real dir
-                plan.touches_shared = True
-
-            _walk(
-                path,
-                sub_root,
-                strategy,
-                plan,
-                preserve_existing=preserve_existing,
-                skip_abs_symlinks=skip_abs_symlinks,
-            )
-
-        else:  # LINK (whole dir or file), or a file under a mkpath dir
-            plan.consider_link(
-                dst, path, preserve_existing=preserve_existing, is_dir=is_dir
-            )
 
 
 def _walk_opts(sub: str) -> tuple[bool, bool]:
@@ -439,17 +465,20 @@ def _build_plan(keg: Path, prefix: Path) -> _Plan:
     Returns:
         A plan for linking the keg's contents into the prefix.
     """
-    plan = _Plan(keg=keg, prefix=prefix)
+    # Normalised once here; every path below is derived from these
+    plan = _Plan(keg=str(keg), prefix=str(prefix))
     for sub in _ELIGIBLE:
-        src = keg / sub
-        if not (src.is_dir() and not src.is_symlink()):
+        src = f"{plan.keg}/{sub}"
+        src_stat = _lstat(src)
+        if src_stat is None or not stat.S_ISDIR(src_stat.st_mode):
             continue
 
-        plan.dirs.append(prefix / sub)  # The eligible root is always a real dir
+        plan.dirs.append(sub)  # The eligible root is always a real dir
         preserve_existing, skip_abs_symlinks = _walk_opts(sub)
         _walk(
             src,
-            src,
+            sub,
+            len(sub) + 1,
             _STRATEGIES[sub],
             plan,
             preserve_existing=preserve_existing,
@@ -565,7 +594,7 @@ def _merge_into(dst_dir: Path, *sources: Path) -> list[Path]:
     return linked
 
 
-def _symlink_dest(link: Path) -> Path:
+def _symlink_dest(link: str) -> str:
     """The directory `link` points at, resolving only `link` itself (one level).
 
     Args:
@@ -576,9 +605,9 @@ def _symlink_dest(link: Path) -> Path:
     """
     target = os.readlink(link)
     if os.path.isabs(target):
-        return Path(target)
+        return os.path.normpath(target)
 
-    return Path(os.path.normpath(os.path.join(os.path.dirname(link), target)))
+    return os.path.normpath(os.path.join(os.path.dirname(link), target))
 
 
 def _explode(dst: Path, src: Path) -> list[Path]:
@@ -593,11 +622,11 @@ def _explode(dst: Path, src: Path) -> list[Path]:
     Returns:
         List of absolute prefix paths of every symlink created inside the new dir.
     """
-    other = _symlink_dest(dst)  # Resolve the link only, not the prefix's ancestors
+    other = _symlink_dest(str(dst))  # Resolve the link only, not the prefix's ancestors
     dst.unlink()  # Drop the whole-dir symlink
     dst.mkdir(parents=True, exist_ok=True)
 
-    return _merge_into(dst, other, src)
+    return _merge_into(dst, Path(other), src)
 
 
 def make_relative_symlink(dst: Path, src: Path) -> None:
@@ -625,8 +654,11 @@ def make_relative_symlink(dst: Path, src: Path) -> None:
         raise
 
 
-def _try_symlink(dst: Path, src: Path) -> bool:
+def _try_symlink(dst: str, src: str) -> bool:
     """Create a relative symlink at `dst` only if nothing occupies it yet.
+
+    The caller guarantees `dst`'s parent exists, so a missing parent surfaces as
+    `FileNotFoundError` rather than being silently created.
 
     Args:
         dst: The destination path.
@@ -635,9 +667,8 @@ def _try_symlink(dst: Path, src: Path) -> bool:
     Returns:
         True if the link was created, False if something is already at `dst`.
     """
-    dst.parent.mkdir(parents=True, exist_ok=True)
     try:
-        os.symlink(os.path.relpath(src, dst.parent), dst)
+        os.symlink(os.path.relpath(src, os.path.dirname(dst)), dst)
 
     except FileExistsError:
         return False
@@ -645,7 +676,7 @@ def _try_symlink(dst: Path, src: Path) -> bool:
     return True
 
 
-def _describe_existing(dst: Path) -> str:
+def _describe_existing(dst: str) -> str:
     """The conflict reason for whatever now occupies `dst`, as `consider_link` words it.
 
     Args:
@@ -664,7 +695,7 @@ def _describe_existing(dst: Path) -> str:
 
 
 def _link_leaf(
-    result: LinkResult, prefix: Path, dst: Path, src: Path, *, overwrite: bool
+    result: LinkResult, rel: str, dst: str, src: str, *, overwrite: bool
 ) -> None:
     """Create one leaf symlink, arbitrating a peer that won the race for `dst`.
 
@@ -674,15 +705,14 @@ def _link_leaf(
 
     Args:
         result: The result accumulated so far; extended in place.
-        prefix: The prefix being linked into.
-        dst: The prefix path of the symlink to create.
+        rel: The symlink's prefix-relative posix path, as recorded in the result.
+        dst: The absolute prefix path of the symlink to create.
         src: The keg path the symlink points at.
         overwrite: Whether to replace a target a peer has taken.
 
     Raises:
         LinkError: A peer owns `dst` with different contents, and `overwrite` is unset.
     """
-    rel = dst.relative_to(prefix).as_posix()
     preserve_existing, _ = _walk_opts(rel.split("/", 1)[0])
 
     for _ in range(_LINK_RACE_RETRIES):
@@ -706,31 +736,29 @@ def _link_leaf(
             return
 
         if overwrite:
-            make_relative_symlink(dst, src)
+            make_relative_symlink(Path(dst), Path(src))
             result.linked.append(rel)
             return
 
-        raise LinkError([(str(dst), existing)])
+        raise LinkError([(dst, existing)])
 
-    raise LinkError([(str(dst), "contended by a concurrent link")])
+    raise LinkError([(dst, "contended by a concurrent link")])
 
 
-def _record_link(result: LinkResult, prefix: Path, dst: Path, src: Path) -> None:
+def _record_link(result: LinkResult, prefix: str, rel: str, src: str) -> None:
     """Create a relative symlink and record it as linked in `result`.
 
     Args:
         result: The result to extend with the linked prefix path.
         prefix: The prefix the link lives under.
-        dst: The prefix path of the symlink to create.
+        rel: The prefix-relative posix path of the symlink to create.
         src: The keg path the symlink points at.
     """
-    make_relative_symlink(dst, src)
-    result.linked.append(dst.relative_to(prefix).as_posix())
+    make_relative_symlink(Path(f"{prefix}/{rel}"), Path(src))
+    result.linked.append(rel)
 
 
-def _apply_dirs_and_links(
-    plan: _Plan, prefix: Path, result: LinkResult, *, overwrite: bool
-) -> None:
+def _apply_dirs_and_links(plan: _Plan, result: LinkResult, *, overwrite: bool) -> None:
     """mkpath `plan.dirs` and create `plan.links`, recording both into `result`.
 
     Leaf links run unlocked (a plan that touches no shared directory takes no
@@ -740,19 +768,27 @@ def _apply_dirs_and_links(
 
     Args:
         plan: The plan whose dirs and leaf-file links to apply.
-        prefix: The prefix being linked into.
         result: The result accumulated so far; extended in place.
         overwrite: Whether to replace a target a peer has taken since plan time.
     """
-    for d in plan.dirs:
-        d.mkdir(parents=True, exist_ok=True)
-        result.created_dirs.append(d.relative_to(prefix).as_posix())
+    prefix = plan.prefix
+    for rel in plan.dirs:
+        os.makedirs(f"{prefix}/{rel}", exist_ok=True)
+        result.created_dirs.append(rel)
 
-    for dst, src in plan.links:
-        _link_leaf(result, prefix, dst, src, overwrite=overwrite)
+    # The walk emits links a directory at a time, so the parent is made once per directory
+    last_parent = ""
+    for rel, src in plan.links:
+        dst = f"{prefix}/{rel}"
+        parent = dst[: dst.rindex("/")]
+        if parent != last_parent:
+            os.makedirs(parent, exist_ok=True)
+            last_parent = parent
+
+        _link_leaf(result, rel, dst, src, overwrite=overwrite)
 
 
-def _preview(plan: _Plan, prefix: Path) -> LinkResult:
+def _preview(plan: _Plan) -> LinkResult:
     """Project a plan into the LinkResult applying it would produce.
 
     A whole-directory symlink counts as one entry here but expands to one entry
@@ -761,21 +797,14 @@ def _preview(plan: _Plan, prefix: Path) -> LinkResult:
 
     Args:
         plan: The plan to project.
-        prefix: The prefix being linked into.
 
     Returns:
         A LinkResult describing what applying `plan` would do.
     """
-
-    def rel(path: Path) -> str:
-        return path.relative_to(prefix).as_posix()
-
     return LinkResult(
-        linked=[
-            rel(dst) for dst, _ in (*plan.links, *plan.dir_links, *plan.explosions)
-        ],
-        created_dirs=[rel(d) for d in plan.dirs],
-        already_linked=[rel(dst) for dst in plan.already],
+        linked=[rel for rel, _ in (*plan.links, *plan.dir_links, *plan.explosions)],
+        created_dirs=list(plan.dirs),
+        already_linked=list(plan.already),
         conflicts=list(plan.conflicts),
     )
 
@@ -869,7 +898,7 @@ def link_keg(
     plan = _build_plan(keg_dir, prefix)
 
     if dry_run:
-        return _preview(plan, prefix)
+        return _preview(plan)
 
     if plan.conflicts and not overwrite:
         raise LinkError(plan.conflicts)
@@ -887,7 +916,7 @@ def link_keg(
         # A conflict a peer created after the plan was built surfaces mid-apply,
         # so unwind under whatever lock is held to keep the mutate-nothing contract
         try:
-            _apply_dirs_and_links(plan, prefix, result, overwrite=overwrite)
+            _apply_dirs_and_links(plan, result, overwrite=overwrite)
 
             if plan.dir_links or plan.explosions or (overwrite and plan.conflicts):
                 _apply_shared_dirs(keg_dir, prefix, plan, result, overwrite=overwrite)
@@ -896,8 +925,7 @@ def link_keg(
             _rollback(keg_dir, prefix, result)
             raise
 
-    for dst in plan.already:
-        result.already_linked.append(dst.relative_to(prefix).as_posix())
+    result.already_linked.extend(plan.already)
 
     make_relative_symlink(prefix / "opt" / name, keg_dir)
 
@@ -907,7 +935,7 @@ def link_keg(
     return result
 
 
-def _reconsider_dir(plan: _Plan, dst: Path, src: Path) -> None:
+def _reconsider_dir(plan: _Plan, rel: str, src: str) -> None:
     """Re-evaluate one whole-directory target against the current prefix state.
 
     Mirrors `_walk`'s handling of a single directory entry: if a peer keg has
@@ -917,23 +945,28 @@ def _reconsider_dir(plan: _Plan, dst: Path, src: Path) -> None:
 
     Args:
         plan: The fresh plan to populate with the re-evaluated ops.
-        dst: The prefix path of the directory target.
+        rel: The target's prefix-relative posix path.
         src: The keg directory being linked there.
     """
-    sub = dst.relative_to(plan.prefix).parts[0]
-    sub_root = plan.keg / sub
+    sub = rel.split("/", 1)[0]
+    cut = len(sub) + 1
     strategy = _STRATEGIES[sub]
     preserve_existing, skip_abs_symlinks = _walk_opts(sub)
 
-    action = strategy(src.relative_to(sub_root), True)
-    descend = action is Action.MKPATH or (dst.is_dir() and not dst.is_symlink())
-    if descend:
+    dst = f"{plan.prefix}/{rel}"
+    dst_stat = _lstat(dst)
+    action = strategy(rel[cut:], True)
+
+    if action is Action.MKPATH or (
+        dst_stat is not None and stat.S_ISDIR(dst_stat.st_mode)
+    ):
         if action is Action.MKPATH:
-            plan.dirs.append(dst)
+            plan.dirs.append(rel)
 
         _walk(
             src,
-            sub_root,
+            rel,
+            cut,
             strategy,
             plan,
             preserve_existing=preserve_existing,
@@ -941,7 +974,15 @@ def _reconsider_dir(plan: _Plan, dst: Path, src: Path) -> None:
         )
 
     else:
-        plan.consider_link(dst, src, preserve_existing=preserve_existing, is_dir=True)
+        plan.consider_link(
+            rel,
+            dst,
+            src,
+            preserve_existing=preserve_existing,
+            is_dir=True,
+            src_is_symlink=os.path.islink(src),
+            dst_stat=dst_stat,
+        )
 
 
 def _apply_shared_dirs(
@@ -961,38 +1002,36 @@ def _apply_shared_dirs(
         result: The result accumulated so far; extended in place.
         overwrite: Whether to replace conflicting targets.
     """
-    fresh = _Plan(keg=keg_dir, prefix=prefix)
-    seen: set[Path] = set()
-    for dst, src in (*plan.dir_links, *plan.explosions):
-        if dst in seen:
+    fresh = _Plan(keg=str(keg_dir), prefix=str(prefix))
+    seen: set[str] = set()
+    for rel, src in (*plan.dir_links, *plan.explosions):
+        if rel in seen:
             continue
 
-        seen.add(dst)
-        _reconsider_dir(fresh, dst, src)
+        seen.add(rel)
+        _reconsider_dir(fresh, rel, src)
 
     if fresh.conflicts and not overwrite:
         raise LinkError(fresh.conflicts)
 
-    _apply_dirs_and_links(fresh, prefix, result, overwrite=overwrite)
+    _apply_dirs_and_links(fresh, result, overwrite=overwrite)
 
-    for dst, src in fresh.dir_links:
-        _record_link(result, prefix, dst, src)
+    for rel, src in fresh.dir_links:
+        _record_link(result, fresh.prefix, rel, src)
 
-    for dst, src in fresh.explosions:
-        for linked in _explode(dst, src):
+    for rel, src in fresh.explosions:
+        for linked in _explode(Path(f"{fresh.prefix}/{rel}"), Path(src)):
             result.linked.append(linked.relative_to(prefix).as_posix())
 
     # Under overwrite, replace every conflicting target
     if overwrite:
-        for dst_str, _existing in (*plan.conflicts, *fresh.conflicts):
-            dst = Path(dst_str)
-
+        cut = len(fresh.prefix) + 1
+        for dst, _existing in (*plan.conflicts, *fresh.conflicts):
             # Map the prefix path back to its keg source
-            src = keg_dir / dst.relative_to(prefix)
-            _record_link(result, prefix, dst, src)
+            rel = dst[cut:]
+            _record_link(result, fresh.prefix, rel, f"{fresh.keg}/{rel}")
 
-    for dst in fresh.already:
-        result.already_linked.append(dst.relative_to(prefix).as_posix())
+    result.already_linked.extend(fresh.already)
 
 
 def _points_into(link: Path, keg_real: Path) -> bool:
