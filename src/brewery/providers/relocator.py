@@ -76,6 +76,7 @@ _MACHO_MAGICS = frozenset(
 )
 
 _PLACEHOLDER_MARKER = b"@@HOMEBREW_"
+_PLACEHOLDER_MARKER_STR = _PLACEHOLDER_MARKER.decode()  # For parsed linkage strings
 _AR_MAGIC = b"!<arch>\n"  # Static archive (ar) magic
 
 # ELF constants (Linux dynamic linkage; rewritten via patchelf, no signing)
@@ -613,13 +614,13 @@ def _run(cmd: list[str]) -> None:
 
 
 @contextlib.contextmanager
-def _writable(path: Path):
+def _writable(path: Path | str):
     """Temporarily add the owner-write bit, restoring the original mode after.
 
     Args:
         path: The path to the file to modify.
     """
-    mode = path.stat().st_mode
+    mode = os.stat(path).st_mode
     needs = not mode & 0o200
     if needs:
         os.chmod(path, mode | 0o200)
@@ -758,13 +759,14 @@ def _verify_macho(path: Path) -> bool:
     Returns:
         True if every install name is placeholder-free.
     """
-    marker = _PLACEHOLDER_MARKER.decode()
     try:
         with (
             path.open("rb") as fh,
             mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm,
         ):
-            return all(marker not in slot.value for slot in _collect_names(mm))
+            return all(
+                _PLACEHOLDER_MARKER_STR not in slot.value for slot in _collect_names(mm)
+            )
 
     except (OSError, ValueError, struct.error):
         return False
@@ -933,11 +935,24 @@ def _chunk_paths(paths: list[Path], budget: int) -> list[list[Path]]:
     return chunks
 
 
+def _sign_order(paths: list[Path]) -> list[Path]:
+    """Order a sign batch so nested code is signed before whatever contains it.
+
+    Args:
+        paths: The Mach-O files to re-sign.
+
+    Returns:
+        The same paths, deepest first, ties broken by path for a stable batch.
+    """
+    return sorted(paths, key=lambda p: (-len(p.parts), p.parts))
+
+
 def _codesign(paths: list[Path]) -> None:
     """Ad-hoc re-sign a batch of Mach-O files.
 
-    The batch is chunked to stay under ARG_MAX. Each file needs its owner-write bit for the
-    in-place re-sign, so the whole chunk is made writable for the duration of the call.
+    The batch is ordered by `_sign_order`, then chunked to stay under ARG_MAX;
+    each file needs its owner-write bit for the in-place re-sign, so the whole
+    chunk is made writable for the duration of the call.
 
     Args:
         paths: The Mach-O files to re-sign (may be empty).
@@ -945,7 +960,7 @@ def _codesign(paths: list[Path]) -> None:
     Raises:
         RelocationError: If codesign fails for any chunk.
     """
-    for chunk in _chunk_paths(paths, _CODESIGN_ARG_BUDGET):
+    for chunk in _chunk_paths(_sign_order(paths), _CODESIGN_ARG_BUDGET):
         with contextlib.ExitStack() as stack:
             for path in chunk:
                 stack.enter_context(_writable(path))
@@ -993,7 +1008,7 @@ def relocate_text(path: Path, subs: dict[bytes, bytes]) -> bool:
     return True
 
 
-def relocate_symlink(link: Path, subs: dict[bytes, bytes]) -> bool:
+def relocate_symlink(link: str, subs: dict[bytes, bytes]) -> bool:
     """Rewrite a symlink whose target contains a placeholder.
 
     Args:
@@ -1011,21 +1026,21 @@ def relocate_symlink(link: Path, subs: dict[bytes, bytes]) -> bool:
         return False
 
     new = _apply(target, subs)
-    _reject_unresolved(link, new)
+    _reject_unresolved(Path(link), new)
     if new == target:
         return False
 
-    with _writable(link.parent):
-        link.unlink()
+    with _writable(link.rpartition("/")[0] or "."):
+        os.unlink(link)
         os.symlink(new.decode("utf-8", "surrogateescape"), link)
 
     return True
 
 
 def _classify(mm: mmap.mmap) -> _Kind:
-    """Classify a mapping as archive, Mach-O, or text.
+    """Classify a mapping as archive, Mach-O, ELF, or text.
 
-    Called only after the marker gate has matched, so the mapping is at least
+    Called only after the size guard, so the mapping is at least
     `len(_PLACEHOLDER_MARKER)` (11) bytes & the magic reads are safe.
 
     Args:
@@ -1044,6 +1059,38 @@ def _classify(mm: mmap.mmap) -> _Kind:
         return _Kind.ELF
 
     return _Kind.TEXT
+
+
+def _try_collect_names(mm: mmap.mmap) -> list[_NameSlot]:
+    """Parse install names, treating an unparseable header as nothing to rewrite.
+
+    Args:
+        mm: A readable mapping positioned at the start of the file.
+
+    Returns:
+        The install-name slots, empty if the header could not be parsed.
+    """
+    try:
+        return _collect_names(mm)
+
+    except (struct.error, ValueError):
+        return []
+
+
+def _try_read_elf(mm: mmap.mmap) -> _ElfInfo:
+    """Parse an ELF's linkage strings, treating a malformed header as none.
+
+    Args:
+        mm: A readable mapping positioned at the start of the file.
+
+    Returns:
+        The parsed _ElfInfo, all fields None if the header could not be parsed.
+    """
+    try:
+        return _read_elf(mm)
+
+    except (struct.error, ValueError):
+        return _ElfInfo(None, None, None)
 
 
 def _process_file(
@@ -1078,64 +1125,84 @@ def _process_file(
     Raises:
         RelocationError: If the file could not be relocated.
     """
-    path = Path(path_str)
     macho_slots: list[_NameSlot] | None = None
     elf_args: list[str] | None = None
     new_text: bytes | None = None
     text_rel: str | None = None
 
     try:
-        with path.open("rb") as fh:
-            if os.fstat(fh.fileno()).st_size == 0:
+        with open(path_str, "rb") as fh:
+            # Too short to hold a placeholder, and mmap rejects an empty file
+            if os.fstat(fh.fileno()).st_size < len(_PLACEHOLDER_MARKER):
                 return None, None, False
 
             with mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-                # No parse and no full-file read for marker-free files
-                if mm.find(_PLACEHOLDER_MARKER) == -1:
-                    return None, None, False
-
                 kind = _classify(mm)
-                if kind is _Kind.ARCHIVE:
-                    # Length-changing text substitution would corrupt headers and offsets
-                    raise RelocationError(path, "static archive contains a placeholder")
 
                 if kind is _Kind.MACHO:
                     if skip_linkage:
                         return None, None, False  # :any_skip_relocation
 
-                    macho_slots = _collect_names(mm)
+                    slots = _try_collect_names(mm)
+                    if not any(_PLACEHOLDER_MARKER_STR in slot.value for slot in slots):
+                        return None, None, False
+
+                    macho_slots = slots
 
                 elif kind is _Kind.ELF:
                     if skip_linkage:
                         return None, None, False  # :any_skip_relocation
 
-                    elf_args = _build_elf_args(path, _read_elf(mm), subs)
+                    info = _try_read_elf(mm)
+                    if not any(
+                        s is not None and _PLACEHOLDER_MARKER_STR in s
+                        for s in (info.interp, info.rpath, info.runpath)
+                    ):
+                        return None, None, False
+
+                    elf_args = _build_elf_args(Path(path_str), info, subs)
+
+                elif kind is _Kind.ARCHIVE:
+                    # Length-changing text substitution would corrupt headers and offsets
+                    if mm.find(_PLACEHOLDER_MARKER) != -1:
+                        raise RelocationError(
+                            Path(path_str), "static archive contains a placeholder"
+                        )
+
+                    return None, None, False
 
                 else:
-                    rel = path.relative_to(keg_root).as_posix()
+                    rel = path_str[len(keg_root) + 1 :]
                     # In manifest mode, only substitute files brew listed
-                    if allowed_text is None or rel in allowed_text:
-                        raw = bytes(mm)
-                        new = _apply(raw, subs)
-                        _reject_unresolved(path, new)
-                        if new != raw:
-                            new_text = new
-                            text_rel = rel
+                    if allowed_text is not None and rel not in allowed_text:
+                        return None, None, False
+
+                    # No full-file read for marker-free files
+                    if mm.find(_PLACEHOLDER_MARKER) == -1:
+                        return None, None, False
+
+                    raw = bytes(mm)
+                    new = _apply(raw, subs)
+                    _reject_unresolved(Path(path_str), new)
+                    if new != raw:
+                        new_text = new
+                        text_rel = rel
 
     except OSError as exc:
-        raise RelocationError(path, f"read failed: {exc}") from exc
+        raise RelocationError(Path(path_str), f"read failed: {exc}") from exc
 
     # Mapping is closed here, so safe to mutate the file
+    path = Path(path_str)
     if macho_slots is not None:
         # Install names now; re-signing is batched by relocate_keg
         if not _relocate_macho(path, macho_slots, subs):
-            return None, None, False  # Marker present but not in any install name
+            return None, None, False  # No substitution applied to the marked name
 
         return path, None, False
 
     if elf_args is not None:
         if not elf_args:
-            return None, None, False  # Marker present but not in linkage strings
+            return None, None, False  # No substitution applied to the marked string
 
         _run_patchelf(path, elf_args)
         return None, None, True
@@ -1262,7 +1329,7 @@ def relocate_keg(
     # Serial: two symlinks in one directory would race on the restore
     symlink_n = 0
     for link in symlinks:
-        symlink_n += relocate_symlink(Path(link), subs)
+        symlink_n += relocate_symlink(link, subs)
 
     to_sign: list[Path] = []
     discovered: list[str] = []

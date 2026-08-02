@@ -43,7 +43,7 @@ def setup(
         app.Option(
             "--version",
             "-v",
-            help="Show the Brewery version and exit",
+            help="Show the Brewery version and exit.",
             callback=_print_version,
             is_eager=True,
             expose_value=False,

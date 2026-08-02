@@ -685,6 +685,48 @@ class TestMachORewrite:
         assert result.macho_relocated == 0
         assert runs == []
 
+    def test_relocate_keg_ignores_a_placeholder_outside_the_install_names(
+        self, tmp_path, brew_paths, mock_run
+    ) -> None:
+        """A marker in the body is not an install name, so the file is left alone.
+
+        The dispatch reads the load commands and never scans the body, so this is
+        the case that would regress if it started substituting binary content.
+        """
+        runs = mock_run()
+        keg, dylib = _keg_with_dylib(
+            tmp_path, [_lc_dylib(r._LC_ID_DYLIB, "/usr/lib/libSystem.B.dylib")]
+        )
+        body = dylib.read_bytes() + b"@@HOMEBREW_PREFIX@@/nope\x00"
+        dylib.write_bytes(body)
+
+        result = r.relocate_keg(keg, **brew_paths)
+        assert result.macho_relocated == 0
+        assert runs == []
+        assert dylib.read_bytes() == body
+
+    def test_relocate_keg_skips_a_mach_o_with_an_unparseable_header(
+        self, tmp_path, brew_paths, mock_run
+    ) -> None:
+        """A truncated fat header is skipped, not raised through the pool.
+
+        Every Mach-O reaches the parser now, not only the ones holding a marker,
+        so `struct.error` from a malformed header has to be caught.
+        """
+        runs = mock_run()
+        keg = tmp_path / "keg"
+        (keg / "lib").mkdir(parents=True)
+        broken = keg / "lib" / "libtruncated.dylib"
+
+        # Fat magic claiming 64 slices, with none of the arch table present
+        broken.write_bytes(
+            struct.pack(">II", r._FAT_MAGIC, 64) + b"@@HOMEBREW_PREFIX@@\x00"
+        )
+
+        result = r.relocate_keg(keg, **brew_paths)
+        assert result.macho_relocated == 0
+        assert runs == []
+
     def test_install_name_tool_failure_raises_relocation_error(
         self, tmp_path, brew_paths, mock_run, force_install_name_tool
     ) -> None:
@@ -775,17 +817,31 @@ class TestTextSymlinkRelocation:
 
     def test_relocate_symlink_rewrites_placeholder_target(self, tmp_path, subs) -> None:
         """Tests that symlink relocation rewrites the target correctly."""
-        link = tmp_path / "link"
+        link = str(tmp_path / "link")
         os.symlink("@@HOMEBREW_PREFIX@@/bin/real", link)
         assert r.relocate_symlink(link, subs) is True
         assert os.readlink(link) == "/opt/homebrew/bin/real"
 
     def test_relocate_symlink_noop_for_plain_target(self, tmp_path, subs) -> None:
         """Tests that symlink relocation is a no-op for plain targets."""
-        link = tmp_path / "link"
+        link = str(tmp_path / "link")
         os.symlink("../relative/target", link)
         assert r.relocate_symlink(link, subs) is False
         assert os.readlink(link) == "../relative/target"
+
+    def test_relocate_symlink_rewrites_inside_a_readonly_parent(
+        self, tmp_path, subs
+    ) -> None:
+        """The parent's write bit is added and restored around the relink."""
+        parent = tmp_path / "ro"
+        parent.mkdir()
+        link = str(parent / "link")
+        os.symlink("@@HOMEBREW_PREFIX@@/bin/real", link)
+        os.chmod(parent, 0o555)
+
+        assert r.relocate_symlink(link, subs) is True
+        assert os.readlink(link) == "/opt/homebrew/bin/real"
+        assert oct(parent.stat().st_mode & 0o777) == "0o555"
 
 
 class TestOrchestration:
@@ -1002,6 +1058,45 @@ class TestOrchestration:
 
         with pytest.raises(RelocationError, match="codesign failed"):
             r.relocate_keg(keg, **brew_paths)
+
+
+class TestSignOrder:
+    """Tests for the codesign batch ordering."""
+
+    def test_nested_bundle_is_signed_before_its_container(self) -> None:
+        """Signing a framework validates the code nested inside it, so that goes first.
+
+        qtwebengine's real shape: a helper .app inside the framework whose main
+        binary is also in the batch. In `as_completed` order the framework came
+        first roughly half the time, and codesign refused it with "code object
+        is not signed at all / In subcomponent".
+        """
+        fw = Path("/keg/lib/QtWebEngineCore.framework/Versions/A")
+        container = fw / "QtWebEngineCore"
+        nested = fw / "Helpers/QtWebEngineProcess.app/Contents/MacOS/QtWebEngineProcess"
+
+        for batch in ([container, nested], [nested, container]):
+            ordered = r._sign_order(batch)
+            assert ordered.index(nested) < ordered.index(container)
+
+    def test_order_is_deterministic_regardless_of_input_order(self) -> None:
+        """The batch must not depend on which worker finished first."""
+        paths = [
+            Path("/keg/lib/libb.dylib"),
+            Path("/keg/lib/A.framework/Versions/A/A"),
+            Path("/keg/lib/liba.dylib"),
+            Path("/keg/bin/tool"),
+        ]
+        assert r._sign_order(paths) == r._sign_order(list(reversed(paths)))
+
+    def test_every_path_is_kept_exactly_once(self) -> None:
+        """Ordering is a permutation, not a filter."""
+        paths = [Path(f"/keg/lib/lib{i}.dylib") for i in range(5)]
+        assert sorted(r._sign_order(paths)) == sorted(paths)
+
+    def test_empty_batch(self) -> None:
+        """No paths means no ordering work."""
+        assert r._sign_order([]) == []
 
 
 class TestChunkPaths:
