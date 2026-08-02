@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tarfile
 import unicodedata
 from collections.abc import Callable
@@ -50,13 +51,19 @@ def detect_format(archive: Path) -> str:
 # A filter may return None to tell tarfile to skip the member entirely
 _TarFilter = Callable[[tarfile.TarInfo, str], tarfile.TarInfo | None]
 
+# Link member the filter deferred: (name, link target, is a symlink)
+_DeferredLink = tuple[str, str, bool]
+
+# The function pattern used to create symlinks during extraction
+_MakeLink = Callable[[str, Path], None]
+
 
 def _contained(name: str) -> str | None:
     """Normalise a tar member name, or reject it for leaving the root.
 
     tarfile joins the member name onto the destination directory verbatim, so
     containment is decidable from the string alone as long as the destination
-    holds no symlinks the archive did not itself create (see `_keg_filter`).
+    holds no symlinks.
 
     Args:
         name: The raw member name from the tar header.
@@ -114,23 +121,25 @@ def _under_symlink(folded: str, symlinks: set[str]) -> bool:
     return False
 
 
-def _keg_filter(archive: Path | None = None) -> _TarFilter:
+def _keg_filter(
+    archive: Path | None = None,
+) -> tuple[_TarFilter, list[_DeferredLink]]:
     """Build the per-member extraction filter for one archive.
 
     The filter keeps the member inside the destination, preserves the member's
-    exact mode, permits the symlinks brew creates verbatim, and rejects the
-    archive before anything is written once it exceeds the decompression-bomb
-    ceilings.
+    exact mode, and rejects the archive before anything is written once it
+    exceeds the decompression-bomb ceilings.
 
     Args:
         archive: The archive being extracted, for error context.
 
     Returns:
-        A filter callable for `tarfile.extractall`, holding the running totals.
+        A filter callable for `tarfile.extractall`, holding the running totals,
+        and the list it appends deferred link members to in stream order.
     """
     total_bytes = 0
     total_members = 0
-    symlinks: set[str] = set()
+    deferred: list[_DeferredLink] = []
 
     def _filter(member: tarfile.TarInfo, dest_path: str) -> tarfile.TarInfo | None:
         """Apply the containment checks and track the running totals.
@@ -174,14 +183,10 @@ def _keg_filter(archive: Path | None = None) -> _TarFilter:
 
             raise tarfile.OutsideDestinationError(member, member.name)
 
-        folded = _fold(name)
-
-        # Symlink targets must be contained within the destination
-        if symlinks and (
-            (folded in symlinks and not member.issym())
-            or _under_symlink(folded, symlinks)
-        ):
-            raise tarfile.OutsideDestinationError(member, name)
+        if member.issym():
+            # Targets are left verbatim, relocator rewrites them later
+            deferred.append((name, member.linkname, True))
+            return None
 
         if member.islnk():
             # Leading slash indicates an absolute link target, not a member of the archive
@@ -193,17 +198,8 @@ def _keg_filter(archive: Path | None = None) -> _TarFilter:
             if not target:
                 raise tarfile.LinkOutsideDestinationError(member, member.linkname)
 
-            folded_target = _fold(target)
-            if symlinks and (
-                folded_target in symlinks or _under_symlink(folded_target, symlinks)
-            ):
-                raise tarfile.LinkOutsideDestinationError(member, target)
-
-            member.linkname = target
-
-        elif member.issym():
-            # Leave symlinks as-is from sha-verified bottles
-            symlinks.add(folded)
+            deferred.append((name, target, False))
+            return None
 
         # Mutated in place rather than via TarInfo.replace()
         member.name = name
@@ -220,7 +216,153 @@ def _keg_filter(archive: Path | None = None) -> _TarFilter:
 
         return member
 
-    return _filter
+    return _filter, deferred
+
+
+def _link_in_readonly_parent(
+    make: _MakeLink,
+    src: str,
+    path: Path,
+    *,
+    archive: Path | None = None,
+    dest: Path | None = None,
+) -> None:
+    """Create a link inside a directory whose archive mode denies writes.
+
+    `extractall` applies each directory's mode from the archive, so a member
+    with a read-only mode is already locked by the time its deferred links are
+    created; this grants the owner write permissions, creates the link, then
+    restores the recorded mode.
+
+    Args:
+        make: `os.symlink` or `os.link`.
+        src: The link target.
+        path: The entry to create.
+        archive: The archive being extracted, for error context.
+        dest: The staging directory, for error context.
+    """
+    parent = path.parent
+    mode = parent.stat().st_mode & 0o7777
+
+    try:
+        parent.chmod(mode | 0o300)
+
+    except PermissionError as exc:
+        raise ExtractionError(
+            f"staging directory {parent} is not writable and is not owned by "
+            f"this user, so link {path.name!r} cannot be created",
+            archive=archive,
+            dest=dest,
+        ) from exc
+
+    try:
+        make(src, path)
+
+    finally:
+        parent.chmod(mode)
+
+
+def _make_link(
+    make: _MakeLink,
+    src: str,
+    path: Path,
+    *,
+    archive: Path | None = None,
+    dest: Path | None = None,
+) -> None:
+    """Create one deferred link, handling each failure where it lands.
+
+    Args:
+        make: `os.symlink` or `os.link`.
+        src: The link target, as `make` expects it.
+        path: The entry to create.
+        archive: The archive being extracted, for error context.
+        dest: The staging directory, for error context.
+    """
+    try:
+        make(src, path)
+        return
+
+    except FileExistsError as exc:
+        # Link target already exists; replace it if it's not a symlink
+        if not path.is_symlink():
+            raise ExtractionError(
+                f"unsafe tar member: link {path.name!r} would replace an "
+                f"extracted entry",
+                archive=archive,
+                dest=dest,
+            ) from exc
+
+        path.unlink()
+
+    except FileNotFoundError as exc:
+        # Parent is missing or a hard link names a target the archive never wrote
+        if path.parent.is_dir():
+            raise ExtractionError(
+                f"broken hard link: {src}",
+                archive=archive,
+                dest=dest,
+            ) from exc
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    except PermissionError:
+        _link_in_readonly_parent(make, src, path, archive=archive, dest=dest)
+        return
+
+    make(src, path)
+
+
+def _apply_links(
+    dest: Path, deferred: list[_DeferredLink], archive: Path | None = None
+) -> None:
+    """Create the archive's link members once every file and directory is on disk.
+
+    Walks `deferred` in stream order, so a hard link's target is always either a
+    regular file `extractall` already wrote or a symlink earlier in this list.
+
+    Args:
+        dest: The staging directory the archive was extracted into.
+        deferred: The link members `_keg_filter` held back, in stream order.
+        archive: The archive being extracted, for error context.
+    """
+    symlinks: set[str] = set()
+
+    for name, linkname, is_sym in deferred:
+        folded = _fold(name)
+        path = dest / name
+
+        if is_sym:
+            if _under_symlink(folded, symlinks):
+                raise ExtractionError(
+                    f"unsafe tar member: symlink {name!r} sits under an "
+                    f"earlier symlink",
+                    archive=archive,
+                    dest=dest,
+                )
+
+            _make_link(os.symlink, linkname, path, archive=archive, dest=dest)
+            symlinks.add(folded)
+            continue
+
+        folded_target = _fold(linkname)
+        if folded in symlinks or _under_symlink(folded, symlinks):
+            raise ExtractionError(
+                f"unsafe tar member: hard link {name!r} sits at or under an "
+                f"earlier symlink",
+                archive=archive,
+                dest=dest,
+            )
+
+        if folded_target in symlinks or _under_symlink(folded_target, symlinks):
+            raise ExtractionError(
+                f"unsafe tar member: hard link {name!r} aims at or through the "
+                f"symlink {linkname!r}",
+                archive=archive,
+                dest=dest,
+            )
+
+        _make_link(os.link, str(dest / linkname), path, archive=archive, dest=dest)
 
 
 def _extract_stream(fileobj: BinaryIO, dest: Path, tar_filter: _TarFilter) -> None:
@@ -254,7 +396,7 @@ def extract_bottle(archive: Path, dest: Path) -> Path:
     """
     fmt = detect_format(archive)
     dest.mkdir(parents=True, exist_ok=True)
-    tar_filter = _keg_filter(archive=archive)
+    tar_filter, deferred = _keg_filter(archive=archive)
 
     try:
         if fmt == "gzip":
@@ -266,17 +408,11 @@ def extract_bottle(archive: Path, dest: Path) -> Path:
             with archive.open("rb") as fh, dctx.stream_reader(fh) as reader:
                 _extract_stream(reader, dest, tar_filter)
 
+        _apply_links(dest, deferred, archive=archive)
+
     except tarfile.FilterError as exc:
         raise ExtractionError(
             f"unsafe tar member in {archive.name}: {exc}", archive=archive, dest=dest
-        ) from exc
-
-    except KeyError as exc:
-        # Hard link whose target is not itself a member of the archive
-        raise ExtractionError(
-            f"broken hard link in {archive.name}: {exc.args[0]}",
-            archive=archive,
-            dest=dest,
         ) from exc
 
     except (tarfile.TarError, zstandard.ZstdError, OSError) as exc:

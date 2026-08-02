@@ -1,5 +1,6 @@
 """Integration tests for the bottle extractor."""
 
+import contextlib
 import gzip
 import io
 import os
@@ -320,10 +321,13 @@ def test_file_replacing_symlink_rejected(tmp_path) -> None:
     assert (outside / "passwd").read_bytes() == b"original"
 
 
-def test_write_through_symlink_rejected_case_insensitively(tmp_path) -> None:
-    """Test that write-through symlinks are rejected case-insensitively."""
-    # The default macOS volume is case-insensitive; the symlink check has to agree
-    # with the kernel rather than str.__eq__
+def test_write_through_symlink_not_followed_case_insensitively(tmp_path) -> None:
+    """Test a differently-cased write-through symlink cannot escape.
+
+    The default macOS volume is case-insensitive, so this tests that a
+    write-through symlink with a differently-cased name cannot escape the archive's
+    staging directory.
+    """
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "passwd").write_bytes(b"original")
@@ -333,7 +337,7 @@ def test_write_through_symlink_rejected_case_insensitively(tmp_path) -> None:
             ("file", "foo/1.0/x/passwd", b"pwned", 0o644),
         ]
     )
-    with pytest.raises(ExtractionError, match="unsafe"):
+    with contextlib.suppress(ExtractionError):
         extract_bottle(_archive(tmp_path, gzip.compress, raw), tmp_path / "stage")
 
     assert (outside / "passwd").read_bytes() == b"original"
@@ -370,6 +374,47 @@ def test_symlink_may_replace_earlier_symlink(tmp_path) -> None:
     )
     keg = extract_bottle(_archive(tmp_path, gzip.compress, raw), tmp_path / "stage")
     assert os.readlink(keg / "bin" / "x") == "b"
+
+
+def test_hardlink_to_earlier_symlink_member_rejected(tmp_path) -> None:
+    """Test a hard link aimed at a symlink the archive shipped is rejected."""
+    raw = make_tar(
+        [
+            ("file", "foo/1.0/lib/libssl.dylib", b"MACHO", 0o444),
+            ("link", "foo/1.0/lib/libssl.3.dylib", "libssl.dylib"),
+            ("hardlink", "foo/1.0/lib/libssl.a", "foo/1.0/lib/libssl.3.dylib"),
+        ]
+    )
+    stage = tmp_path / "stage"
+    with pytest.raises(ExtractionError, match="unsafe"):
+        extract_bottle(_archive(tmp_path, gzip.compress, raw), stage)
+
+    assert not (stage / "foo" / "1.0" / "lib" / "libssl.a").exists()
+
+
+def test_symlink_lands_in_readonly_directory_member(tmp_path) -> None:
+    """Test a link is created inside a directory the archive marks non-writable.
+
+    `extractall` applies directory modes on its way out, so the parent is
+    already `0o555` by the time the deferred link is created.
+    """
+    raw = make_tar(
+        [
+            ("dir", "foo/1.0/etc", 0o555),
+            ("link", "foo/1.0/etc/openssl.cnf", "../share/openssl.cnf"),
+        ]
+    )
+    keg = extract_bottle(_archive(tmp_path, gzip.compress, raw), tmp_path / "stage")
+    assert os.readlink(keg / "etc" / "openssl.cnf") == "../share/openssl.cnf"
+    assert oct((keg / "etc").stat().st_mode & 0o777) == "0o555"
+    (keg / "etc").chmod(0o755)  # So tmp_path can be torn down
+
+
+def test_symlink_without_directory_members(tmp_path) -> None:
+    """Test a symlink whose parent no member declares still gets one."""
+    raw = make_tar([("link", "foo/1.0/bin/nested/x", "../../lib/x")])
+    keg = extract_bottle(_archive(tmp_path, gzip.compress, raw), tmp_path / "stage")
+    assert os.readlink(keg / "bin" / "nested" / "x") == "../../lib/x"
 
 
 def test_hardlink_within_keg_still_works(tmp_path) -> None:
