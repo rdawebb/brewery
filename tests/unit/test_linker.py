@@ -594,6 +594,91 @@ class TestLinkConcurrency:
             assert _points_to(x11 / f"h{i}.h", keg / f"include/X11/h{i}.h")
             assert _points_to(prefix / "bin" / f"tool{i}", keg / "bin" / f"tool{i}")
 
+    def test_plan_is_built_under_the_structure_lock(
+        self, tmp_path, prefix, monkeypatch
+    ) -> None:
+        """Test that the structure lock is held while building the link plan."""
+        keg = tmp_path / "Cellar" / "libx11" / "1.8"
+        _mk(keg, "include/X11/Xlib.h")
+
+        held: list[bool] = []
+        orig = linker._build_plan
+
+        def spy(keg_dir: Path, prefix_dir: Path):
+            """Record whether the structure lock is held while planning."""
+            held.append(linker._STRUCTURE_LOCK.locked())
+
+            return orig(keg_dir, prefix_dir)
+
+        monkeypatch.setattr(linker, "_build_plan", spy)
+        link_keg(keg, prefix=prefix, name="libx11")
+
+        assert held == [True]
+
+    def test_concurrent_links_into_a_nested_shared_tree(self, tmp_path, prefix) -> None:
+        """Test that concurrent links into a nested shared tree do not clobber.
+
+        qt's `share/qt/mkspecs` is an example of a nested shared tree.
+        """
+        cellar = tmp_path / "Cellar"
+        base = cellar / "qtbase" / "6.11"
+        for rel in (
+            "share/qt/mkspecs/features/qt.prf",
+            "share/qt/mkspecs/modules/qt_lib_core.pri",
+            "share/qt/libexec/tracegen",
+            "bin/qmake",
+        ):
+            _mk(base, rel)
+
+        kegs = [(base, "qtbase")]
+        n = 8
+        for i in range(n):
+            keg = cellar / f"qtmod{i}" / "6.11"
+            _mk(keg, f"share/qt/mkspecs/modules/qt_lib_mod{i}.pri")
+            _mk(keg, f"share/qt/modules/Mod{i}.json")
+            kegs.append((keg, f"qtmod{i}"))
+
+        barrier = threading.Barrier(len(kegs))
+        errors: list[Exception] = []
+
+        def worker(keg: Path, name: str) -> None:
+            """Link one keg, once every thread is ready."""
+            barrier.wait()
+            try:
+                link_keg(keg, prefix=prefix, name=name)
+
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=kv) for kv in kegs]
+        for t in threads:
+            t.start()
+
+        for t in threads:
+            t.join()
+
+        assert not errors, errors
+
+        modules = prefix / "share/qt/mkspecs/modules"
+        assert modules.is_dir() and not modules.is_symlink()
+        assert _points_to(
+            modules / "qt_lib_core.pri",
+            base / "share/qt/mkspecs/modules/qt_lib_core.pri",
+        )
+        assert _points_to(
+            prefix / "share/qt/mkspecs/features/qt.prf",
+            base / "share/qt/mkspecs/features/qt.prf",
+        )
+        for i, (keg, _) in enumerate(kegs[1:]):
+            assert _points_to(
+                modules / f"qt_lib_mod{i}.pri",
+                keg / f"share/qt/mkspecs/modules/qt_lib_mod{i}.pri",
+            )
+            assert _points_to(
+                prefix / "share/qt/modules" / f"Mod{i}.json",
+                keg / f"share/qt/modules/Mod{i}.json",
+            )
+
 
 class TestLeafLinkRaces:
     """Tests for leaf link races and the behavior of `link_keg` under contention."""

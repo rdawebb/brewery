@@ -3,11 +3,9 @@
 Conflict detection is a pre-pass: nothing is mutated if the link would conflict,
 so the caller can fall back to `brew link` without a partially linked prefix.
 
-The pre-pass runs outside the structure lock, so a peer (brewery or `brew`, which
-takes no lock of ours) can take a path between planning and applying. Leaf links
-are therefore created, never replaced: `EEXIST` reports the loser of a race, which
-re-decides against the live prefix and, if the path is genuinely conflicted,
-unwinds this keg's links so the mutate-nothing guarantee survives concurrency.
+Planning and applying run under one hold of the in-process structure lock, so a
+peer thread cannot retype a shared directory in between and leave the plan
+describing a prefix that never existed.
 """
 
 # This file contains code derived from Homebrew (https://github.com/Homebrew/brew)
@@ -258,8 +256,8 @@ _Strategy = Callable[[str, bool], Action]
 
 # Load-bearing for concurrency: every strategy decides from the relative path alone,
 # so MKPATH-ness is identical for every keg regardless of prefix state. Explosion
-# targets are thus never MKPATH paths, which confines the unlocked apply path to
-# leaf files and keeps it from racing the shared pass
+# targets are thus never MKPATH paths, which keeps a peer process out of the
+# directories the shared pass owns
 _STRATEGIES = {
     "bin": _strategy_link_all,
     "sbin": _strategy_link_all,
@@ -699,8 +697,8 @@ def _link_leaf(
 ) -> None:
     """Create one leaf symlink, arbitrating a peer that won the race for `dst`.
 
-    The plan saw `dst` absent, but it is built outside the structure lock, so a
-    concurrent linker may have taken the path since. `EEXIST` retakes the decision
+    The plan saw `dst` absent, but the structure lock excludes only this process,
+    so `brew` may have taken the path since. `EEXIST` retakes the decision
     `_Plan.consider_link` made at plan time against the now-current prefix.
 
     Args:
@@ -761,10 +759,8 @@ def _record_link(result: LinkResult, prefix: str, rel: str, src: str) -> None:
 def _apply_dirs_and_links(plan: _Plan, result: LinkResult, *, overwrite: bool) -> None:
     """mkpath `plan.dirs` and create `plan.links`, recording both into `result`.
 
-    Leaf links run unlocked (a plan that touches no shared directory takes no
-    lock at all), so each one is created rather than replaced and arbitrates its
-    own races. Whole-dir symlinks (`plan.dir_links`) are deliberately not applied,
-    they are shared targets handled under the structure lock by `_apply_shared_dirs`.
+    A plan that touches no shared directory holds no cross-process lock, so each
+    leaf is created rather than replaced and arbitrates its own race with `brew`.
 
     Args:
         plan: The plan whose dirs and leaf-file links to apply.
@@ -895,22 +891,23 @@ def link_keg(
     if keg_only:
         return LinkResult()  # Keg-only formulae are never linked
 
-    plan = _build_plan(keg_dir, prefix)
-
-    if dry_run:
-        return _preview(plan)
-
-    if plan.conflicts and not overwrite:
-        raise LinkError(plan.conflicts)
-
     result = LinkResult()
 
-    # If the plan touches a shared directory or has conflicts, apply under the structure lock
-    shared = plan.touches_shared or bool(overwrite and plan.conflicts)
+    # Planning and applying run under one hold of the in-process structure lock,
+    # so a peer thread cannot retype a shared directory in between
     with contextlib.ExitStack() as stack:
-        if shared:
-            # In-process first, so only one thread per process queues on the file lock
-            stack.enter_context(_STRUCTURE_LOCK)
+        stack.enter_context(_STRUCTURE_LOCK)
+
+        plan = _build_plan(keg_dir, prefix)
+
+        if dry_run:
+            return _preview(plan)
+
+        if plan.conflicts and not overwrite:
+            raise LinkError(plan.conflicts)
+
+        # Re-validate shared directory ownership under the cross-process lock
+        if plan.touches_shared or (overwrite and plan.conflicts):
             stack.enter_context(structure_lock(prefix))
 
         # A conflict a peer created after the plan was built surfaces mid-apply,
@@ -993,12 +990,15 @@ def _apply_shared_dirs(
     *,
     overwrite: bool,
 ) -> None:
-    """Apply the shared-directory link targets under `_STRUCTURE_LOCK`.
+    """Apply the shared-directory link targets under both structure locks.
+
+    The targets are re-validated first: the plan agrees with what this process
+    has done, but `brew` holds neither lock and may have moved a directory since.
 
     Args:
         keg_dir: The keg being linked.
         prefix: The prefix being linked into.
-        plan: The lock-free plan whose directory targets are re-validated.
+        plan: The plan whose directory targets are re-validated.
         result: The result accumulated so far; extended in place.
         overwrite: Whether to replace conflicting targets.
     """
