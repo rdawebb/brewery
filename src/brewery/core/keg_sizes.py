@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
 import subprocess
 from pathlib import Path
 
@@ -59,18 +61,34 @@ def attach_sizes(records: list[InstalledRecord], cache_dir: Path | None = None) 
     for path_str, size_kb in measured.items():
         by_name[miss_owner[path_str]].size_kb = size_kb
 
-    fresh: dict[str, list[int]] = {}
     for r in records:
         if r.size_kb is not None and r.name in mtimes:
-            fresh[r.name] = [mtimes[r.name], r.size_kb]
+            cached[r.name] = [mtimes[r.name], r.size_kb, r.path]
 
-    _save_size_cache(cache_dir=cache_dir, data=fresh)
+    _save_size_cache(cache_dir=cache_dir, data=_prune(cached, set(mtimes)))
     log.info(
         event="sizes_attached",
         total=len(records),
         cache_hits=hits,
         measured=len(misses),
     )
+
+
+def _prune(cache: dict[str, list], sized: set[str]) -> dict[str, list]:
+    """Drop the entries whose keg is no longer on disk.
+
+    Args:
+        cache: The merged cache to prune.
+        sized: Names this call measured or confirmed.
+
+    Returns:
+        The entries worth keeping.
+    """
+    return {
+        name: entry
+        for name, entry in cache.items()
+        if name in sized or (len(entry) > 2 and os.path.exists(entry[2]))
+    }
 
 
 def du_many(paths: list[Path]) -> dict[str, int]:
@@ -130,6 +148,9 @@ def du_many(paths: list[Path]) -> dict[str, int]:
 def _load_size_cache(cache_dir: Path) -> dict[str, list]:
     """Load the size cache, returning an empty map on any error.
 
+    Entries that are not `[mtime_ns, size_kb, ...]` are discarded, so a hand-edited
+    or half-written file cannot raise on lookup.
+
     Args:
         cache_dir: The directory containing the cache file.
 
@@ -142,18 +163,36 @@ def _load_size_cache(cache_dir: Path) -> dict[str, list]:
     except (FileNotFoundError, orjson.JSONDecodeError, OSError):
         return {}
 
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+
+    return {
+        name: entry
+        for name, entry in data.items()
+        if isinstance(entry, list) and len(entry) >= 2
+    }
 
 
 def _save_size_cache(cache_dir: Path, data: dict[str, list]) -> None:
     """Persist the size cache, swallowing write errors (sizing is best-effort).
 
+    Staged beside the cache and renamed over it: the refresh daemon and a command
+    can be sizing at the same time, and a reader that caught the file mid-write
+    would take it for corrupt and re-measure every keg.
+
     Args:
         cache_dir: The directory containing the cache file.
         data: The cache data to persist.
     """
+    path = cache_dir / _SIZE_CACHE_FILE
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+
     try:
-        (cache_dir / _SIZE_CACHE_FILE).write_bytes(orjson.dumps(data))
+        tmp.write_bytes(orjson.dumps(data))
+        os.replace(tmp, path)
 
     except OSError as e:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+
         log.warning(event="size_cache_write_failed", error=str(object=e))
