@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Changed
 
+- Installing a large dependency tree is around five times faster: relocation reads each file directly rather than memory-mapping it, which on macOS stalled every other formula's extraction and linking
 - Bottles extract in about half the time, by deciding that a tar member stays inside the staging directory from its name rather than by resolving every member against the filesystem
 - Formulae that ship thousands of individual files link around four times faster due to reduced object allocations
 - Mach-O install names are rewritten natively instead of by spawning `install_name_tool` subprocesses, cutting the relocation step time of an install on binary-heavy formulae; `install_name_tool` is still used where a rewritten path no longer fits its load command, and `BREWERY_NO_NATIVE_MACHO=1` forces every binary through it
@@ -16,6 +17,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- The link plan is now built under the same lock that applies it, so a peer can no longer replace a directory while the plan is still reading it
+- A formula shipping the same file under two names no longer intermittently fails to install with a permission error, and both names keep the permissions the bottle shipped instead of one being left writable
+- The keg size cache is merged rather than rebuilt, so partial/failed commands no longer empty it and leave the next command measuring every keg again; it is also written atomically, so a concurrent refresh cannot catch it half-written
 - Install, upgrade, uninstall, link/unlink and cleanup now take Homebrew's own per-formula lock, so brewery and a concurrent `brew` no longer modify the same formula at the same time; a formula another process is holding is reported rather than waited on
 - Changes to shared prefix directories are serialised across brewery processes, so a background cleanup or a second brewery run can no longer interleave with linking
 - Two formulae installing at once that both provide the same file are now reported as a conflict instead of one silently overwriting the other's link; the formula that loses the race leaves the prefix untouched and falls back to `brew link`

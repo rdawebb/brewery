@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import mmap
+import contextlib
 import os
 import struct
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -135,11 +136,8 @@ def _slots(path: Path) -> list:
     Returns:
         The file's _NameSlot list, one entry per load command per slice.
     """
-    with (
-        path.open("rb") as fh,
-        mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm,
-    ):
-        return r._collect_names(mm)
+    with path.open("rb") as fh:
+        return r._collect_names(r._Reader(fh.fileno(), os.fstat(fh.fileno()).st_size))
 
 
 @pytest.fixture
@@ -171,6 +169,103 @@ class TestSubstitution:
         assert (
             r._apply(b"/usr/lib/libSystem.dylib", subs) == b"/usr/lib/libSystem.dylib"
         )
+
+
+class TestReader:
+    """Tests for the pread-backed file reader that stands in for mmap."""
+
+    @contextlib.contextmanager
+    def _reader(self, tmp_path: Path, data: bytes, name: str = "f"):
+        """Open a file of `data` and hold a reader over it for the block.
+
+        The descriptor has to outlive the reader, since the reader only borrows it.
+
+        Args:
+            tmp_path: The pytest temp dir.
+            data: The file's bytes.
+            name: The filename.
+
+        Yields:
+            A reader positioned over the whole file.
+        """
+        p = tmp_path / name
+        p.write_bytes(data)
+        with p.open("rb") as fh:
+            yield r._Reader(fh.fileno(), len(data))
+
+    def test_reads_inside_and_beyond_the_prefetched_head(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Test that a read past the head window falls through to pread with the same bytes."""
+        monkeypatch.setattr(r, "_HEAD_WINDOW", 8)
+        with self._reader(tmp_path, bytes(range(64))) as reader:
+            assert reader.read(0, 8) == bytes(range(8))  # Wholly within the window
+            assert reader.read(4, 8) == bytes(range(4, 12))  # Straddles its end
+            assert reader.read(40, 8) == bytes(range(40, 48))  # Wholly beyond it
+            assert reader.size == 64
+
+    def test_short_read_at_eof_raises_struct_error(self, tmp_path) -> None:
+        """Test that a truncated field raises what the mapping's unpack_from used to raise."""
+        with self._reader(tmp_path, b"\x01\x02\x03") as reader:
+            assert reader.read(0, 8) == b"\x01\x02\x03"
+            with pytest.raises(struct.error):
+                reader.unpack_from(">I", 1)
+
+    def test_cstr_stops_at_the_terminator_and_at_the_bound(self, tmp_path) -> None:
+        """Test that a terminated string ends at its NUL; an unterminated one at `end`."""
+        with self._reader(tmp_path, b"/usr/lib\x00tail\x00" + b"A" * 32) as reader:
+            assert reader.cstr(0, 14) == b"/usr/lib"
+            assert reader.cstr(14, 20) == b"AAAAAA"  # No NUL before the bound
+
+    def test_cstr_is_capped_for_an_unbounded_region(self, tmp_path) -> None:
+        """Test that an unterminated string read to EOF stops at _CSTR_MAX, not at the file size."""
+        with self._reader(tmp_path, b"B" * (r._CSTR_MAX + 100)) as reader:
+            assert len(reader.cstr(0, reader.size)) == r._CSTR_MAX
+
+    def test_cstr_beyond_the_end_is_empty(self, tmp_path) -> None:
+        """Test that a string offset past EOF yields nothing rather than raising."""
+        with self._reader(tmp_path, b"short") as reader:
+            assert reader.cstr(99, 200) == b""
+
+
+class TestMarkerScan:
+    """Tests for the chunked placeholder scan over a file's body."""
+
+    def _scan(self, tmp_path: Path, data: bytes) -> bool:
+        """Write `data` and scan it for the placeholder marker.
+
+        Args:
+            tmp_path: The pytest temp dir.
+            data: The file's bytes.
+
+        Returns:
+            Whether the marker was found.
+        """
+        p = tmp_path / "f"
+        p.write_bytes(data)
+        with p.open("rb") as fh:
+            return r._has_marker(fh.fileno(), len(data))
+
+    def test_finds_and_misses_a_marker_within_one_chunk(self, tmp_path) -> None:
+        """Test that the single-chunk case, which is every file small enough to fit."""
+        assert self._scan(tmp_path, b"prefix=@@HOMEBREW_PREFIX@@/opt")
+        assert not self._scan(tmp_path, b"prefix=/usr/local/opt")
+
+    def test_finds_a_marker_straddling_a_chunk_boundary(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Test that the seam is the one place a chunked scan can lose a match."""
+        monkeypatch.setattr(r, "_SCAN_CHUNK", 16)
+
+        # Split the marker across the boundary at byte 16, 4 bytes either side
+        data = b"A" * 12 + r._PLACEHOLDER_MARKER + b"B" * 12
+        assert data[12:16] == b"@@HO"
+        assert self._scan(tmp_path, data)
+
+    def test_scans_every_chunk_to_the_end(self, tmp_path, monkeypatch) -> None:
+        """Test that a marker in the last chunk is found, so the walk cannot stop early."""
+        monkeypatch.setattr(r, "_SCAN_CHUNK", 16)
+        assert self._scan(tmp_path, b"A" * 64 + r._PLACEHOLDER_MARKER)
 
 
 class TestMachODetection:
@@ -226,6 +321,67 @@ class TestMachOParsing:
             InstallName(NameKind.DYLIB, "/usr/lib/libSystem.B.dylib"),
             InstallName(NameKind.RPATH, "@@HOMEBREW_CELLAR@@/foo/1.0/lib"),
         ]
+
+    def test_parse_thin_reads_load_commands_past_the_head_window(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Test that a header larger than the prefetched window is read the rest of the way.
+
+        Real dylibs carry more load commands than any window worth prefetching,
+        so the pread fallback has to produce the same slots as the cached path.
+        """
+        cmds = [
+            _lc_dylib(r._LC_ID_DYLIB, "@@HOMEBREW_PREFIX@@/lib/libfoo.dylib"),
+            *(_lc_dylib(r._LC_LOAD_DYLIB, f"/usr/lib/lib{i}.dylib") for i in range(40)),
+        ]
+        p = tmp_path / "libfoo.dylib"
+        p.write_bytes(_thin_macho(cmds))
+
+        expected = r.find_install_names(p)
+        monkeypatch.setattr(r, "_HEAD_WINDOW", 16)
+
+        assert r.find_install_names(p) == expected
+        assert len(expected) == 41
+
+    def test_parse_fat_reads_a_slice_past_the_head_window(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Test that a fat slice sits at an arbitrary offset, so it is never in the window."""
+        monkeypatch.setattr(r, "_HEAD_WINDOW", 16)
+        slice_ = _thin_macho([_lc_dylib(r._LC_ID_DYLIB, "@@HOMEBREW_PREFIX@@/lib/x")])
+        p = tmp_path / "x"
+        p.write_bytes(_fat_macho([slice_, slice_]))
+
+        assert r.find_install_names(p) == [
+            InstallName(NameKind.ID, "@@HOMEBREW_PREFIX@@/lib/x")
+        ]
+
+    def test_slots_of_a_fat_binary_point_at_the_real_file_offsets(
+        self, tmp_path
+    ) -> None:
+        """Test that slot offsets stay absolute, since `_patch_macho` writes back to them."""
+        name = "@@HOMEBREW_PREFIX@@/lib/x"
+        slice_ = _thin_macho([_lc_dylib(r._LC_ID_DYLIB, name)])
+        p = tmp_path / "x"
+        raw = _fat_macho([slice_, slice_])
+        p.write_bytes(raw)
+
+        slots = _slots(p)
+        assert len(slots) == 2
+        for slot in slots:
+            assert raw[slot.offset : slot.offset + len(name)] == name.encode()
+            assert slot.offset < slot.limit <= len(raw)
+
+    def test_implausible_sizeofcmds_is_rejected(self, tmp_path) -> None:
+        """Test that a header claiming a huge command block is malformed, not something to read in."""
+        header = struct.pack(
+            "<IiiIIIII", r._MH_MAGIC_64, _CPU_ARM64, 0, _MH_DYLIB, 1, 1 << 30, 0, 0
+        )
+        p = tmp_path / "libbad.dylib"
+        p.write_bytes(header)
+
+        with pytest.raises(ValueError):
+            r.find_install_names(p)
 
     def test_parse_thin_big_endian_branch(self, tmp_path) -> None:
         """Tests parsing of a thin Mach-O binary (big-endian)."""
@@ -333,7 +489,7 @@ class TestFormulaTokens:
     def test_perl_from_system_when_uses_from_macos(
         self, brew_paths, system_perl
     ) -> None:
-        """The cloc case: perl is uses_from_macos, so it is not a dep on macOS.
+        """Test when perl is uses_from_macos, so it is not a dep on macOS.
 
         The shebang must point at the system perl the bottle was built against,
         not at an opt/perl that was never installed.
@@ -362,7 +518,7 @@ class TestFormulaTokens:
         assert tokens["@@HOMEBREW_PERL@@"] == "/opt/homebrew/opt/perl/bin/perl"
 
     def test_indirect_perl_dep_uses_system_perl(self, brew_paths, system_perl) -> None:
-        """A perl pulled in transitively is not a declared dep, so brew uses system perl."""
+        """Test that a perl pulled in transitively is not a declared dep, so brew uses system perl."""
         tokens = r.formula_tokens(
             brew_paths["prefix"],
             name="cloc",
@@ -688,7 +844,7 @@ class TestMachORewrite:
     def test_relocate_keg_ignores_a_placeholder_outside_the_install_names(
         self, tmp_path, brew_paths, mock_run
     ) -> None:
-        """A marker in the body is not an install name, so the file is left alone.
+        """Test that a marker in the body is not an install name, so the file is left alone.
 
         The dispatch reads the load commands and never scans the body, so this is
         the case that would regress if it started substituting binary content.
@@ -708,7 +864,7 @@ class TestMachORewrite:
     def test_relocate_keg_skips_a_mach_o_with_an_unparseable_header(
         self, tmp_path, brew_paths, mock_run
     ) -> None:
-        """A truncated fat header is skipped, not raised through the pool.
+        """Test that a truncated fat header is skipped, not raised through the pool.
 
         Every Mach-O reaches the parser now, not only the ones holding a marker,
         so `struct.error` from a malformed header has to be caught.
@@ -730,7 +886,7 @@ class TestMachORewrite:
     def test_install_name_tool_failure_raises_relocation_error(
         self, tmp_path, brew_paths, mock_run, force_install_name_tool
     ) -> None:
-        """A failing install_name_tool aborts with the offending file and reason."""
+        """Test that a failing install_name_tool aborts with the offending file and reason."""
         keg, dylib = _keg_with_dylib(
             tmp_path,
             [_lc_dylib(r._LC_ID_DYLIB, "@@HOMEBREW_PREFIX@@/lib/libfoo.dylib")],
@@ -774,6 +930,166 @@ class TestMachORewrite:
         ]
         assert seen_mode and all(seen_mode), "file was not writable during the re-sign"
         assert oct(dylib.stat().st_mode & 0o777) == "0o555"  # Mode restored
+
+
+class TestWritable:
+    """Tests for the borrowed owner-write bit, which is per inode, not per path."""
+
+    def _hard_linked_pair(self, tmp_path: Path) -> tuple[Path, Path]:
+        """Test that two names for one read-only file, as qtbase ships qmake and qmake6.
+
+        Args:
+            tmp_path: The pytest temp dir.
+
+        Returns:
+            The (first, second) paths sharing an inode.
+        """
+        first = tmp_path / "qmake"
+        first.write_bytes(b"binary")
+        second = tmp_path / "qmake6"
+        os.link(first, second)
+        os.chmod(first, 0o555)
+
+        return first, second
+
+    def test_a_peer_leaving_does_not_strip_a_held_write_bit(self, tmp_path) -> None:
+        """Test that the bit survives until the last holder of the inode leaves."""
+        first, second = self._hard_linked_pair(tmp_path)
+
+        entered = threading.Event()
+        release = threading.Event()
+        left = threading.Event()
+        observed: list[bool] = []
+
+        def peer() -> None:
+            """Borrow the bit, hold it until told, then leave first."""
+            with r._writable(first):
+                entered.set()
+                release.wait(5)
+
+            left.set()
+
+        def holder() -> None:
+            """Join the borrow, outlive the peer, then check the bit is still set."""
+            entered.wait(5)
+            with r._writable(second):
+                release.set()
+                left.wait(5)
+                observed.append(bool(second.stat().st_mode & 0o200))
+
+        threads = [threading.Thread(target=peer), threading.Thread(target=holder)]
+        for t in threads:
+            t.start()
+
+        for t in threads:
+            t.join(10)
+
+        assert observed == [True], "the write bit was restored while still in use"
+        assert oct(first.stat().st_mode & 0o777) == "0o555"  # Restored once, at the end
+        assert oct(second.stat().st_mode & 0o777) == "0o555"
+
+    def test_a_stale_mode_cannot_skip_the_hold(self, tmp_path, monkeypatch) -> None:
+        """Test that the bit cannot be skipped over by a stale mode."""
+        first, second = self._hard_linked_pair(tmp_path)
+
+        peer = contextlib.ExitStack()
+        peer.enter_context(r._writable(first))
+
+        fired: list[bool] = []
+        observed: list[bool] = []
+        real_stat = os.stat
+
+        def stat(path, *args, **kwargs):
+            """Land the peer's restore between the joiner's stat and its decision."""
+            st = real_stat(path, *args, **kwargs)
+            if str(path) == str(second) and not fired and r._MODE_GUARD.acquire(False):
+                r._MODE_GUARD.release()
+                fired.append(True)
+                peer.close()
+
+            return st
+
+        monkeypatch.setattr(os, "stat", stat)
+
+        with r._writable(second):
+            observed.append(bool(real_stat(second).st_mode & 0o200))
+
+        peer.close()  # A no-op unless the guard held and the peer never left
+
+        assert observed == [True], "a stale mode left the joiner without the write bit"
+        assert oct(real_stat(first).st_mode & 0o777) == "0o555"
+        assert oct(real_stat(second).st_mode & 0o777) == "0o555"
+
+    def test_nested_holds_on_one_inode_restore_once(self, tmp_path) -> None:
+        """Test that the batched re-sign takes both names of a hard link in one ExitStack."""
+        first, second = self._hard_linked_pair(tmp_path)
+
+        with r._writable(first):
+            with r._writable(second):
+                assert first.stat().st_mode & 0o200
+
+            assert first.stat().st_mode & 0o200  # Outer hold still relies on it
+
+        assert oct(first.stat().st_mode & 0o777) == "0o555"
+
+    def test_a_name_whose_file_was_replaced_is_still_restored(self, tmp_path) -> None:
+        """Test that `codesign` replaces the file it signs, so a name outlives its inode."""
+        first, second = self._hard_linked_pair(tmp_path)
+
+        with r._writable(first), r._writable(second):
+            for p in (first, second):
+                # What signing does: a fresh file renamed over the name, taking
+                # the borrowed mode with it and breaking the link
+                new = p.with_name(p.name + ".signed")
+                new.write_bytes(b"signed")
+                os.chmod(new, 0o755)
+                os.replace(new, p)
+
+        assert oct(first.stat().st_mode & 0o777) == "0o555"
+        assert oct(second.stat().st_mode & 0o777) == "0o555"
+
+    def test_an_already_writable_file_is_left_alone(self, tmp_path) -> None:
+        """Test that nothing to borrow and nothing to restore, so no bookkeeping is kept."""
+        p = tmp_path / "rw"
+        p.write_bytes(b"x")
+        os.chmod(p, 0o644)
+
+        with r._writable(p):
+            assert oct(p.stat().st_mode & 0o777) == "0o644"
+
+        assert oct(p.stat().st_mode & 0o777) == "0o644"
+        assert not r._MADE_WRITABLE
+
+    def test_the_registry_empties_after_every_hold(self, tmp_path) -> None:
+        """Test that a hold that leaks would keep a keg's file writable for the whole run."""
+        first, _ = self._hard_linked_pair(tmp_path)
+
+        with r._writable(first):
+            assert r._MADE_WRITABLE
+
+        assert not r._MADE_WRITABLE
+
+    def test_relocate_keg_rewrites_both_names_of_a_hard_link(
+        self, tmp_path, brew_paths, mock_run
+    ) -> None:
+        """Test that end to end: a keg whose two names share one read-only Mach-O inode."""
+        mock_run()
+        keg, dylib = _keg_with_dylib(
+            tmp_path,
+            [_lc_dylib(r._LC_ID_DYLIB, "@@HOMEBREW_PREFIX@@/lib/libtwin.dylib")],
+            name="libtwin.dylib",
+        )
+        twin = dylib.with_name("libtwin6.dylib")
+        os.link(dylib, twin)
+        os.chmod(dylib, 0o555)
+
+        r.relocate_keg(keg, **brew_paths)
+
+        expected = [InstallName(NameKind.ID, "/opt/homebrew/lib/libtwin.dylib")]
+        assert r.find_install_names(dylib) == expected
+        assert r.find_install_names(twin) == expected
+        assert oct(dylib.stat().st_mode & 0o777) == "0o555"
+        assert oct(twin.stat().st_mode & 0o777) == "0o555"
 
 
 class TestTextSymlinkRelocation:
@@ -832,16 +1148,21 @@ class TestTextSymlinkRelocation:
     def test_relocate_symlink_rewrites_inside_a_readonly_parent(
         self, tmp_path, subs
     ) -> None:
-        """The parent's write bit is added and restored around the relink."""
+        """Test that the parent's write bit is added and restored around the relink."""
         parent = tmp_path / "ro"
         parent.mkdir()
         link = str(parent / "link")
         os.symlink("@@HOMEBREW_PREFIX@@/bin/real", link)
         os.chmod(parent, 0o555)
 
-        assert r.relocate_symlink(link, subs) is True
-        assert os.readlink(link) == "/opt/homebrew/bin/real"
-        assert oct(parent.stat().st_mode & 0o777) == "0o555"
+        try:
+            assert r.relocate_symlink(link, subs) is True
+            assert os.readlink(link) == "/opt/homebrew/bin/real"
+            assert oct(parent.stat().st_mode & 0o777) == "0o555"
+        finally:
+            # pytest's tmp_path cleanup cannot unlink a dangling symlink out of
+            # an unwritable parent, so give the write bit back before it tries
+            os.chmod(parent, 0o755)
 
 
 class TestOrchestration:
@@ -930,9 +1251,10 @@ class TestOrchestration:
     def test_relocate_keg_skip_relocation_still_substitutes_text(
         self, tmp_path, mock_run, brew_paths
     ) -> None:
-        """skip_relocation maps to brew's skip_linkage: Mach-O install names are
-        left alone, but text placeholders are still substituted (a script that
-        sources @@HOMEBREW_CELLAR@@/... would break at runtime otherwise)."""
+        """Test that skip_relocation maps to brew's skip_linkage.
+
+        Mach-O install names are left alone, but text placeholders are still substituted.
+        """
         keg = tmp_path / "keg"
         (keg / "lib").mkdir(parents=True)
         (keg / "config").write_text("p=@@HOMEBREW_PREFIX@@\n")
@@ -954,7 +1276,7 @@ class TestOrchestration:
     def test_relocate_keg_substitutes_formula_tokens(
         self, tmp_path, brew_paths, system_perl
     ) -> None:
-        """A perl shebang is rewritten once the formula tokens are supplied."""
+        """Test that a perl shebang is rewritten once the formula tokens are supplied."""
         keg = tmp_path / "keg"
         (keg / "libexec" / "bin").mkdir(parents=True)
         script = keg / "libexec" / "bin" / "cloc"
@@ -974,11 +1296,7 @@ class TestOrchestration:
     def test_relocate_keg_raises_on_unresolved_placeholder(
         self, tmp_path, brew_paths
     ) -> None:
-        """A placeholder with no token in the map must abort, not ship broken.
-
-        The regression this guards: @@HOMEBREW_PERL@@ was silently left in
-        cloc's libexec shebang because the pipeline never passed extra_tokens.
-        """
+        """Test that a placeholder with no token in the map must abort, not ship broken."""
         keg = tmp_path / "keg"
         (keg / "libexec" / "bin").mkdir(parents=True)
         (keg / "libexec" / "bin" / "cloc").write_text("#!@@HOMEBREW_PERL@@\n")
@@ -1064,7 +1382,7 @@ class TestSignOrder:
     """Tests for the codesign batch ordering."""
 
     def test_nested_bundle_is_signed_before_its_container(self) -> None:
-        """Signing a framework validates the code nested inside it, so that goes first.
+        """Test that signing a framework validates the code nested inside it, so that goes first.
 
         qtwebengine's real shape: a helper .app inside the framework whose main
         binary is also in the batch. In `as_completed` order the framework came
@@ -1080,7 +1398,7 @@ class TestSignOrder:
             assert ordered.index(nested) < ordered.index(container)
 
     def test_order_is_deterministic_regardless_of_input_order(self) -> None:
-        """The batch must not depend on which worker finished first."""
+        """Test that the batch must not depend on which worker finished first."""
         paths = [
             Path("/keg/lib/libb.dylib"),
             Path("/keg/lib/A.framework/Versions/A/A"),
@@ -1090,12 +1408,12 @@ class TestSignOrder:
         assert r._sign_order(paths) == r._sign_order(list(reversed(paths)))
 
     def test_every_path_is_kept_exactly_once(self) -> None:
-        """Ordering is a permutation, not a filter."""
+        """Test that ordering is a permutation, not a filter."""
         paths = [Path(f"/keg/lib/lib{i}.dylib") for i in range(5)]
         assert sorted(r._sign_order(paths)) == sorted(paths)
 
     def test_empty_batch(self) -> None:
-        """No paths means no ordering work."""
+        """Test that no paths means no ordering work."""
         assert r._sign_order([]) == []
 
 
@@ -1103,12 +1421,12 @@ class TestChunkPaths:
     """Tests for the codesign argv chunker."""
 
     def test_single_chunk_under_budget(self) -> None:
-        """A handful of short paths stay in one chunk."""
+        """Test that a handful of short paths stay in one chunk."""
         paths = [Path(f"/keg/lib/lib{i}.dylib") for i in range(5)]
         assert r._chunk_paths(paths, budget=1024) == [paths]
 
     def test_splits_when_byte_budget_exceeded(self) -> None:
-        """Paths are split into multiple chunks once the byte budget is hit."""
+        """Test that paths are split into multiple chunks once the byte budget is hit."""
         paths = [Path("/keg/lib/" + "x" * 40 + f"{i}.dylib") for i in range(10)]
         chunks = r._chunk_paths(paths, budget=100)
 
@@ -1121,12 +1439,12 @@ class TestChunkPaths:
                 assert sum(len(str(p).encode()) + 1 for p in chunk) <= 100
 
     def test_oversized_single_path_gets_own_chunk(self) -> None:
-        """A path longer than the budget still yields exactly one chunk."""
+        """Test that oversized single paths get their own chunk."""
         paths = [Path("/keg/" + "y" * 500 + ".dylib")]
         assert r._chunk_paths(paths, budget=100) == [paths]
 
     def test_empty_input(self) -> None:
-        """No paths means no chunks."""
+        """Test that no paths means no chunks."""
         assert r._chunk_paths([], budget=100) == []
 
 
@@ -1278,7 +1596,7 @@ class TestElfParsing:
     """Tests for the in-process ELF reader."""
 
     def _read(self, tmp_path: Path, data: bytes) -> r._ElfInfo:
-        """Write ELF bytes to a file and parse them through a real mmap.
+        """Write ELF bytes to a file and parse them through a real descriptor.
 
         Args:
             tmp_path: The pytest temp dir.
@@ -1289,11 +1607,8 @@ class TestElfParsing:
         """
         p = tmp_path / "bin"
         p.write_bytes(data)
-        with (
-            p.open("rb") as fh,
-            mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm,
-        ):
-            return r._read_elf(mm)
+        with p.open("rb") as fh:
+            return r._read_elf(r._Reader(fh.fileno(), len(data)))
 
     def test_reads_interp_rpath_runpath(self, tmp_path) -> None:
         """Tests that PT_INTERP and DT_RPATH/DT_RUNPATH strings are parsed."""

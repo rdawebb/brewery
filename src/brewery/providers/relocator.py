@@ -9,11 +9,12 @@
 from __future__ import annotations
 
 import contextlib
-import mmap
 import os
 import re
 import struct
 import subprocess
+import threading
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from enum import Enum
@@ -105,6 +106,19 @@ _LINUX_JAVA_HOME_SUFFIX = "libexec"
 # Bounded thread pool for the regular-file relocation phase
 _RELOCATE_WORKERS = min(8, os.cpu_count() or 4)
 
+# Prefetched at the head of every file the walker opens: enough for a Mach-O
+# header plus its load commands, or an ELF header plus its program headers
+_HEAD_WINDOW = 64 * 1024
+
+# Read size for the marker scan over a file whose body has to be searched
+_SCAN_CHUNK = 1024 * 1024
+
+# Longest linkage string read from an unbounded region (PATH_MAX is 1024)
+_CSTR_MAX = 4096
+
+# A load-command block larger than this is a malformed header
+_MAX_SIZEOFCMDS = 16 * 1024 * 1024
+
 # Escape hatch: force every Mach-O through install_name_tool instead of the
 # in-process rewriter
 _NATIVE_MACHO = os.environ.get("BREWERY_NO_NATIVE_MACHO") != "1"
@@ -147,6 +161,20 @@ class InstallName:
 
     kind: NameKind
     value: str
+
+
+@dataclass(slots=True)
+class _WritableHold:
+    """One inode's borrowed write bit, and who is relying on it."""
+
+    mode: int  # The mode to restore once the last holder leaves
+    paths: set[str]  # Every name the hold was entered through
+    depth: int = 1
+
+
+# (st_dev, st_ino) -> hold, for the inodes `_writable` has made writable
+_MADE_WRITABLE: dict[tuple[int, int], _WritableHold] = {}
+_MODE_GUARD = threading.Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,35 +356,128 @@ def is_macho(path: Path) -> bool:
     return magic in _MACHO_MAGICS
 
 
-def _read_cstr(data: mmap.mmap, start: int, end: int) -> bytes:
-    """Read a null-terminated string from a mapping.
+def _cstr(buf: bytes, start: int, end: int) -> bytes:
+    """Read a null-terminated string out of an in-memory buffer.
 
     Args:
-        data: The mapping to read from.
+        buf: The buffer to read from.
         start: The start index (inclusive).
-        end: The end index (exclusive).
+        end: The end index (exclusive), bounding an unterminated string.
 
     Returns:
         The null-terminated string as bytes.
     """
-    nul = bytes(data[start:end]).find(b"\x00")
+    region = buf[start:end]
+    nul = region.find(b"\x00")
 
-    return bytes(data[start : start + nul]) if nul != -1 else bytes(data[start:end])
+    return region[:nul] if nul != -1 else region
 
 
-def _parse_thin(data: mmap.mmap, base: int) -> list[_NameSlot]:
+class _Reader:
+    """Random-access reads over an open file, without mapping it.
+
+    The head of the file is prefetched once, which covers a Mach-O header plus
+    its load commands and an ELF header plus its program headers; anything
+    beyond that window (a fat slice, an ELF string table) is `pread` on demand.
+    """
+
+    __slots__ = ("_fd", "_head", "size")
+
+    def __init__(self, fd: int, size: int) -> None:
+        """Prefetch the head of an open file.
+
+        Args:
+            fd: The file descriptor to read from; owned by the caller.
+            size: The file's size in bytes.
+        """
+        self._fd = fd
+        self.size = size
+        self._head = os.pread(fd, min(size, _HEAD_WINDOW), 0)
+
+    def read(self, off: int, n: int) -> bytes:
+        """Read `n` bytes from `off`, serving the head window from memory.
+
+        Args:
+            off: The file offset to read from.
+            n: The number of bytes wanted.
+
+        Returns:
+            The bytes read, short at EOF.
+        """
+        end = off + n
+        if end <= len(self._head):
+            return self._head[off:end]
+
+        return os.pread(self._fd, n, off)
+
+    def unpack_from(self, fmt: str, off: int) -> tuple:
+        """Unpack one struct format at a file offset.
+
+        Args:
+            fmt: The struct format string.
+            off: The file offset of the first byte.
+
+        Returns:
+            The unpacked fields.
+
+        Raises:
+            struct.error: If the file ends inside the field.
+        """
+        return struct.unpack(fmt, self.read(off, struct.calcsize(fmt)))
+
+    def byte(self, off: int) -> int:
+        """Read one byte as an integer.
+
+        Args:
+            off: The file offset of the byte.
+
+        Returns:
+            The byte's value.
+
+        Raises:
+            struct.error: If the offset is past the end of the file.
+        """
+        return self.unpack_from("B", off)[0]
+
+    def cstr(self, start: int, end: int) -> bytes:
+        """Read a null-terminated string, bounded by `end` and by `_CSTR_MAX`.
+
+        Args:
+            start: The file offset of the string's first byte.
+            end: The exclusive end of the region the string may occupy.
+
+        Returns:
+            The string as bytes, without its terminator.
+        """
+        stop = min(end, self.size, start + _CSTR_MAX)
+        if stop <= start:
+            return b""
+
+        return _cstr(self.read(start, stop - start), 0, stop - start)
+
+
+def _parse_thin(reader: _Reader, base: int) -> list[_NameSlot]:
     """Parse one thin Mach-O slice starting at `base`.
 
+    The slice's load commands are read in one go and parsed in memory; the
+    offsets recorded on each slot stay absolute, since they are what
+    `_patch_macho` writes back to.
+
     Args:
-        data: The mapping to read from.
+        reader: The reader for the file.
         base: The base offset to start parsing.
 
     Returns:
         A list of _NameSlot objects found in the slice.
+
+    Raises:
+        ValueError: If the header claims an implausible load-command size.
     """
+    header = reader.read(base, 32)
+
     # Read the magic in each byte order
-    le_magic = struct.unpack_from("<I", data, base)[0]
-    be_magic = struct.unpack_from(">I", data, base)[0]
+    le_magic = struct.unpack_from("<I", header, 0)[0]
+    be_magic = struct.unpack_from(">I", header, 0)[0]
     if le_magic in (_MH_MAGIC_64, _MH_MAGIC):
         bo, is64 = "<", le_magic == _MH_MAGIC_64
 
@@ -369,76 +490,92 @@ def _parse_thin(data: mmap.mmap, base: int) -> list[_NameSlot]:
     header_size = 32 if is64 else 28
 
     # mach_header[_64]: magic, cputype, cpusubtype, filetype, ncmds, sizeofcmds...
-    ncmds = struct.unpack_from(f"{bo}I", data, base + 16)[0]
+    ncmds, sizeofcmds = struct.unpack_from(f"{bo}II", header, 16)
+    if sizeofcmds > _MAX_SIZEOFCMDS:
+        raise ValueError(f"load commands claim {sizeofcmds} bytes")
+
+    cmds_at = base + header_size
+    cmds = reader.read(cmds_at, sizeofcmds)
 
     names: list[_NameSlot] = []
-    cmd_off = base + header_size
+    off = 0
     for _ in range(ncmds):
-        cmd, cmdsize = struct.unpack_from(f"{bo}II", data, cmd_off)
+        if off + 8 > len(cmds):
+            break  # Truncated, or ncmds outruns sizeofcmds
+
+        cmd, cmdsize = struct.unpack_from(f"{bo}II", cmds, off)
         if cmdsize == 0:
             break  # Malformed
 
         if cmd == _LC_ID_DYLIB or cmd in _DYLIB_LOAD_CMDS:
             # dylib_command: cmd, cmdsize, name.offset, timestamp, cur, compat
-            name_off = struct.unpack_from(f"{bo}I", data, cmd_off + 8)[0]
-            start, end = cmd_off + name_off, cmd_off + cmdsize
-            s = _read_cstr(data, start, end)
+            name_off = struct.unpack_from(f"{bo}I", cmds, off + 8)[0]
+            start, end = off + name_off, off + cmdsize
+            s = _cstr(cmds, start, end)
             kind = NameKind.ID if cmd == _LC_ID_DYLIB else NameKind.DYLIB
             names.append(
-                _NameSlot(kind, s.decode("utf-8", "surrogateescape"), start, end)
+                _NameSlot(
+                    kind,
+                    s.decode("utf-8", "surrogateescape"),
+                    cmds_at + start,
+                    cmds_at + end,
+                )
             )
 
         elif cmd == _LC_RPATH:
             # rpath_command: cmd, cmdsize, path.offset
-            path_off = struct.unpack_from(f"{bo}I", data, cmd_off + 8)[0]
-            start, end = cmd_off + path_off, cmd_off + cmdsize
-            s = _read_cstr(data, start, end)
+            path_off = struct.unpack_from(f"{bo}I", cmds, off + 8)[0]
+            start, end = off + path_off, off + cmdsize
+            s = _cstr(cmds, start, end)
             names.append(
                 _NameSlot(
-                    NameKind.RPATH, s.decode("utf-8", "surrogateescape"), start, end
+                    NameKind.RPATH,
+                    s.decode("utf-8", "surrogateescape"),
+                    cmds_at + start,
+                    cmds_at + end,
                 )
             )
-        cmd_off += cmdsize
+        off += cmdsize
 
     return names
 
 
-def _collect_names(data: mmap.mmap) -> list[_NameSlot]:
-    """Parse every dylib/rpath install name from a live mapping.
+def _collect_names(reader: _Reader) -> list[_NameSlot]:
+    """Parse every dylib/rpath install name from an open file.
 
     Dispatches between fat and thin layouts. Shared by `find_install_names`
-    (one-shot, opens its own mapping) and the keg walker (reuses the
-    mapping it already holds open).
+    (one-shot, opens its own file) and the keg walker (reuses the reader it
+    already holds).
 
     Args:
-        data: A readable mapping positioned at the start of the file.
+        reader: A reader positioned over the whole file.
 
     Returns:
         A list of _NameSlot objects found in the file.
     """
-    raw_magic = struct.unpack_from(">I", data, 0)[0]
+    raw_magic = reader.unpack_from(">I", 0)[0]
 
     if raw_magic in (_FAT_MAGIC, _FAT_CIGAM, _FAT_MAGIC_64, _FAT_CIGAM_64):
         is64 = raw_magic in (_FAT_MAGIC_64, _FAT_CIGAM_64)
-        nfat = struct.unpack_from(">I", data, 4)[0]  # Fat header is BE
+        nfat = reader.unpack_from(">I", 4)[0]  # Fat header is BE
         names: list[_NameSlot] = []
         arch_off = 8
 
         for _ in range(nfat):
             if is64:
                 # fat_arch_64: cputype, cpusubtype, offset(8), size(8)...
-                offset = struct.unpack_from(">Q", data, arch_off + 8)[0]
+                offset = reader.unpack_from(">Q", arch_off + 8)[0]
                 arch_off += 32
 
             else:
                 # fat_arch: cputype, cpusubtype, offset(4), size(4), align
-                offset = struct.unpack_from(">I", data, arch_off + 8)[0]
+                offset = reader.unpack_from(">I", arch_off + 8)[0]
                 arch_off += 20
-            names.extend(_parse_thin(data, offset))
+            names.extend(_parse_thin(reader, offset))
 
         return names
 
-    return _parse_thin(data, 0)
+    return _parse_thin(reader, 0)
 
 
 def find_install_names(path: Path) -> list[InstallName]:
@@ -453,15 +590,16 @@ def find_install_names(path: Path) -> list[InstallName]:
         A list of InstallName objects found in the file.
     """
     with path.open("rb") as fh:
-        if os.fstat(fh.fileno()).st_size == 0:
+        size = os.fstat(fh.fileno()).st_size
+        if size == 0:
             return []
 
-        with mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-            return list(
-                dict.fromkeys(
-                    InstallName(slot.kind, slot.value) for slot in _collect_names(mm)
-                )
+        return list(
+            dict.fromkeys(
+                InstallName(slot.kind, slot.value)
+                for slot in _collect_names(_Reader(fh.fileno(), size))
             )
+        )
 
 
 @dataclass(frozen=True)
@@ -490,7 +628,7 @@ def _vaddr_to_offset(vaddr: int, loads: list[tuple[int, int, int]]) -> int | Non
     return None
 
 
-def _read_elf(mm: mmap.mmap) -> _ElfInfo:
+def _read_elf(reader: _Reader) -> _ElfInfo:
     """Parse an ELF's interpreter and RPATH/RUNPATH strings.
 
     Mirrors the in-process Mach-O parser: reads the program headers for
@@ -499,24 +637,24 @@ def _read_elf(mm: mmap.mmap) -> _ElfInfo:
     map. Unparseable or missing fields yield None entries rather than raising.
 
     Args:
-        mm: A readable mapping positioned at the start of the file.
+        reader: A reader positioned over the whole file.
 
     Returns:
         The parsed _ElfInfo (fields may be None).
     """
-    is64 = mm[4] == _ELFCLASS64
-    if not is64 and mm[4] != _ELFCLASS32:
+    is64 = reader.byte(4) == _ELFCLASS64
+    if not is64 and reader.byte(4) != _ELFCLASS32:
         return _ElfInfo(None, None, None)
 
-    bo = "<" if mm[5] == _ELFDATA2LSB else ">"
+    bo = "<" if reader.byte(5) == _ELFDATA2LSB else ">"
 
     if is64:
-        e_phoff = struct.unpack_from(f"{bo}Q", mm, 32)[0]
-        e_phentsize, e_phnum = struct.unpack_from(f"{bo}HH", mm, 54)
+        e_phoff = reader.unpack_from(f"{bo}Q", 32)[0]
+        e_phentsize, e_phnum = reader.unpack_from(f"{bo}HH", 54)
 
     else:
-        e_phoff = struct.unpack_from(f"{bo}I", mm, 28)[0]
-        e_phentsize, e_phnum = struct.unpack_from(f"{bo}HH", mm, 42)
+        e_phoff = reader.unpack_from(f"{bo}I", 28)[0]
+        e_phentsize, e_phnum = reader.unpack_from(f"{bo}HH", 42)
 
     if e_phoff == 0 or e_phnum == 0:
         return _ElfInfo(None, None, None)
@@ -527,19 +665,19 @@ def _read_elf(mm: mmap.mmap) -> _ElfInfo:
 
     for i in range(e_phnum):
         ph = e_phoff + i * e_phentsize
-        p_type = struct.unpack_from(f"{bo}I", mm, ph)[0]
+        p_type = reader.unpack_from(f"{bo}I", ph)[0]
         if is64:
-            p_offset = struct.unpack_from(f"{bo}Q", mm, ph + 8)[0]
-            p_vaddr = struct.unpack_from(f"{bo}Q", mm, ph + 16)[0]
-            p_filesz = struct.unpack_from(f"{bo}Q", mm, ph + 32)[0]
+            p_offset = reader.unpack_from(f"{bo}Q", ph + 8)[0]
+            p_vaddr = reader.unpack_from(f"{bo}Q", ph + 16)[0]
+            p_filesz = reader.unpack_from(f"{bo}Q", ph + 32)[0]
 
         else:
-            p_offset = struct.unpack_from(f"{bo}I", mm, ph + 4)[0]
-            p_vaddr = struct.unpack_from(f"{bo}I", mm, ph + 8)[0]
-            p_filesz = struct.unpack_from(f"{bo}I", mm, ph + 16)[0]
+            p_offset = reader.unpack_from(f"{bo}I", ph + 4)[0]
+            p_vaddr = reader.unpack_from(f"{bo}I", ph + 8)[0]
+            p_filesz = reader.unpack_from(f"{bo}I", ph + 16)[0]
 
         if p_type == _PT_INTERP:
-            interp = _read_cstr(mm, p_offset, p_offset + p_filesz).decode(
+            interp = reader.cstr(p_offset, p_offset + p_filesz).decode(
                 "utf-8", "surrogateescape"
             )
 
@@ -561,7 +699,7 @@ def _read_elf(mm: mmap.mmap) -> _ElfInfo:
 
     for i in range(dyn_size // ent_size):
         off = dyn_off + i * ent_size
-        d_tag, d_val = struct.unpack_from(f"{bo}{word}{word}", mm, off)
+        d_tag, d_val = reader.unpack_from(f"{bo}{word}{word}", off)
         if d_tag == _DT_NULL:
             break
 
@@ -585,7 +723,7 @@ def _read_elf(mm: mmap.mmap) -> _ElfInfo:
         if o is None:
             return None
 
-        return _read_cstr(mm, strtab + o, mm.size()).decode("utf-8", "surrogateescape")
+        return reader.cstr(strtab + o, reader.size).decode("utf-8", "surrogateescape")
 
     return _ElfInfo(interp, _s(rpath_off), _s(runpath_off))
 
@@ -614,25 +752,47 @@ def _run(cmd: list[str]) -> None:
 
 
 @contextlib.contextmanager
-def _writable(path: Path | str):
+def _writable(path: Path | str) -> Iterator[None]:
     """Temporarily add the owner-write bit, restoring the original mode after.
+
+    Permission bits belong to the inode, not the name, and bottles ship hard
+    links, so holds are counted per inode under `_MODE_GUARD`: the bit goes on
+    once and comes off when the last holder leaves.
+
+    The restore is per name rather than per inode, because `codesign` replaces
+    the file it signs; names that shared an inode can be separate files by the
+    time the hold ends.
 
     Args:
         path: The path to the file to modify.
     """
-    mode = os.stat(path).st_mode
-    needs = not mode & 0o200
-    if needs:
-        os.chmod(path, mode | 0o200)
+    name = str(path)
+
+    with _MODE_GUARD:
+        st = os.stat(path)
+        key = (st.st_dev, st.st_ino)
+        held = _MADE_WRITABLE.get(key)
+        if held is not None:
+            held.depth += 1
+            held.paths.add(name)
+
+        elif not st.st_mode & 0o200:
+            os.chmod(path, st.st_mode | 0o200)
+            held = _MADE_WRITABLE[key] = _WritableHold(st.st_mode, {name})
 
     try:
         yield
 
     finally:
-        if needs:
-            # The file may have been recreated, so only restore if it still exists
-            with contextlib.suppress(FileNotFoundError):
-                os.chmod(path, mode)
+        if held is not None:
+            with _MODE_GUARD:
+                held.depth -= 1
+                if held.depth == 0:
+                    del _MADE_WRITABLE[key]
+                    for restore in held.paths:
+                        # A file may have been replaced, or not exist at all now
+                        with contextlib.suppress(FileNotFoundError):
+                            os.chmod(restore, held.mode)
 
 
 def _build_macho_args(names: list[_NameSlot], subs: dict[bytes, bytes]) -> list[str]:
@@ -760,12 +920,12 @@ def _verify_macho(path: Path) -> bool:
         True if every install name is placeholder-free.
     """
     try:
-        with (
-            path.open("rb") as fh,
-            mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm,
-        ):
+        with path.open("rb") as fh:
+            reader = _Reader(fh.fileno(), os.fstat(fh.fileno()).st_size)
+
             return all(
-                _PLACEHOLDER_MARKER_STR not in slot.value for slot in _collect_names(mm)
+                _PLACEHOLDER_MARKER_STR not in slot.value
+                for slot in _collect_names(reader)
             )
 
     except (OSError, ValueError, struct.error):
@@ -1037,60 +1197,97 @@ def relocate_symlink(link: str, subs: dict[bytes, bytes]) -> bool:
     return True
 
 
-def _classify(mm: mmap.mmap) -> _Kind:
-    """Classify a mapping as archive, Mach-O, ELF, or text.
+def _classify(reader: _Reader) -> _Kind:
+    """Classify a file as archive, Mach-O, ELF, or text.
 
-    Called only after the size guard, so the mapping is at least
+    Called only after the size guard, so the file is at least
     `len(_PLACEHOLDER_MARKER)` (11) bytes & the magic reads are safe.
 
     Args:
-        mm: A readable mapping positioned at the start of the file.
+        reader: A reader positioned over the whole file.
 
     Returns:
         The file's classification.
     """
-    if mm[:8] == _AR_MAGIC:
+    head = reader.read(0, 8)
+
+    if head == _AR_MAGIC:
         return _Kind.ARCHIVE
 
-    if struct.unpack_from(">I", mm, 0)[0] in _MACHO_MAGICS:
+    if struct.unpack_from(">I", head, 0)[0] in _MACHO_MAGICS:
         return _Kind.MACHO
 
-    if mm[:4] == _ELF_MAGIC:
+    if head[:4] == _ELF_MAGIC:
         return _Kind.ELF
 
     return _Kind.TEXT
 
 
-def _try_collect_names(mm: mmap.mmap) -> list[_NameSlot]:
+def _try_collect_names(reader: _Reader) -> list[_NameSlot]:
     """Parse install names, treating an unparseable header as nothing to rewrite.
 
     Args:
-        mm: A readable mapping positioned at the start of the file.
+        reader: A reader positioned over the whole file.
 
     Returns:
         The install-name slots, empty if the header could not be parsed.
     """
     try:
-        return _collect_names(mm)
+        return _collect_names(reader)
 
     except (struct.error, ValueError):
         return []
 
 
-def _try_read_elf(mm: mmap.mmap) -> _ElfInfo:
+def _try_read_elf(reader: _Reader) -> _ElfInfo:
     """Parse an ELF's linkage strings, treating a malformed header as none.
 
     Args:
-        mm: A readable mapping positioned at the start of the file.
+        reader: A reader positioned over the whole file.
 
     Returns:
         The parsed _ElfInfo, all fields None if the header could not be parsed.
     """
     try:
-        return _read_elf(mm)
+        return _read_elf(reader)
 
     except (struct.error, ValueError):
         return _ElfInfo(None, None, None)
+
+
+def _has_marker(fd: int, size: int) -> bool:
+    """Whether the placeholder marker appears anywhere in a file's bytes.
+
+    Scans in chunks rather than reading the file whole, so a large binary that
+    reaches the text branch costs a bounded amount of memory.
+
+    Args:
+        fd: The file descriptor to scan.
+        size: The file's size in bytes.
+
+    Returns:
+        True if the marker is present.
+    """
+    overlap = len(_PLACEHOLDER_MARKER) - 1
+    off = 0
+    tail = b""
+
+    while off < size:
+        chunk = os.pread(fd, _SCAN_CHUNK, off)
+        if not chunk:
+            return False
+
+        if _PLACEHOLDER_MARKER in chunk:
+            return True
+
+        # A marker straddling the seam is only visible across both chunks
+        if tail and _PLACEHOLDER_MARKER in tail + chunk[:overlap]:
+            return True
+
+        tail = chunk[-overlap:]
+        off += len(chunk)
+
+    return False
 
 
 def _process_file(
@@ -1100,7 +1297,7 @@ def _process_file(
     allowed_text: frozenset[str] | None,
     skip_linkage: bool = False,
 ) -> tuple[Path | None, str | None, bool]:
-    """Relocate one regular (non-symlink) file via a single mmap.
+    """Relocate one regular (non-symlink) file from a single open descriptor.
 
     A rewritten Mach-O has its install names fixed but is left unsigned; the
     returned path is handed back to `relocate_keg`, which batches the ad-hoc
@@ -1132,66 +1329,69 @@ def _process_file(
 
     try:
         with open(path_str, "rb") as fh:
-            # Too short to hold a placeholder, and mmap rejects an empty file
-            if os.fstat(fh.fileno()).st_size < len(_PLACEHOLDER_MARKER):
+            fd = fh.fileno()
+            size = os.fstat(fd).st_size
+
+            # Too short to hold a placeholder
+            if size < len(_PLACEHOLDER_MARKER):
                 return None, None, False
 
-            with mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-                kind = _classify(mm)
+            reader = _Reader(fd, size)
+            kind = _classify(reader)
 
-                if kind is _Kind.MACHO:
-                    if skip_linkage:
-                        return None, None, False  # :any_skip_relocation
+            if kind is _Kind.MACHO:
+                if skip_linkage:
+                    return None, None, False  # :any_skip_relocation
 
-                    slots = _try_collect_names(mm)
-                    if not any(_PLACEHOLDER_MARKER_STR in slot.value for slot in slots):
-                        return None, None, False
-
-                    macho_slots = slots
-
-                elif kind is _Kind.ELF:
-                    if skip_linkage:
-                        return None, None, False  # :any_skip_relocation
-
-                    info = _try_read_elf(mm)
-                    if not any(
-                        s is not None and _PLACEHOLDER_MARKER_STR in s
-                        for s in (info.interp, info.rpath, info.runpath)
-                    ):
-                        return None, None, False
-
-                    elf_args = _build_elf_args(Path(path_str), info, subs)
-
-                elif kind is _Kind.ARCHIVE:
-                    # Length-changing text substitution would corrupt headers and offsets
-                    if mm.find(_PLACEHOLDER_MARKER) != -1:
-                        raise RelocationError(
-                            Path(path_str), "static archive contains a placeholder"
-                        )
-
+                slots = _try_collect_names(reader)
+                if not any(_PLACEHOLDER_MARKER_STR in slot.value for slot in slots):
                     return None, None, False
 
-                else:
-                    rel = path_str[len(keg_root) + 1 :]
-                    # In manifest mode, only substitute files brew listed
-                    if allowed_text is not None and rel not in allowed_text:
-                        return None, None, False
+                macho_slots = slots
 
-                    # No full-file read for marker-free files
-                    if mm.find(_PLACEHOLDER_MARKER) == -1:
-                        return None, None, False
+            elif kind is _Kind.ELF:
+                if skip_linkage:
+                    return None, None, False  # :any_skip_relocation
 
-                    raw = bytes(mm)
-                    new = _apply(raw, subs)
-                    _reject_unresolved(Path(path_str), new)
-                    if new != raw:
-                        new_text = new
-                        text_rel = rel
+                info = _try_read_elf(reader)
+                if not any(
+                    s is not None and _PLACEHOLDER_MARKER_STR in s
+                    for s in (info.interp, info.rpath, info.runpath)
+                ):
+                    return None, None, False
+
+                elf_args = _build_elf_args(Path(path_str), info, subs)
+
+            elif kind is _Kind.ARCHIVE:
+                # Length-changing text substitution would corrupt headers and offsets
+                if _has_marker(fd, size):
+                    raise RelocationError(
+                        Path(path_str), "static archive contains a placeholder"
+                    )
+
+                return None, None, False
+
+            else:
+                rel = path_str[len(keg_root) + 1 :]
+                # In manifest mode, only substitute files brew listed
+                if allowed_text is not None and rel not in allowed_text:
+                    return None, None, False
+
+                # No full-file read for marker-free files
+                if not _has_marker(fd, size):
+                    return None, None, False
+
+                raw = fh.read()
+                new = _apply(raw, subs)
+                _reject_unresolved(Path(path_str), new)
+                if new != raw:
+                    new_text = new
+                    text_rel = rel
 
     except OSError as exc:
         raise RelocationError(Path(path_str), f"read failed: {exc}") from exc
 
-    # Mapping is closed here, so safe to mutate the file
+    # The descriptor is closed here, so it is safe to mutate the file
     path = Path(path_str)
     if macho_slots is not None:
         # Install names now; re-signing is batched by relocate_keg
