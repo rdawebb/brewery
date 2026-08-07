@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -606,7 +607,18 @@ class TestLinkConcurrency:
 
         def spy(keg_dir: Path, prefix_dir: Path):
             """Record whether the structure lock is held while planning."""
-            held.append(linker._STRUCTURE_LOCK.locked())
+
+            # Probed from another thread
+            def probe() -> None:
+                """Probe the structure lock from another thread."""
+                got = linker._STRUCTURE_LOCK.acquire(blocking=False)
+                held.append(not got)
+                if got:
+                    linker._STRUCTURE_LOCK.release()
+
+            t = threading.Thread(target=probe)
+            t.start()
+            t.join()
 
             return orig(keg_dir, prefix_dir)
 
@@ -913,6 +925,55 @@ class TestCrossProcessStructureLock:
             os.close(fd)
 
         assert not (prefix / "lib" / "pkgconfig").exists()
+
+    def test_queued_threads_do_not_each_burn_the_timeout(
+        self, keg_and_prefix, monkeypatch
+    ) -> None:
+        """Test that N threads behind one peer cost one timeout, not N of them.
+
+        The install pipeline runs up to `install_concurrency` pours at once, all
+        funnelling through `_STRUCTURE_LOCK`.
+        """
+        keg, prefix = keg_and_prefix
+        timeout = 0.4
+        workers = 6
+        monkeypatch.setattr(core_locks, "_STRUCTURE_TIMEOUT", timeout)
+
+        path = core_locks.lock_path(prefix, "brewery", kind="structure")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+        errors: list[Exception] = []
+        guard = threading.Lock()
+        start_together = threading.Barrier(workers)
+
+        def attempt() -> None:
+            """Link behind the peer's back and record the refusal."""
+            start_together.wait()
+            try:
+                link_keg(keg, prefix=prefix, name="openssl@3")
+
+            except Exception as exc:  # noqa: BLE001 - recorded for the assertion
+                with guard:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=attempt) for _ in range(workers)]
+        start = time.monotonic()
+        for t in threads:
+            t.start()
+
+        for t in threads:
+            t.join()
+
+        elapsed = time.monotonic() - start
+        os.close(fd)
+
+        assert len(errors) == workers
+        assert all(isinstance(e, OperationInProgressError) for e in errors)
+
+        # One thread waits the budget; the rest probe once
+        assert elapsed < timeout * 2
 
     def test_unlink_refuses_while_a_peer_holds_it(self, keg_and_prefix, peer) -> None:
         """Test that unlinking waits on the same lock, so removals cannot interleave either."""

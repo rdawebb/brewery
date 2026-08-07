@@ -371,3 +371,102 @@ class TestStructureLock:
 
         finally:
             os.close(fd)
+
+
+class TestContentionLatch:
+    """One waiter teaches the process; the rest probe instead of re-waiting.
+
+    Without this, every thread queued behind `linker._STRUCTURE_LOCK` burns its
+    own full `_STRUCTURE_TIMEOUT` against the same peer, so eight install threads
+    take eight timeouts to report one contended lock.
+    """
+
+    def test_the_second_caller_does_not_wait_again(self, tmp_path) -> None:
+        """A peer that is still holding fails the next caller straight away."""
+        path = lock_path(tmp_path, "brewery", kind="structure")
+        fd = _hold(path)
+        try:
+            with (
+                pytest.raises(OperationInProgressError),
+                structure_lock(tmp_path, timeout=0.5),
+            ):
+                pass
+
+            start = time.monotonic()
+            with (
+                pytest.raises(OperationInProgressError),
+                structure_lock(tmp_path, timeout=0.5),
+            ):
+                pass
+
+            # Probe is one non-blocking flock, so this is under the 0.05s first poll
+            assert time.monotonic() - start < 0.1
+
+        finally:
+            os.close(fd)
+
+    def test_a_released_lock_is_still_acquired(self, tmp_path) -> None:
+        """The latch never strands a lock the peer has since let go of."""
+        path = lock_path(tmp_path, "brewery", kind="structure")
+        fd = _hold(path)
+
+        with (
+            pytest.raises(OperationInProgressError),
+            structure_lock(tmp_path, timeout=0.1),
+        ):
+            pass
+
+        os.close(fd)
+
+        with structure_lock(tmp_path, timeout=0.1):
+            assert not _probe(path)
+
+    def test_success_clears_the_latch(self, tmp_path) -> None:
+        """A later peer gets the full budget rather than the stale answer."""
+        path = lock_path(tmp_path, "brewery", kind="structure")
+        fd = _hold(path)
+
+        with (
+            pytest.raises(OperationInProgressError),
+            structure_lock(tmp_path, timeout=0.1),
+        ):
+            pass
+
+        os.close(fd)
+
+        with structure_lock(tmp_path, timeout=0.1):
+            pass
+
+        # Latched again, the next caller would fail fast; cleared, it waits out
+        # the holder that goes away mid-wait
+        fd = _hold(path)
+        threading.Timer(0.2, lambda: os.close(fd)).start()
+
+        with structure_lock(tmp_path, timeout=5.0):
+            assert not _probe(path)
+
+    def test_a_fail_fast_lock_never_short_circuits(self, tmp_path) -> None:
+        """`formula_lock`'s zero timeout gives the latch no window to trust."""
+        path = lock_path(tmp_path, "jq")
+        fd = _hold(path)
+        try:
+            for _ in range(2):
+                with (
+                    pytest.raises(OperationInProgressError),
+                    formula_lock("jq", prefix=tmp_path),
+                ):
+                    pass
+
+        finally:
+            os.close(fd)
+
+        assert locks._entry(path).contended_at == 0.0
+
+    def test_reentrancy_is_unaffected(self, tmp_path) -> None:
+        """Nesting in one thread still re-enters on the existing descriptor."""
+        path = lock_path(tmp_path, "brewery", kind="structure")
+
+        with structure_lock(tmp_path), structure_lock(tmp_path):
+            assert not _probe(path)
+
+        assert _probe(path)

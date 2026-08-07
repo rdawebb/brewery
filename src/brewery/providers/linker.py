@@ -33,7 +33,7 @@ from brewery.core.locks import structure_lock
 
 # Serialises the link operations that mutate ownership of shared prefix directories;
 # paired with `structure_lock`, which extends the same exclusion across processes
-_STRUCTURE_LOCK = threading.Lock()
+_STRUCTURE_LOCK = threading.RLock()
 
 # Top-level keg directories
 _ELIGIBLE = ("bin", "sbin", "etc", "include", "lib", "share", "Frameworks")
