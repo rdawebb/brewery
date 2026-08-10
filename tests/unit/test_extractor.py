@@ -4,20 +4,32 @@ from __future__ import annotations
 
 import os
 import tarfile
-from pathlib import Path
 
 import pytest
 
 from brewery.providers.extractor import (
     ExtractionError,
-    _apply_links,
     _contained,
+    _Extractor,
     _fold,
-    _keg_filter,
+    _Sink,
     detect_format,
 )
+from brewery.providers.relocator import StreamRelocator
 
 pytestmark = pytest.mark.unit
+
+
+def _apply_links(dest, deferred: list[tuple[str, str, bool]]) -> None:
+    """Drive the link pass alone, over a staging directory built by hand.
+
+    Args:
+        dest: The staging directory the links are created in.
+        deferred: Link members as `extract` would have held them back.
+    """
+    extractor = _Extractor(dest)
+    extractor.deferred.extend(deferred)
+    extractor.apply_links()
 
 
 def _member(
@@ -114,55 +126,56 @@ class TestFold:
         assert _fold("bin/openssl") != _fold("bin/openssl3")
 
 
-class TestKegFilter:
-    def test_ownership_is_dropped(self) -> None:
-        """Test the filter blanks ownership so a root extraction cannot chown.
+class TestAdmit:
+    """Test the `_Extractor._admit` member screening loop."""
 
-        `TarFile.chown` only acts when euid is 0, so this is not observable from
-        an integration test that is not running as root.
-        """
-        keg_filter, _ = _keg_filter()
-        out = keg_filter(_member("foo/1.0/bin/x"), "/stage")
-        assert out is not None
-        assert (out.uid, out.gid, out.uname, out.gname) == (None, None, None, None)
+    def test_ownership_is_never_applied(self, tmp_path, monkeypatch) -> None:
+        """Test the member loop never chowns, so a root extraction cannot."""
+        for name in ("chown", "lchown", "fchown"):
+            monkeypatch.setattr(
+                os, name, lambda *a, **k: pytest.fail("extraction chowned a member")
+            )
+
+        extractor = _Extractor(tmp_path)
+        extractor._directory(_member("foo", kind=tarfile.DIRTYPE), "foo")
+        extractor.apply_dir_modes()
 
     @pytest.mark.parametrize(
         ("mode", "expected"),
         [(0o4555, 0o555), (0o2755, 0o755), (0o1777, 0o777), (0o444, 0o444)],
         ids=["setuid", "setgid", "sticky", "readonly"],
     )
-    def test_mode_keeps_permission_bits_only(self, mode, expected) -> None:
+    def test_mode_keeps_permission_bits_only(self, tmp_path, mode, expected) -> None:
         """Test the mask drops setuid/setgid/sticky and keeps the rest."""
-        keg_filter, _ = _keg_filter()
-        out = keg_filter(_member("foo/1.0/bin/x", mode=mode), "/stage")
-        assert out is not None
-        assert out.mode == expected
+        extractor = _Extractor(tmp_path)
+        extractor._directory(_member("bin", mode=mode, kind=tarfile.DIRTYPE), "bin")
+        extractor.apply_dir_modes()
 
-    def test_filter_is_idempotent(self) -> None:
-        """Test re-filtering a member is a no-op.
+        assert (tmp_path / "bin").stat().st_mode & 0o7777 == expected
+        (tmp_path / "bin").chmod(0o755)  # So tmp_path can be torn down
 
-        `extractall` re-runs the filter on every directory member during its
-        final attribute fixup pass, handing back the object the first call
-        already mutated.
-        """
-        keg_filter, _ = _keg_filter()
-        member = _member("/foo/1.0/bin/", mode=0o4555, kind=tarfile.DIRTYPE)
-        once = keg_filter(member, "/stage")
-        assert once is not None
-        twice = keg_filter(once, "/stage")
-        assert twice is not None
-        assert (
-            (twice.name, twice.mode) == (once.name, once.mode) == ("foo/1.0/bin", 0o555)
-        )
+    def test_directory_modes_are_applied_deepest_first(self, tmp_path) -> None:
+        """Test a read-only parent is locked only after its children are done."""
+        extractor = _Extractor(tmp_path)
+        for name, mode in (("etc", 0o555), ("etc/sub", 0o555)):
+            extractor._directory(_member(name, mode=mode, kind=tarfile.DIRTYPE), name)
 
-    def test_root_directory_member_is_skipped(self) -> None:
+        extractor.apply_dir_modes()
+
+        assert (tmp_path / "etc").stat().st_mode & 0o777 == 0o555
+        assert (tmp_path / "etc" / "sub").stat().st_mode & 0o777 == 0o555
+        (tmp_path / "etc").chmod(0o755)
+        (tmp_path / "etc" / "sub").chmod(0o755)
+
+    def test_root_directory_member_is_skipped(self, tmp_path) -> None:
         """Test a member naming the destination root is dropped, not applied.
 
         An archive built as `tar -c .` opens with one; letting it through would
         put the archive's mode on the staging directory itself.
         """
-        keg_filter, _ = _keg_filter()
-        assert keg_filter(_member("./", kind=tarfile.DIRTYPE), "/stage") is None
+        extractor = _Extractor(tmp_path)
+        assert extractor._admit(_member("./", kind=tarfile.DIRTYPE)) is None
+        assert extractor._dirs == []
 
     @pytest.mark.parametrize(
         ("kind", "linkname", "expected"),
@@ -185,22 +198,23 @@ class TestKegFilter:
         ],
         ids=["escaping_symlink", "absolute_symlink", "hardlink"],
     )
-    def test_link_members_are_deferred(self, kind, linkname, expected) -> None:
-        """Test link members are held back for `_apply_links`, not extracted."""
-        keg_filter, deferred = _keg_filter()
-        out = keg_filter(
-            _member("foo/1.0/bin/x", kind=kind, linkname=linkname), "/stage"
-        )
-        assert out is None
-        assert deferred == [expected]
+    def test_link_members_are_deferred(
+        self, tmp_path, kind, linkname, expected
+    ) -> None:
+        """Test link members are held back for `_apply_links`, not written."""
+        extractor = _Extractor(tmp_path)
+        member = _member("foo/1.0/bin/x", kind=kind, linkname=linkname)
 
-    def test_deferred_order_is_stream_order(self) -> None:
+        assert extractor._admit(member) is None
+        assert extractor.deferred == [expected]
+
+    def test_deferred_order_is_stream_order(self, tmp_path) -> None:
         """Test the deferred list keeps the order the archive declared."""
-        keg_filter, deferred = _keg_filter()
+        extractor = _Extractor(tmp_path)
         for name in ("foo/1.0/a", "foo/1.0/b", "foo/1.0/c"):
-            keg_filter(_member(name, kind=tarfile.SYMTYPE, linkname="t"), "/stage")
+            extractor._admit(_member(name, kind=tarfile.SYMTYPE, linkname="t"))
 
-        assert [name for name, _, _ in deferred] == [
+        assert [name for name, _, _ in extractor.deferred] == [
             "foo/1.0/a",
             "foo/1.0/b",
             "foo/1.0/c",
@@ -215,24 +229,25 @@ class TestKegFilter:
         ids=["absolute", "escaping"],
     )
     def test_hardlink_targets_are_validated_before_deferral(
-        self, linkname, exc
+        self, tmp_path, linkname, exc
     ) -> None:
-        """Test a hard link leaving the destination is rejected in the filter.
+        """Test a hard link leaving the destination is rejected up front.
 
-        Unlike a symlink, a hard link resolves at creation time, so its target
-        has to be a member of this archive.
+        A hard link resolves at creation time, so its target has to be a member
+        of this archive.
         """
-        keg_filter, deferred = _keg_filter()
+        extractor = _Extractor(tmp_path)
         with pytest.raises(exc):
-            keg_filter(
-                _member("foo/1.0/bin/x", kind=tarfile.LNKTYPE, linkname=linkname),
-                "/stage",
+            extractor._admit(
+                _member("foo/1.0/bin/x", kind=tarfile.LNKTYPE, linkname=linkname)
             )
 
-        assert deferred == []
+        assert extractor.deferred == []
 
 
 class TestApplyLinks:
+    """Tests for _apply_links."""
+
     def test_creates_links_in_order(self, tmp_path) -> None:
         """Test symlinks and hard links are created once files are on disk."""
         (tmp_path / "foo").mkdir()
@@ -252,37 +267,6 @@ class TestApplyLinks:
         """
         _apply_links(tmp_path, [("foo/1.0/bin/x", "../lib/x", True)])
         assert os.readlink(tmp_path / "foo" / "1.0" / "bin" / "x") == "../lib/x"
-
-    def test_readonly_parent_is_reopened_and_restored(self, tmp_path) -> None:
-        """Test a link lands in a directory `extractall` left non-writable."""
-        parent = tmp_path / "etc"
-        parent.mkdir(mode=0o555)
-        _apply_links(tmp_path, [("etc/conf", "../share/conf", True)])
-        assert os.readlink(parent / "conf") == "../share/conf"
-        assert parent.stat().st_mode & 0o777 == 0o555
-        parent.chmod(0o755)  # So tmp_path can be torn down
-
-    def test_unowned_parent_reports_the_staging_directory(
-        self, tmp_path, monkeypatch
-    ) -> None:
-        """Test a parent this process cannot chmod names the real cause.
-
-        Only the owner may chmod, so the refusal here is a staging directory
-        belonging to another user, not an unsafe member.
-        """
-        parent = tmp_path / "etc"
-        parent.mkdir(mode=0o555)
-
-        def _refuse(self, mode: int) -> None:
-            raise PermissionError(13, "Operation not permitted")
-
-        monkeypatch.setattr(Path, "chmod", _refuse)
-
-        with pytest.raises(ExtractionError, match="not owned by this user"):
-            _apply_links(tmp_path, [("etc/conf", "../share/conf", True)])
-
-        monkeypatch.undo()
-        parent.chmod(0o755)  # So tmp_path can be torn down
 
     def test_symlink_replaces_earlier_symlink(self, tmp_path) -> None:
         """Test a duplicate link member replaces the earlier one."""
@@ -331,3 +315,21 @@ class TestApplyLinks:
         """
         with pytest.raises(ExtractionError, match="unsafe"):
             _apply_links(tmp_path, [("X", "/etc", True), ("leak", "x/passwd", False)])
+
+
+class TestSinkProtocol:
+    """Tests for the sink protocol."""
+
+    def test_stream_relocator_satisfies_the_sink_protocol(self, tmp_path) -> None:
+        """Test the relocator still implements the seam the member loop drives.
+
+        The two modules are deliberately coupled only by duck typing. The
+        annotation is what makes 'ty' check the pairing; the runtime assert
+        catches a hook renamed on one side only.
+        """
+        sink: _Sink = StreamRelocator(
+            prefix=tmp_path,
+            cellar=tmp_path / "Cellar",
+            repository=tmp_path / "Homebrew",
+        )
+        assert isinstance(sink.head_bytes, int)

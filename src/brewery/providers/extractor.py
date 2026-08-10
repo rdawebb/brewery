@@ -5,9 +5,9 @@ from __future__ import annotations
 import os
 import tarfile
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Protocol
 
 import zstandard
 
@@ -16,11 +16,18 @@ from brewery.core.errors import ExtractionError
 _GZIP_MAGIC = b"\x1f\x8b"
 _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 
-# Decompression-bomb ceilings: bottles are sha256-pinned to the catalog feed, so
-# these only bite on a hostile or corrupt feed; the caps are set above any real
-# keg, so they never fire in normal use. In streaming mode tarfile reads exactly
-# the header-declared byte count per member, so summing `member.size` bounds the
-# decompressed stream.
+# Permission bits kept from a member header; setuid/setgid/sticky are dropped
+_MODE_MASK = 0o777
+
+# Mode `tarfile` creates directories with before its final fixup pass
+_SCRATCH_MODE = 0o700
+
+# Bytes moved per read when copying a member body, matching tarfile's default
+_COPY_BUF = 16 * 1024  # 16 KiB
+
+# Decompression-bomb ceilings, set well above any real keg: bottles are
+# sha256-pinned, so these only bite on a hostile or corrupt feed; streaming
+# tarfile reads exactly `member.size` per member, so the sum bounds the stream
 _MAX_EXTRACTED_BYTES = 17_179_869_184  # 16 GiB
 _MAX_MEMBERS = 500_000
 
@@ -48,11 +55,58 @@ def detect_format(archive: Path) -> str:
     )
 
 
-# A filter may return None to tell tarfile to skip the member entirely
-_TarFilter = Callable[[tarfile.TarInfo, str], tarfile.TarInfo | None]
-
-# Link member the filter deferred: (name, link target, is a symlink)
+# Link member deferred by the member loop (name, link target, is a symlink)
 _DeferredLink = tuple[str, str, bool]
+
+
+class _Readable(Protocol):
+    """The only thing the copy loop needs from `TarFile.fileobj`."""
+
+    def read(self, size: int, /) -> bytes:
+        """Read up to `size` bytes from the stream.
+
+        Args:
+            size: The maximum number of bytes to read.
+
+        Returns:
+            The bytes read from the stream."""
+        ...
+
+
+class _Sink(Protocol):
+    """A relocator driven from the member loop.
+
+    `relocator.StreamRelocator` is the reference implementation and documents
+    what each hook does with its argument; only what the member loop guarantees
+    is stated here.
+    """
+
+    # How many bytes off the front of a body `member` wants to see
+    head_bytes: int
+
+    def member(self, name: str, path: str, head: bytes, size: int) -> bool:
+        """Offer a regular file member; True to route its body through `file`.
+
+        `head` is `head_bytes` long, or the whole body if that is shorter.
+        """
+        ...
+
+    def file(self, data: bytes) -> bytes:
+        """Rewrite a whole buffered body. Called once per True from `member`."""
+        ...
+
+    def link(self, name: str, path: str, target: str) -> str:
+        """Rewrite a symlink target before the link is created."""
+        ...
+
+    def hardlink(self, name: str, path: str, target: str) -> None:
+        """Offer a hard-link member; `target` is a member name, not a path."""
+        ...
+
+    def defer(self, name: str, path: str) -> None:
+        """Offer a member the loop wrote without ever showing a head."""
+        ...
+
 
 # The function pattern used to create symlinks during extraction
 _MakeLink = Callable[[str, Path], None]
@@ -121,51 +175,83 @@ def _under_symlink(folded: str, symlinks: set[str]) -> bool:
     return False
 
 
-def _keg_filter(
-    archive: Path | None = None,
-) -> tuple[_TarFilter, list[_DeferredLink]]:
-    """Build the per-member extraction filter for one archive.
+class _Extractor:
+    """Drives one archive's member loop, holding the state `extractall` kept.
 
-    The filter keeps the member inside the destination, preserves the member's
-    exact mode, and rejects the archive before anything is written once it
-    exceeds the decompression-bomb ceilings.
-
-    Args:
-        archive: The archive being extracted, for error context.
-
-    Returns:
-        A filter callable for `tarfile.extractall`, holding the running totals,
-        and the list it appends deferred link members to in stream order.
+    Link members are still deferred to `_apply_links`, so a hard link's target
+    is always on disk by the time it is created.
     """
-    total_bytes = 0
-    total_members = 0
-    deferred: list[_DeferredLink] = []
 
-    def _filter(member: tarfile.TarInfo, dest_path: str) -> tarfile.TarInfo | None:
-        """Apply the containment checks and track the running totals.
+    __slots__ = (
+        "_bytes",
+        "_dirs",
+        "_made",
+        "_members",
+        "_root",
+        "archive",
+        "deferred",
+        "dest",
+        "sink",
+    )
+
+    def __init__(
+        self, dest: Path, archive: Path | None = None, sink: _Sink | None = None
+    ) -> None:
+        """Prepare the per-archive extraction state.
 
         Args:
-            member: The tar member being filtered.
-            dest_path: The destination path for the member.
+            dest: The directory to extract the archive into.
+            archive: The archive being extracted, for error context.
+            sink: A relocator to substitute placeholders as members are written,
+                or None to write the archive's bytes verbatim.
+        """
+        self.dest = dest
+        self.archive = archive
+        self.sink = sink
+        self.deferred: list[_DeferredLink] = []
+        self._bytes = 0
+        self._members = 0
+
+        # Root directory for the archive, used to normalise member names
+        self._root = f"{dest}/"
+
+        # Directory members, for the reversed mode/mtime pass
+        self._dirs: list[tuple[str, int | None, float]] = []
+
+        # Directory names already on disk
+        self._made: set[str] = set()
+
+    def _admit(self, member: tarfile.TarInfo) -> str | None:
+        """Screen one member, returning the destination-relative name to write.
+
+        Keeps the member inside the destination, rejects the archive once it
+        exceeds the decompression-bomb ceilings, and holds link members back for
+        `_apply_links`.
+
+        Args:
+            member: The tar member being screened.
 
         Returns:
-            The filtered tar member, or None to skip it.
-        """
-        nonlocal total_bytes, total_members
-        total_bytes += member.size
-        total_members += 1
+            The normalised root-relative name, or None if there is nothing to write.
 
-        if total_bytes > _MAX_EXTRACTED_BYTES:
+        Raises:
+            ExtractionError: If a bomb ceiling is exceeded.
+            tarfile.FilterError: If the member is unsafe.
+        """
+        self._bytes += member.size
+        self._members += 1
+
+        if self._bytes > _MAX_EXTRACTED_BYTES:
             raise ExtractionError(
                 f"bottle expands past the {_MAX_EXTRACTED_BYTES} byte extraction "
                 f"limit at member {member.name!r}",
-                archive=archive,
+                archive=self.archive,
             )
 
-        if total_members > _MAX_MEMBERS:
+        if self._members > _MAX_MEMBERS:
             raise ExtractionError(
                 f"bottle holds more than {_MAX_MEMBERS} members",
-                archive=archive,
+                archive=self.archive,
             )
 
         # A keg is files, directories and links; raise for device nodes and fifos
@@ -177,15 +263,16 @@ def _keg_filter(
             raise tarfile.OutsideDestinationError(member, member.name)
 
         if not name:
-            # Reject the root directory itself
+            # Skip the root directory itself, rather than applying its mode to
+            # the staging directory; anything else naming the root is unsafe
             if member.isdir():
                 return None
 
             raise tarfile.OutsideDestinationError(member, member.name)
 
         if member.issym():
-            # Targets are left verbatim, relocator rewrites them later
-            deferred.append((name, member.linkname, True))
+            # Targets are left verbatim; the sink or the relocator rewrites them
+            self.deferred.append((name, member.linkname, True))
             return None
 
         if member.islnk():
@@ -198,223 +285,340 @@ def _keg_filter(
             if not target:
                 raise tarfile.LinkOutsideDestinationError(member, member.linkname)
 
-            deferred.append((name, target, False))
+            self.deferred.append((name, target, False))
             return None
 
-        # Mutated in place rather than via TarInfo.replace()
-        member.name = name
+        return name
 
-        # Set to None so tarfile chown does nothing
-        member.uid = None  # ty: ignore[invalid-assignment]
-        member.gid = None  # ty: ignore[invalid-assignment]
-        member.uname = None  # ty: ignore[invalid-assignment]
-        member.gname = None  # ty: ignore[invalid-assignment]
+    def _parent(self, name: str) -> None:
+        """Create the member's parent directory if the archive declared none.
+
+        Args:
+            name: The destination-relative member name.
+        """
+        head = name.rpartition("/")[0]
+        if head and head not in self._made:
+            # Default permissions, so the final directory member can reset it
+            os.makedirs(self._root + head, exist_ok=True)
+            self._made.add(head)
+
+    def _directory(self, member: tarfile.TarInfo, name: str) -> None:
+        """Create a directory member, deferring its mode to the final pass.
+
+        Args:
+            member: The directory member.
+            name: The destination-relative member name.
+        """
+        self._parent(name)
+        path = self._root + name
+
+        try:
+            os.mkdir(path, _SCRATCH_MODE)
+
+        except FileExistsError:
+            if not os.path.isdir(path):
+                raise
+
+        self._made.add(name)
+        self._dirs.append((name, member.mode, member.mtime))
+
+    def _chunks(self, src: _Readable, size: int, name: str) -> Iterator[bytes]:
+        """Yield exactly `size` bytes off the tar stream, in read-sized pieces.
+
+        The one place a member body is pulled off the stream, so a short stream
+        is one error rather than one per consumer.
+
+        Args:
+            src: The archive's underlying stream, positioned at the body.
+            size: The byte count the member header declares.
+            name: The member name, for the error message.
+
+        Yields:
+            The bytes read, in chunks of at most `_COPY_BUF`.
+
+        Raises:
+            tarfile.ReadError: If the stream runs out first.
+        """
+        while size > 0:
+            chunk = src.read(min(size, _COPY_BUF))
+            if not chunk:
+                raise tarfile.ReadError(f"unexpected end of data in {name!r}")
+
+            yield chunk
+            size -= len(chunk)
+
+    def _copy(self, src: _Readable, dst: BinaryIO, size: int, name: str) -> None:
+        """Move exactly `size` bytes from the tar stream into an open file.
+
+        Args:
+            src: The archive's underlying stream, positioned at the body.
+            dst: The output file.
+            size: The byte count the member header declares.
+            name: The member name, for the error message.
+
+        Raises:
+            tarfile.ReadError: If the stream runs out first.
+        """
+        dst.writelines(self._chunks(src, size, name))
+
+    def _take(self, src: _Readable, size: int, name: str) -> bytes:
+        """Read exactly `size` bytes off the tar stream into memory.
+
+        Args:
+            src: The archive's underlying stream, positioned at the body.
+            size: The number of bytes wanted.
+            name: The member name, for the error message.
+
+        Returns:
+            The bytes read.
+
+        Raises:
+            tarfile.ReadError: If the stream runs out first.
+        """
+        return b"".join(self._chunks(src, size, name))
+
+    def _relocated(
+        self, src: _Readable, dst: BinaryIO, member: tarfile.TarInfo, name: str
+    ) -> None:
+        """Write one member's body past the sink.
+
+        Small text files are buffered whole and substituted before being written;
+        everything else streams straight through, with the sink recording a defer
+        for `finish` if needed.
+
+        Args:
+            src: The archive's underlying stream, positioned at the body.
+            dst: The output file.
+            member: The file member.
+            name: The destination-relative member name.
+        """
+        assert self.sink is not None
+        size = member.size
+        head = self._take(src, min(size, self.sink.head_bytes), member.name)
+
+        if self.sink.member(name, self._root + name, head, size):
+            body = head + self._take(src, size - len(head), member.name)
+            dst.write(self.sink.file(body))
+            return
+
+        dst.write(head)
+        self._copy(src, dst, size - len(head), member.name)
+
+    def _regular(
+        self, tar: tarfile.TarFile, member: tarfile.TarInfo, name: str
+    ) -> None:
+        """Write one regular file member, then apply its mode and mtime.
+
+        Args:
+            tar: The open archive, for its stream and position.
+            member: The file member.
+            name: The destination-relative member name.
+        """
+        self._parent(name)
+        path = self._root + name
+
+        source = tar.fileobj
+        source.seek(member.offset_data)
+
+        with open(path, "wb") as dst:
+            if member.sparse is not None:
+                # A sparse body arrives in pieces the sink cannot classify from
+                # a head, so written whole and deferred to `finish`; the stub
+                # types `sparse` as an int - it is (offset, size) pairs
+                for offset, size in member.sparse:  # ty: ignore[not-iterable]
+                    dst.seek(offset)
+                    self._copy(source, dst, size, member.name)
+
+                dst.seek(member.size)
+                dst.truncate()
+
+                if self.sink is not None:
+                    self.sink.defer(name, path)
+
+            elif self.sink is None:
+                self._copy(source, dst, member.size, member.name)
+
+            else:
+                self._relocated(source, dst, member, name)
 
         if member.mode is not None:
-            # Keep the bottle's real permission bits
-            member.mode &= 0o777
+            os.chmod(path, member.mode & _MODE_MASK)
 
-        return member
+        os.utime(path, (member.mtime, member.mtime))
 
-    return _filter, deferred
+    def extract(self, tar: tarfile.TarFile) -> None:
+        """Write every member of `tar`, in the order the stream declares them.
 
+        Args:
+            tar: The archive to extract, opened in streaming mode.
+        """
+        for member in tar:
+            name = self._admit(member)
+            if name is None:
+                continue
 
-def _link_in_readonly_parent(
-    make: _MakeLink,
-    src: str,
-    path: Path,
-    *,
-    archive: Path | None = None,
-    dest: Path | None = None,
-) -> None:
-    """Create a link inside a directory whose archive mode denies writes.
+            if member.isdir():
+                self._directory(member, name)
 
-    `extractall` applies each directory's mode from the archive, so a member
-    with a read-only mode is already locked by the time its deferred links are
-    created; this grants the owner write permissions, creates the link, then
-    restores the recorded mode.
+            else:
+                self._regular(tar, member, name)
 
-    Args:
-        make: `os.symlink` or `os.link`.
-        src: The link target.
-        path: The entry to create.
-        archive: The archive being extracted, for error context.
-        dest: The staging directory, for error context.
-    """
-    parent = path.parent
-    mode = parent.stat().st_mode & 0o7777
+    def _fail(self, message: str) -> ExtractionError:
+        """Build an ExtractionError carrying this archive's context.
 
-    try:
-        parent.chmod(mode | 0o300)
+        Args:
+            message: What went wrong.
 
-    except PermissionError as exc:
-        raise ExtractionError(
-            f"staging directory {parent} is not writable and is not owned by "
-            f"this user, so link {path.name!r} cannot be created",
-            archive=archive,
-            dest=dest,
-        ) from exc
+        Returns:
+            The error, for the caller to raise.
+        """
+        return ExtractionError(message, archive=self.archive, dest=self.dest)
 
-    try:
+    def _make_link(self, make: _MakeLink, src: str, path: Path) -> None:
+        """Create one deferred link, handling each failure where it lands.
+
+        Args:
+            make: `os.symlink` or `os.link`.
+            src: The link target, as `make` expects it.
+            path: The entry to create.
+
+        Raises:
+            ExtractionError: If the link would replace an extracted entry, or
+                names a hard-link target the archive never wrote.
+        """
+        try:
+            make(src, path)
+            return
+
+        except FileExistsError as exc:
+            # Link target already exists; replace it if it's not a symlink
+            if not path.is_symlink():
+                raise self._fail(
+                    f"unsafe tar member: link {path.name!r} would replace an "
+                    f"extracted entry"
+                ) from exc
+
+            path.unlink()
+
+        except FileNotFoundError as exc:
+            # Parent missing, or a hard link names a target never written
+            if path.parent.is_dir():
+                raise self._fail(f"broken hard link: {src}") from exc
+
+            path.parent.mkdir(parents=True, exist_ok=True)
+
         make(src, path)
 
-    finally:
-        parent.chmod(mode)
+    def apply_links(self) -> None:
+        """Create the archive's links, once every file and directory is on disk.
 
+        Walks the deferred members in stream order, so a hard link's target is
+        always either a regular file the member loop already wrote or a symlink
+        earlier in the list.
 
-def _make_link(
-    make: _MakeLink,
-    src: str,
-    path: Path,
-    *,
-    archive: Path | None = None,
-    dest: Path | None = None,
-) -> None:
-    """Create one deferred link, handling each failure where it lands.
+        Raises:
+            ExtractionError: If a link would escape the destination through an
+                earlier symlink.
+        """
+        symlinks: set[str] = set()
 
-    Args:
-        make: `os.symlink` or `os.link`.
-        src: The link target, as `make` expects it.
-        path: The entry to create.
-        archive: The archive being extracted, for error context.
-        dest: The staging directory, for error context.
-    """
-    try:
-        make(src, path)
-        return
+        for name, linkname, is_sym in self.deferred:
+            folded = _fold(name)
+            path = self.dest / name
 
-    except FileExistsError as exc:
-        # Link target already exists; replace it if it's not a symlink
-        if not path.is_symlink():
-            raise ExtractionError(
-                f"unsafe tar member: link {path.name!r} would replace an "
-                f"extracted entry",
-                archive=archive,
-                dest=dest,
-            ) from exc
+            if is_sym:
+                if _under_symlink(folded, symlinks):
+                    raise self._fail(
+                        f"unsafe tar member: symlink {name!r} sits under an "
+                        f"earlier symlink"
+                    )
 
-        path.unlink()
+                if self.sink is not None:
+                    linkname = self.sink.link(name, str(path), linkname)
 
-    except FileNotFoundError as exc:
-        # Parent is missing or a hard link names a target the archive never wrote
-        if path.parent.is_dir():
-            raise ExtractionError(
-                f"broken hard link: {src}",
-                archive=archive,
-                dest=dest,
-            ) from exc
+                self._make_link(os.symlink, linkname, path)
+                symlinks.add(folded)
+                continue
 
-        path.parent.mkdir(parents=True, exist_ok=True)
+            if self.sink is not None:
+                self.sink.hardlink(name, str(path), linkname)
 
-    except PermissionError:
-        _link_in_readonly_parent(make, src, path, archive=archive, dest=dest)
-        return
-
-    make(src, path)
-
-
-def _apply_links(
-    dest: Path, deferred: list[_DeferredLink], archive: Path | None = None
-) -> None:
-    """Create the archive's link members once every file and directory is on disk.
-
-    Walks `deferred` in stream order, so a hard link's target is always either a
-    regular file `extractall` already wrote or a symlink earlier in this list.
-
-    Args:
-        dest: The staging directory the archive was extracted into.
-        deferred: The link members `_keg_filter` held back, in stream order.
-        archive: The archive being extracted, for error context.
-    """
-    symlinks: set[str] = set()
-
-    for name, linkname, is_sym in deferred:
-        folded = _fold(name)
-        path = dest / name
-
-        if is_sym:
-            if _under_symlink(folded, symlinks):
-                raise ExtractionError(
-                    f"unsafe tar member: symlink {name!r} sits under an "
-                    f"earlier symlink",
-                    archive=archive,
-                    dest=dest,
+            folded_target = _fold(linkname)
+            if folded in symlinks or _under_symlink(folded, symlinks):
+                raise self._fail(
+                    f"unsafe tar member: hard link {name!r} sits at or under an "
+                    f"earlier symlink"
                 )
 
-            _make_link(os.symlink, linkname, path, archive=archive, dest=dest)
-            symlinks.add(folded)
-            continue
+            if folded_target in symlinks or _under_symlink(folded_target, symlinks):
+                raise self._fail(
+                    f"unsafe tar member: hard link {name!r} aims at or through "
+                    f"the symlink {linkname!r}"
+                )
 
-        folded_target = _fold(linkname)
-        if folded in symlinks or _under_symlink(folded, symlinks):
-            raise ExtractionError(
-                f"unsafe tar member: hard link {name!r} sits at or under an "
-                f"earlier symlink",
-                archive=archive,
-                dest=dest,
-            )
+            self._make_link(os.link, str(self.dest / linkname), path)
 
-        if folded_target in symlinks or _under_symlink(folded_target, symlinks):
-            raise ExtractionError(
-                f"unsafe tar member: hard link {name!r} aims at or through the "
-                f"symlink {linkname!r}",
-                archive=archive,
-                dest=dest,
-            )
-
-        _make_link(os.link, str(dest / linkname), path, archive=archive, dest=dest)
+    def apply_dir_modes(self) -> None:
+        """Apply the archive's directory modes and mtimes, deepest name first."""
+        for name, mode, mtime in sorted(self._dirs, key=lambda d: d[0], reverse=True):
+            path = self._root + name
+            os.utime(path, (mtime, mtime))
+            if mode is not None:
+                os.chmod(path, mode & _MODE_MASK)
 
 
-def _extract_stream(fileobj: BinaryIO, dest: Path, tar_filter: _TarFilter) -> None:
+def _extract_stream(fileobj: BinaryIO, extractor: _Extractor) -> None:
     """Extract a tar archive from a file-like object into a directory.
 
     Args:
         fileobj: The file-like object to read the archive from.
-        dest: The directory to extract the archive into.
-        tar_filter: The per-member filter to apply.
+        extractor: The member loop to drive the archive through.
     """
-    # 'r|*' auto-detects gzip vs uncompressed in streaming mode; the zstd path
-    # passes an already-decompressed (raw) tar stream, which reads as
-    # uncompressed; the gzip path is decompressed here
+    # 'r|*' auto-detects gzip vs uncompressed; the zstd caller has already
+    # decompressed, so its stream arrives here as plain tar
     with tarfile.open(fileobj=fileobj, mode="r|*") as tar:
-        tar.extractall(str(dest), filter=tar_filter)
+        extractor.extract(tar)
 
 
-def extract_bottle(archive: Path, dest: Path) -> Path:
+def extract_bottle(archive: Path, dest: Path, *, sink: _Sink | None = None) -> Path:
     """Extract `archive` into `dest` and return the keg directory.
 
-    A bottle unpacks to `<name>/<version>/...` (plus a `<name>/.brew`
-    metadata dir). The returned path is that `<name>/<version>` keg root,
-    which is what the relocator operates on.
+    A bottle unpacks to `<name>/<version>/...` (plus a `<name>/.brew` metadata
+    dir); the returned path the `<name>/<version>` keg root, which is what the
+    relocator operates on.
 
     Args:
         archive: The path to the archive file.
         dest: The directory to extract the archive into.
+        sink: A relocator to drive from the member loop, or None.
 
     Returns:
         The path to the extracted keg directory.
     """
     fmt = detect_format(archive)
     dest.mkdir(parents=True, exist_ok=True)
-    tar_filter, deferred = _keg_filter(archive=archive)
+    extractor = _Extractor(dest, archive=archive, sink=sink)
 
     try:
         if fmt == "gzip":
             with archive.open("rb") as fh:
-                _extract_stream(fh, dest, tar_filter)
+                _extract_stream(fh, extractor)
 
         else:  # zstd
             dctx = zstandard.ZstdDecompressor()
             with archive.open("rb") as fh, dctx.stream_reader(fh) as reader:
-                _extract_stream(reader, dest, tar_filter)
+                _extract_stream(reader, extractor)
 
-        _apply_links(dest, deferred, archive=archive)
+        # Links first, then modes: every directory is still writable here
+        extractor.apply_links()
+        extractor.apply_dir_modes()
 
     except tarfile.FilterError as exc:
         raise ExtractionError(
             f"unsafe tar member in {archive.name}: {exc}", archive=archive, dest=dest
         ) from exc
 
+    # A placeholder the sink cannot resolve raises RelocationError
     except (tarfile.TarError, zstandard.ZstdError, OSError) as exc:
         raise ExtractionError(
             f"failed to extract {archive.name}: {exc}", archive=archive, dest=dest

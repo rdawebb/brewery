@@ -22,7 +22,7 @@ from brewery.core.retry import RETRYABLE_STATUS, retry_async
 DEFAULT_GHCR_TOKEN = "QQ=="
 _GHCR_HOSTS = frozenset({"ghcr.io"})
 _OCI_LAYER_ACCEPT = "application/vnd.oci.image.layer.v1.tar+gzip"
-_CHUNK = 1 << 20  # 1 MiB
+_CHUNK = 1_048_576  # 1 MiB
 
 # Hard ceiling on a downloaded bottle: the sha256 can only be checked once the
 # whole body is on disk, so a hostile or wedged response fills the disk before

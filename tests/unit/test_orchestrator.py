@@ -28,6 +28,17 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 CFG = InstallConfig(prefix=Path("/opt/hb"), repository=Path("/opt/hb"), api_path="/api")
 
 
+class _NullSink:
+    """Stands in for StreamRelocator where the keg is already staged."""
+
+    def finish(self, keg: Path) -> None:
+        """Do nothing, as there is nothing staged to relocate.
+
+        Args:
+            keg: The keg directory, ignored.
+        """
+
+
 def _tab(name: str = "x") -> BottleTabInfo:
     """Create a mock BottleTabInfo for testing.
 
@@ -566,7 +577,7 @@ class TestKegOnlyPostInstall:
         )
 
     async def test_successful_brew_fallback_is_a_note_not_an_error(self) -> None:
-        """A formula brew poured successfully is diagnosed but not an error."""
+        """Test that a formula brew poured successfully is diagnosed but not an error."""
         cat = MockCatalog({"x": MockFormula("x")}, {"x": []})
         o = _make(
             cat,
@@ -583,7 +594,7 @@ class TestKegOnlyPostInstall:
         assert report.errors == {}  # ...but it did not fail
 
     async def test_locked_rack_fails_without_a_brew_fallback(self) -> None:
-        """brew locks the same rack, so retrying through brew would fail too."""
+        """Test that brew locks the same rack, so retrying through brew would fail too."""
         cat = MockCatalog({"x": MockFormula("x")}, {"x": []})
         brew = MockBrew()
         o = _make(
@@ -600,7 +611,7 @@ class TestKegOnlyPostInstall:
         assert brew.calls == []  # No pointless fallback onto the same lock
 
     async def test_notes_accumulate_rather_than_clobber(self) -> None:
-        """A second diagnostic for one formula does not overwrite the first."""
+        """Test that a second diagnostic for one formula does not overwrite the first."""
         report = InstallReport()
         report.add_note("x", "first")
         report.add_note("x", "second")
@@ -611,7 +622,7 @@ class TestKegOnlyPostInstall:
         assert report.errors["x"] == "first; second"
 
     async def test_unexpected_error_fails_one_formula_not_the_run(self) -> None:
-        """An uncaught exception degrades to FAILED instead of losing the report."""
+        """Test that an uncaught exception degrades to FAILED instead of losing the report."""
         deps = {"app": ["lib"], "lib": [], "other": []}
         cat = MockCatalog(_graph(deps), deps)
         o = _make(cat, MockDownloader(), MockTab(), MockBrew(install_ok=False))
@@ -933,8 +944,10 @@ class TestUpgradeSwap:
         (staged / "bin" / "foo").write_text("v2")
 
         # Stub only the bottle-handling stages; install_to_cellar/unlink/link run for real
-        monkeypatch.setattr(orch_mod, "extract_bottle", lambda bp, st: staged)
-        monkeypatch.setattr(orch_mod, "relocate_keg", lambda *a, **k: None)
+        monkeypatch.setattr(
+            orch_mod, "extract_bottle", lambda bp, st, *, sink=None: staged
+        )
+        monkeypatch.setattr(orch_mod, "StreamRelocator", lambda **kw: _NullSink())
         monkeypatch.setattr(orch_mod, "write_receipt", lambda d, r: None)
 
         fr = MockFormula("wget")
@@ -962,10 +975,10 @@ class TestUpgradeSwap:
 
 
 class TestRackLock:
-    """The native pour holds the formula's rack lock while it mutates the Cellar."""
+    """Test that the native pour holds the formula's rack lock while it mutates the Cellar."""
 
     async def test_locked_rack_stops_the_pour(self, tmp_path) -> None:
-        """A peer holding the rack lock aborts before anything is extracted."""
+        """Test that a peer holding the rack lock aborts before anything is extracted."""
         prefix = tmp_path / "prefix"
         cfg = InstallConfig(
             prefix=prefix,
@@ -1022,7 +1035,7 @@ class _RecordingProgress:
 
 
 class TestProgressEvents:
-    """The orchestrator drives the ProgressPort in the expected order."""
+    """Test that the orchestrator drives the ProgressPort in the expected order."""
 
     async def test_single_install_emits_ordered_events(self) -> None:
         """Test a single install emits the expected progress events."""

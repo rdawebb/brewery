@@ -15,6 +15,17 @@ from brewery.core.models import PackageKind, PackageStatus
 pytestmark = pytest.mark.integration
 
 
+class _NullSink:
+    """Stands in for StreamRelocator where the keg is already staged."""
+
+    def finish(self, keg: Path) -> None:
+        """Do nothing, as there is nothing staged to relocate.
+
+        Args:
+            keg: The keg directory, ignored.
+        """
+
+
 def _provider_calls(mock_brew, subcommand: str) -> list[tuple[str, ...]]:
     """Filter the mock_brew call log to brew invocations of a given subcommand.
 
@@ -170,7 +181,7 @@ class TestOutdatedDerivation:
     refresh_catalog(...) then call get_outdated()."""
 
     async def test_act_outdated_against_catalog(self, repo) -> None:
-        """Catalog 0.2.89 > installed 0.2.88 → act is OUTDATED."""
+        """Test that Catalog 0.2.89 > installed 0.2.88 → act is OUTDATED."""
         outdated = repo.get_outdated()
 
         assert {p.name for p in outdated} == {"act"}
@@ -179,14 +190,14 @@ class TestOutdatedDerivation:
         assert act.metadata["latest_version"] == "0.2.89"
 
     async def test_outdated_result_stable_across_reads(self, repo) -> None:
-        """A second read reports the same outdated set from the cached records."""
+        """Test that a second read reports the same outdated set from the cached records."""
         repo.get_outdated()
 
         cached_outdated = repo.get_outdated()
         assert {p.name for p in cached_outdated} == {"act"}
 
     async def test_non_outdated_packages_keep_clean_status(self, repo) -> None:
-        """Non-outdated packages stay clean."""
+        """Test that non-outdated packages stay clean."""
         repo.get_outdated()
         all_pkgs = repo.get_all_installed()
         yazi = next(p for p in all_pkgs if p.name == "yazi")
@@ -248,6 +259,8 @@ class TestOutdatedDerivation:
 
 
 class TestGetDetails:
+    """Test cases for Repository.get_details."""
+
     async def test_details_from_cache_after_refresh(self, repo) -> None:
         """Test that get_details serves from cache after refresh."""
         repo.get_all_installed()
@@ -448,7 +461,7 @@ class TestUninstall:
         assert "yazi" not in flat  # Formula should not hit brew
 
     async def test_uninstall_blocked_by_dependent(self, repo, mock_env) -> None:
-        """A formula required by another installed formula is refused."""
+        """Test that a formula required by another installed formula is refused."""
         _install_formula(mock_env.cellar, "openssl")
         _install_formula(mock_env.cellar, "curl", deps=["openssl"])
         repo.cache_mgr.invalidate()
@@ -460,7 +473,7 @@ class TestUninstall:
         assert (mock_env.cellar / "openssl").exists()
 
     async def test_uninstall_both_in_batch_unblocks(self, repo, mock_env) -> None:
-        """A dependent removed in the same batch does not block the target."""
+        """Test that a dependent removed in the same batch does not block the target."""
         _install_formula(mock_env.cellar, "openssl")
         _install_formula(mock_env.cellar, "curl", deps=["openssl"])
         repo.cache_mgr.invalidate()
@@ -472,7 +485,7 @@ class TestUninstall:
         assert not (mock_env.cellar / "openssl").exists()
 
     async def test_uninstall_lists_multiple_dependents(self, repo, mock_env) -> None:
-        """Multiple dependents are reported sorted and comma-joined."""
+        """Test that multiple dependents are reported sorted and comma-joined."""
         _install_formula(mock_env.cellar, "openssl")
         _install_formula(mock_env.cellar, "curl", deps=["openssl"])
         _install_formula(mock_env.cellar, "wget", deps=["openssl"])
@@ -485,7 +498,7 @@ class TestUninstall:
     async def test_uninstall_removes_keg_natively(
         self, repo, mock_brew, mock_env
     ) -> None:
-        """Formula uninstall removes the keg via the native path, not brew."""
+        """Test that Formula uninstall removes the keg via the native path, not brew."""
         removed, _ = await repo.uninstall_packages(["yazi"], kind=PackageKind.FORMULA)
         assert "yazi" in removed
         assert not (mock_env.cellar / "yazi").exists()
@@ -494,7 +507,7 @@ class TestUninstall:
     async def test_uninstall_falls_back_to_brew(
         self, repo, mock_brew, monkeypatch
     ) -> None:
-        """A native failure falls back to brew uninstall for that formula."""
+        """Test that a native failure falls back to brew uninstall for that formula."""
         import brewery.providers.uninstall_service as svc
 
         def _boom(*a, **k) -> None:
@@ -733,8 +746,10 @@ class TestUpgrade:
 
         monkeypatch.setattr(install_svc, "Downloader", MockDownloader)
         monkeypatch.setattr(install_svc, "fetch_bottle_tab", mock_tab)
-        monkeypatch.setattr(orch_mod, "extract_bottle", lambda bp, st: staged)
-        monkeypatch.setattr(orch_mod, "relocate_keg", lambda *a, **k: None)
+        monkeypatch.setattr(
+            orch_mod, "extract_bottle", lambda bp, st, *, sink=None: staged
+        )
+        monkeypatch.setattr(orch_mod, "StreamRelocator", lambda **kw: _NullSink())
 
         # Defensive: a stray fallback must never reach the real brew binary
         async def no_brew(args, *, output=None, check=None):
@@ -783,7 +798,7 @@ class TestPinAndUnpin:
     """Tests for Repository.pin_packages / unpin_packages."""
 
     def test_pin_writes_a_record_and_shows_as_pinned(self, repo, mock_env) -> None:
-        """A pinned formula reads back as PINNED through the merge."""
+        """Test that a pinned formula reads back as PINNED through the merge."""
         pinned, advisories, failures = repo.pin_packages(["act"])
 
         assert (pinned, advisories, failures) == (["act"], [], [])
@@ -793,20 +808,20 @@ class TestPinAndUnpin:
         assert PackageStatus.PINNED in pkg.status
 
     def test_pinning_twice_is_an_advisory_not_a_failure(self, repo) -> None:
-        """Re-pinning warns and exits clean, as brew's `opoo` path does."""
+        """Test that re-pinning warns and exits clean, as brew's `opoo` path does."""
         repo.pin_packages(["act"])
 
         pinned, advisories, failures = repo.pin_packages(["act"])
         assert (pinned, advisories, failures) == ([], [("act", "already pinned")], [])
 
     def test_unpinning_an_unpinned_formula_is_an_advisory(self, repo) -> None:
-        """Unpinning what was never pinned warns rather than failing."""
+        """Test that unpinning what was never pinned warns rather than failing."""
         unpinned, advisories, failures = repo.unpin_packages(["act"])
 
         assert (unpinned, advisories, failures) == ([], [("act", "not pinned")], [])
 
     def test_pin_of_a_missing_formula_is_a_failure(self, repo) -> None:
-        """A name that is not installed is a hard failure, as brew's `ofail` is."""
+        """Test that a name that is not installed is a hard failure, as brew's `ofail` is."""
         pinned, advisories, failures = repo.pin_packages(["ripgrep"])
 
         assert (pinned, advisories, failures) == (
@@ -816,7 +831,7 @@ class TestPinAndUnpin:
         )
 
     def test_pin_does_not_reach_for_casks(self, repo) -> None:
-        """Cask tokens are not resolvable as formulae, so they report not installed."""
+        """Test that cask tokens are not resolvable as formulae, so they report not installed."""
         _, _, failures = repo.pin_packages(["iina"])
 
         assert failures == [("iina", "not installed")]
@@ -826,7 +841,7 @@ class TestLinkAndUnlink:
     """Tests for Repository.link_packages / unlink_packages."""
 
     def test_link_then_unlink_round_trips(self, repo, mock_env) -> None:
-        """Linking creates the bookkeeping record; unlinking removes it."""
+        """Test that linking creates the bookkeeping record; unlinking removes it."""
         keg = mock_env.cellar / "act" / "0.2.88"
         (keg / "bin").mkdir(parents=True)
         (keg / "bin" / "act").write_text("#!/bin/sh\n")
@@ -842,7 +857,7 @@ class TestLinkAndUnlink:
         assert not (mock_env.prefix / "bin" / "act").exists()
 
     def test_link_dry_run_leaves_the_prefix_alone(self, repo, mock_env) -> None:
-        """A dry run previews the links without creating any."""
+        """Test that a dry run previews the links without creating any."""
         keg = mock_env.cellar / "act" / "0.2.88"
         (keg / "bin").mkdir(parents=True)
         (keg / "bin" / "act").write_text("#!/bin/sh\n")
@@ -854,7 +869,7 @@ class TestLinkAndUnlink:
         assert not (mock_env.prefix / "bin" / "act").exists()
 
     def test_link_of_a_missing_formula_is_a_failure(self, repo) -> None:
-        """An uninstalled name fails rather than silently succeeding."""
+        """Test that an uninstalled name fails rather than silently succeeding."""
         linked, _, failures = repo.link_packages(["ripgrep"])
 
         assert linked == []
@@ -903,7 +918,7 @@ class TestCleanup:
     async def test_cleanup_skips_a_locked_rack(
         self, brew, empty_catalog, monkeypatch
     ) -> None:
-        """A rack mid-install is left for the next sweep, not reported as a failure."""
+        """Test that a rack mid-install is left for the next sweep, not reported as a failure."""
         import fcntl
         import os
         import time

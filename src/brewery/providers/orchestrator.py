@@ -40,7 +40,7 @@ from brewery.providers.receipt import (
     read_receipt,
     write_receipt,
 )
-from brewery.providers.relocator import formula_tokens, relocate_keg
+from brewery.providers.relocator import StreamRelocator, formula_tokens
 from brewery.providers.retention import mark_replaced
 
 log: BreweryLogger = get_logger(__name__)
@@ -898,9 +898,10 @@ class Orchestrator:
 
         dest: Path | None = None
         try:
-            keg = extract_bottle(bottle_path, staging)
-            relocate_keg(
-                keg,
+            # Relocation runs inside extraction: text members are substituted
+            # before they are written and symlink targets are resolved before
+            # links are created
+            sink = StreamRelocator(
                 prefix=self.cfg.prefix,
                 cellar=self.cfg.cellar,
                 repository=self.cfg.repository,
@@ -913,6 +914,9 @@ class Orchestrator:
                 ),
                 text_files=tab.changed_files,
             )
+            keg = extract_bottle(bottle_path, staging, sink=sink)
+            sink.finish(keg)
+
             dest = install_to_cellar(
                 keg, prefix=self.cfg.prefix, name=name, version=pkg_version
             )
