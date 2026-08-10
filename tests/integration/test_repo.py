@@ -547,6 +547,34 @@ class TestUpgrade:
         flat = [arg for call in _provider_calls(mock_brew, "upgrade") for arg in call]
         assert "act" in flat
 
+    async def test_named_up_to_date_formula_is_not_repoured(
+        self, repo, mock_brew
+    ) -> None:
+        """Test that naming a current formula reports it instead of re-pouring it.
+
+        yazi is up to date, so it must never reach the pipeline or the provider.
+        """
+        upgraded, current, _advisories, failures = await repo.upgrade_packages(["yazi"])
+        flat = [arg for call in _provider_calls(mock_brew, "upgrade") for arg in call]
+        assert "yazi" not in flat
+        assert upgraded == []
+        assert failures == []
+        assert [p.name for p in current] == ["yazi"]
+
+    async def test_named_outdated_formula_still_upgrades(self, repo, mock_brew) -> None:
+        """Test that the up-to-date filter leaves an outdated named target alone.
+
+        Both are still reported: the mock provider changes no version on disk, so
+        act comes back as current rather than upgraded.
+        """
+        _upgraded, current, _advisories, _failures = await repo.upgrade_packages(
+            ["act", "yazi"]
+        )
+        flat = [arg for call in _provider_calls(mock_brew, "upgrade") for arg in call]
+        assert "act" in flat
+        assert "yazi" not in flat
+        assert sorted(p.name for p in current) == ["act", "yazi"]
+
     async def test_upgrade_unknown_name_is_failure(self, repo) -> None:
         """Test that upgrading a non-installed name is reported as not found."""
         upgraded, _current, _advisories, failures = await repo.upgrade_packages(

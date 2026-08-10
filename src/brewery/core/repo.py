@@ -332,6 +332,9 @@ class Repository:
     ]:
         """Upgrade packages and report upgraded, up-to-date, advisories, and failures.
 
+        Naming a formula that is already current reports it as up-to-date rather
+        than reinstalling it.
+
         Args:
             names: Name(s) of the package(s) to upgrade.
             kind: Kind of the package(s) (formula, cask, auto (default))
@@ -347,6 +350,7 @@ class Repository:
         installed: list[Package] = self.cache_mgr.installed_packages()
         by_name: dict[str, Package] = {p.name: p for p in installed}
         advisories: list[tuple[str, str]] = []
+        satisfied: list[Package] = []
 
         # Resolve the target set and any pinned skips
         if names is None:
@@ -375,13 +379,27 @@ class Repository:
             ]
             targets = [p for p in targets if PackageStatus.PINNED not in p.status]
 
+            # The orchestrator forces requested targets past `is_satisfied`, so a
+            # current formula would otherwise be re-poured in full; casks are
+            # exempt because nothing derives OUTDATED for them yet
+            satisfied = [
+                p
+                for p in targets
+                if p.kind == PackageKind.FORMULA
+                and PackageStatus.OUTDATED not in p.status
+            ]
+            skip = {p.name for p in satisfied}
+            targets = [p for p in targets if p.name not in skip]
+
         if kind is not None:
             targets = [p for p in targets if p.kind == kind]
+            satisfied = [p for p in satisfied if p.kind == kind]
 
         formula_names = [p.name for p in targets if p.kind == PackageKind.FORMULA]
         cask_names = [p.name for p in targets if p.kind == PackageKind.CASK]
         pre_versions: dict[str, str | None] = {
-            p.name: (p.versions[0] if p.versions else None) for p in targets
+            p.name: (p.versions[0] if p.versions else None)
+            for p in (*targets, *satisfied)
         }
 
         if formula_names:
@@ -399,7 +417,9 @@ class Repository:
         if cask_names:
             await self.cask.upgrade(names=cask_names)
 
-        self.cache_mgr.invalidate()
+        # Only invalidate the cache if something actually changed
+        if formula_names or cask_names:
+            self.cache_mgr.invalidate()
 
         post: dict[str, Package] = {
             p.name: p for p in self.cache_mgr.installed_packages()
@@ -407,7 +427,7 @@ class Repository:
 
         upgraded: list[Package] = []
         current: list[Package] = []
-        for name in formula_names + cask_names:
+        for name in formula_names + cask_names + [p.name for p in satisfied]:
             pkg = post.get(name)
             if pkg is None:
                 continue
