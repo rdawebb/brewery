@@ -8,7 +8,7 @@ import functools
 import hashlib
 import os
 import tempfile
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -154,27 +154,6 @@ class Downloader:
 
         async with self._sem:
             return await self._download(ref, dest, on_progress)
-
-    async def fetch_all(
-        self, refs: Iterable[BottleRef], *, on_progress: ProgressCb | None = None
-    ) -> dict[str, Path]:
-        """Download a set of bottles with bounded concurrency (fail-fast).
-
-        The per-bottle semaphore caps parallelism. Already-cached bottles return
-        immediately; a re-run after a partial failure resumes from cache.
-
-        Args:
-            refs: The bottle references to fetch.
-            on_progress: A callback function to report download progress.
-
-        Returns:
-            A dictionary mapping bottle names to their cached paths.
-        """
-
-        async def one(ref: BottleRef) -> tuple[str, Path]:
-            return ref.name, await self.fetch(ref, on_progress=on_progress)
-
-        return dict(await asyncio.gather(*(one(r) for r in refs)))
 
     async def _download(
         self, ref: BottleRef, dest: Path, on_progress: ProgressCb | None
