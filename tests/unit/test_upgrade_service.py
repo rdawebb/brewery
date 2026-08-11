@@ -5,9 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from _stubs import MockClient, MockRepo, _run_brew
+from _stubs import MockClient, MockRepo, _run_brew, patch_httpx
 
 import brewery.providers.upgrade_service as svc
+from brewery.providers.orchestrator import InstallReport, Outcome
 
 
 class MockOrchestrator:
@@ -19,8 +20,9 @@ class MockOrchestrator:
         """Initialise with no upgraded state."""
         MockOrchestrator.last = self
         self.upgraded_with: tuple | None = None
+        self.report: InstallReport | None = None
 
-    async def upgrade(self, names, old_kegs) -> str:
+    async def upgrade(self, names, old_kegs) -> InstallReport:
         """Record the upgrade call and return a sentinel report.
 
         Args:
@@ -28,10 +30,12 @@ class MockOrchestrator:
             old_kegs: The old kegs to upgrade from.
 
         Returns:
-            A sentinel report string.
+            A report marking every name natively upgraded.
         """
         self.upgraded_with = (names, old_kegs)
-        return f"report:{','.join(names)}"
+        self.report = InstallReport(outcomes={n: Outcome.NATIVE for n in names})
+
+        return self.report
 
 
 @pytest.fixture
@@ -41,8 +45,7 @@ def patched(monkeypatch) -> tuple[MockClient, dict]:
     Returns:
         A tuple of the mock client and the built dictionary.
     """
-    client = MockClient()
-    monkeypatch.setattr(svc.httpx, "AsyncClient", lambda: client)
+    client = patch_httpx(monkeypatch)
 
     built: dict = {}
 
@@ -76,13 +79,13 @@ def patched(monkeypatch) -> tuple[MockClient, dict]:
 
 async def test_returns_orchestrator_report(patched, mock_env) -> None:
     """Test that run_upgrade returns the orchestrator's report and forwards names + old_kegs."""
-    old = {"wget": Path("/p/Cellar/wget/1.0")}
+    old = {"wget": Path("/p/Cellar/wget/1.0"), "curl": Path("/p/Cellar/curl/8.0")}
     report = await svc.run_upgrade(
-        MockRepo(), ["wget"], old, run_brew=_run_brew, env=mock_env
+        MockRepo(), ["wget", "curl"], old, run_brew=_run_brew, env=mock_env
     )
-    assert report == "report:wget"
     assert MockOrchestrator.last is not None
-    assert MockOrchestrator.last.upgraded_with == (["wget"], old)
+    assert MockOrchestrator.last.upgraded_with == (["wget", "curl"], old)
+    assert report is MockOrchestrator.last.report  # Passed through untouched
 
 
 async def test_client_is_closed(patched, mock_env) -> None:
@@ -90,6 +93,13 @@ async def test_client_is_closed(patched, mock_env) -> None:
     client, _ = patched
     await svc.run_upgrade(MockRepo(), ["wget"], {}, run_brew=_run_brew, env=mock_env)
     assert client.closed is True
+
+
+async def test_client_gets_the_streaming_timeout(patched, mock_env) -> None:
+    """Test that upgrade builds its client with the same timeout install uses."""
+    client, _ = patched
+    await svc.run_upgrade(MockRepo(), ["wget"], {}, run_brew=_run_brew, env=mock_env)
+    assert client.kwargs["timeout"] is svc.PIPELINE_TIMEOUT
 
 
 async def test_build_orchestrator_receives_client_env_and_runner(
@@ -103,18 +113,6 @@ async def test_build_orchestrator_receives_client_env_and_runner(
     assert built["client"] is client
     assert built["env"] is mock_env
     assert built["run_brew"] is _run_brew
-
-
-async def test_old_kegs_forwarded(patched, mock_env) -> None:
-    """Test that the per-target old keg map reaches orchestrator.upgrade unchanged."""
-    old = {"wget": Path("/p/Cellar/wget/1.0"), "curl": Path("/p/Cellar/curl/8.0")}
-    await svc.run_upgrade(
-        MockRepo(), ["wget", "curl"], old, run_brew=_run_brew, env=mock_env
-    )
-    assert MockOrchestrator.last is not None
-    assert MockOrchestrator.last.upgraded_with is not None
-    _, fwd = MockOrchestrator.last.upgraded_with
-    assert fwd == old
 
 
 async def test_env_resolved_when_omitted(patched, mock_env, monkeypatch) -> None:

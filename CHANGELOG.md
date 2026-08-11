@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - An install that collides with a concurrent `brew` or brewery process now reports the conflict after a single lock timeout instead of one timeout per formula waiting behind it
 - A binary that already lists the relocated search path no longer fails to install; the duplicate `LC_RPATH` entry is harmless to the dynamic loader, where `install_name_tool` rejected it outright
 - Install timestamps in the table view are shown as `YYYY-MM-DD HH:MM` local time instead of a full ISO-8601 string
+- Upgrading a formula by name when it is already up to date now reports it as up to date instead of reinstalling it, matching the way a bulk upgrade already treated it
 
 ### Fixed
 
@@ -29,6 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - An unexpected error installing one formula no longer discards the whole install report, and no longer lets worker threads keep writing to the Cellar after the command has returned
 - A formula that fell back to `brew` successfully is no longer reported as an error
 - The bottle cache directory is created before it is probed, so a first run with no existing Homebrew cache works
+- A bottle download that pauses for a few seconds on a slow or congested connection is no longer abandoned and handed to `brew` to start over
 
 ### Security
 

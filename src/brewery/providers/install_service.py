@@ -20,6 +20,11 @@ from brewery.providers.orchestrator import (
 
 RunBrew = Callable[[list[str]], Awaitable[object]]
 
+# httpx's 5s default is too tight for streaming a bottle body; read/write
+# timeouts are per-socket-operation, not whole-request, so 30s bounds a stall
+# without capping how long a large bottle may take
+PIPELINE_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+
 
 def build_orchestrator(
     repo,
@@ -82,7 +87,7 @@ async def run_install(
     """
     env = env or get_brewery_env()
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
         orchestrator = build_orchestrator(
             repo,
             client=client,

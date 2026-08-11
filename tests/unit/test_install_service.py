@@ -5,11 +5,11 @@ from __future__ import annotations
 import functools
 
 import pytest
-from _stubs import MockClient, MockRepo, _run_brew
+from _stubs import MockClient, MockRepo, _run_brew, patch_httpx
 
 import brewery.providers.install_service as svc
 from brewery.providers.install_adapters import BrewAdapter, RepositoryCatalogAdapter
-from brewery.providers.orchestrator import InstallConfig
+from brewery.providers.orchestrator import InstallConfig, InstallReport, Outcome
 
 pytestmark = pytest.mark.asyncio
 
@@ -34,7 +34,7 @@ class MockDownloader:
 class MockOrchestrator:
     """Orchestrator stub that records construction kwargs and install calls."""
 
-    last = None
+    last: MockOrchestrator | None = None
 
     def __init__(self, **kwargs) -> None:
         """Initialise the mock orchestrator and record this instance.
@@ -44,19 +44,22 @@ class MockOrchestrator:
         """
         MockOrchestrator.last = self
         self.kwargs = kwargs
-        self.installed_with = None
+        self.installed_with: list[str] | None = None
+        self.report: InstallReport | None = None
 
-    async def install(self, names) -> str:
-        """Record the names and return a sentinel report string.
+    async def install(self, names) -> InstallReport:
+        """Record the names and return a sentinel report.
 
         Args:
             names: The list of formula names to install.
 
         Returns:
-            A sentinel string `"report:<comma-joined names>"`.
+            A report marking every name natively installed.
         """
         self.installed_with = names
-        return f"report:{','.join(names)}"
+        self.report = InstallReport(outcomes={n: Outcome.NATIVE for n in names})
+
+        return self.report
 
 
 @pytest.fixture
@@ -69,8 +72,8 @@ def patched(monkeypatch) -> MockClient:
     Returns:
         The MockClient instance that the patched AsyncClient constructor returns.
     """
-    client = MockClient()
-    monkeypatch.setattr(svc.httpx, "AsyncClient", lambda: client)
+    client = patch_httpx(monkeypatch)
+
     monkeypatch.setattr(svc, "Downloader", MockDownloader)
     monkeypatch.setattr(svc, "Orchestrator", MockOrchestrator)
 
@@ -83,9 +86,9 @@ async def test_returns_orchestrator_report(patched, mock_env) -> None:
     report = await svc.run_install(
         repo, ["wget", "curl"], run_brew=_run_brew, env=mock_env
     )
-    assert report == "report:wget,curl"
     assert MockOrchestrator.last is not None
     assert MockOrchestrator.last.installed_with == ["wget", "curl"]
+    assert report is MockOrchestrator.last.report  # Passed through untouched
 
 
 async def test_client_is_closed(patched, mock_env) -> None:
@@ -93,6 +96,16 @@ async def test_client_is_closed(patched, mock_env) -> None:
     repo = MockRepo()
     await svc.run_install(repo, ["wget"], run_brew=_run_brew, env=mock_env)
     assert patched.closed is True
+
+
+async def test_client_gets_the_streaming_timeout(patched, mock_env) -> None:
+    """Test that the client is built with the pipeline timeout, not httpx's 5s default."""
+    await svc.run_install(MockRepo(), ["wget"], run_brew=_run_brew, env=mock_env)
+    assert patched.kwargs["timeout"] is svc.PIPELINE_TIMEOUT
+
+    # Pinned: a bottle body is streamed, so the read budget is a stall budget
+    assert svc.PIPELINE_TIMEOUT.read == 30.0
+    assert svc.PIPELINE_TIMEOUT.connect == 10.0
 
 
 async def test_downloader_built_with_env_cache_and_client(patched, mock_env) -> None:
