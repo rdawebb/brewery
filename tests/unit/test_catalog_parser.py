@@ -273,6 +273,25 @@ class TestParseFormula:
         assert row["deprecated"] is True
         assert row["disabled"] is False
 
+    def test_post_install_set_by_declarative_steps(self) -> None:
+        """Test that post_install_steps alone gates the hook."""
+        row, _, _ = _parse_formula(
+            self._obj(
+                post_install_defined=False,
+                post_install_steps=[{"type": "mkdir_p", "path": {"path": "var/pkg"}}],
+            ),
+            platform=Platform("arm64", "macos", 14),
+        )
+        assert row["post_install"] is True
+
+    def test_post_install_false_without_steps_or_flag(self) -> None:
+        """Test that an empty step list with no flag leaves the hook off."""
+        row, _, _ = _parse_formula(
+            self._obj(post_install_defined=False, post_install_steps=[]),
+            platform=Platform("arm64", "macos", 14),
+        )
+        assert row["post_install"] is False
+
     def test_has_service_false_when_absent(self) -> None:
         """Test that has_service is False when no service block is present."""
         row, _, _ = _parse_formula(

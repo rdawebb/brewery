@@ -19,6 +19,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 
+- Formulae that ship default config (`etc` and `var` files) are copied into the prefix as real files, instead of being left in the keg and never appearing
+- An edited config is never overwritten; the new default is added beside it as `<name>.default`, while a config left untouched since an earlier version is updated in place
+- Post-install steps run again for the formulae that define them; they had stopped firing entirely after Homebrew moved the flag brewery was reading
 - The link plan is now built under the same lock that applies it, so a peer can no longer replace a directory while the plan is still reading it
 - A formula shipping the same file under two names no longer intermittently fails to install with a permission error, and both names keep the permissions the bottle shipped instead of one being left writable
 - The keg size cache is merged rather than rebuilt, so partial/failed commands no longer empty it and leave the next command measuring every keg again; it is also written atomically, so a concurrent refresh cannot catch it half-written

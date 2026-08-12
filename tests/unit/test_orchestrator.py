@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 import brewery.providers.orchestrator as orch_mod
-from brewery.core.errors import DownloadError, ManifestError
+from brewery.core.errors import DownloadError, LinkError, ManifestError
 from brewery.core.locks import lock_path
 from brewery.providers.downloader import BottleRef
 from brewery.providers.linker import link_keg
@@ -976,6 +976,151 @@ class TestUpgradeSwap:
         assert Path((prefix / "bin" / "foo").resolve()) == new / "bin" / "foo"
         assert Path((prefix / "opt" / "wget").resolve()) == new  # opt -> v2
         assert old.exists()  # Retained, no rmtree
+
+
+class TestBottledConfig:
+    """Test that a bottle's `.bottle/etc` and `.bottle/var` reach the prefix."""
+
+    def _pour(self, tmp_path, monkeypatch, *, keg_only: bool = False) -> tuple:
+        """Pour a staged keg carrying bottled config into a temp prefix.
+
+        Args:
+            tmp_path: The pytest-provided temporary directory.
+            monkeypatch: The monkeypatch fixture.
+            keg_only: Whether the formula is keg-only, so nothing is linked.
+
+        Returns:
+            The prefix and the `_NativeResult` of the pour.
+        """
+        prefix = tmp_path / "prefix"
+        cfg = InstallConfig(
+            prefix=prefix,
+            repository=prefix / "Library",
+            api_path="/api",
+            staging_root=prefix / "var" / "staging",
+        )
+
+        staged = tmp_path / "staged"
+        (staged / "bin").mkdir(parents=True)
+        (staged / "bin" / "foo").write_text("v1")
+        (staged / ".bottle" / "etc" / "pkg").mkdir(parents=True)
+        (staged / ".bottle" / "etc" / "pkg" / "pkg.conf").write_text("default\n")
+        (staged / ".bottle" / "var" / "cache" / "pkg").mkdir(parents=True)
+
+        monkeypatch.setattr(
+            orch_mod, "extract_bottle", lambda bp, st, *, sink=None: staged
+        )
+        monkeypatch.setattr(orch_mod, "StreamRelocator", lambda **kw: _NullSink())
+        monkeypatch.setattr(orch_mod, "write_receipt", lambda d, r: None)
+
+        fr = MockFormula("pkg", keg_only=keg_only)
+        fr.bottle_cellar = ":any_skip_relocation"
+        o = Orchestrator(
+            catalog=MockCatalogPort({}, {}),
+            downloader=MockDownloader(),
+            tab_fetcher=MockTab(),
+            brew=MockBrew(),
+            config=cfg,
+        )
+
+        return prefix, o._native_install(
+            "pkg", fr, Path("bottle"), _tab("pkg"), True, [], []
+        )
+
+    @pytest.mark.integration
+    async def test_config_is_copied_into_the_prefix(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Test that bottled config lands as a real file, not a link."""
+        prefix, res = self._pour(tmp_path, monkeypatch)
+
+        conf = prefix / "etc" / "pkg" / "pkg.conf"
+        assert res.stage is None
+        assert res.config_error is None
+        assert conf.read_text() == "default\n"
+        assert not conf.is_symlink()
+        assert (prefix / "var" / "cache" / "pkg").is_dir()
+
+    @pytest.mark.integration
+    async def test_keg_only_formula_still_gets_its_config(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Test that config is restored even though a keg-only formula is not linked.
+
+        Args:
+            tmp_path: The pytest-provided temporary directory.
+            monkeypatch: The monkeypatch fixture.
+        """
+        prefix, res = self._pour(tmp_path, monkeypatch, keg_only=True)
+
+        assert res.stage is None
+        assert (prefix / "etc" / "pkg" / "pkg.conf").read_text() == "default\n"
+        assert not (prefix / "bin" / "foo").exists()  # Keg-only: nothing linked
+
+    @pytest.mark.integration
+    async def test_config_is_copied_even_when_linking_failed(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Test that a link failure does not cost the formula its config."""
+
+        def boom(*args, **kwargs) -> None:
+            """Fail the link stage.
+
+            Args:
+                *args: Ignored positional arguments.
+                **kwargs: Ignored keyword arguments.
+
+            Raises:
+                LinkError: Always.
+            """
+            raise LinkError([("/prefix/bin/foo", "an existing file")])
+
+        monkeypatch.setattr(orch_mod, "link_keg", boom)
+        prefix, res = self._pour(tmp_path, monkeypatch)
+
+        assert res.stage == "link"
+        assert (prefix / "etc" / "pkg" / "pkg.conf").read_text() == "default\n"
+
+    @pytest.mark.integration
+    async def test_a_failed_copy_is_recorded_on_the_result(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Test that a config copy failure is carried back, not raised."""
+
+        def boom(keg, *, prefix) -> None:
+            """Fail the config copy.
+
+            Args:
+                keg: The keg directory, ignored.
+                prefix: The prefix, ignored.
+
+            Raises:
+                OSError: Always.
+            """
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr(orch_mod, "install_etc_var", boom)
+        _, res = self._pour(tmp_path, monkeypatch)
+
+        assert res.stage is None  # The keg is installed and linked regardless
+        assert res.config_error == "read-only file system"
+
+    async def test_config_failure_notes_but_does_not_change_the_outcome(self) -> None:
+        """Test that a failed config copy leaves the formula installed, with a note."""
+        cat = MockCatalogPort({"pkg": MockFormula("pkg")}, {"pkg": []})
+        native = {
+            "pkg": _NativeResult(
+                stage=None,
+                dest=Path("/opt/hb/Cellar/pkg/1.0"),
+                config_error="read-only file system",
+            )
+        }
+        o = _make(cat, MockDownloader(), MockTab(), MockBrew(), native=native)
+
+        report = await o.install(["pkg"])
+
+        assert report.outcomes["pkg"] is Outcome.NATIVE
+        assert "config: read-only file system" in report.notes["pkg"]
 
 
 class TestRackLock:

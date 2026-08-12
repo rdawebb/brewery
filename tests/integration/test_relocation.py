@@ -20,6 +20,7 @@ from test_extraction import make_tar
 
 from brewery.core.config import get_brewery_env
 from brewery.core.errors import RelocationError
+from brewery.providers.bottle_config import install_etc_var
 from brewery.providers.extractor import extract_bottle
 from brewery.providers.relocator import RelocationResult, StreamRelocator
 from brewery.providers.relocator import keg as keg_mod
@@ -286,6 +287,39 @@ class TestKegBoundary:
         rb = keg.parent / ".brew" / "foo.rb"
         assert rb.read_bytes() == b'prefix "@@HOMEBREW_PREFIX@@"\n'
         assert result.changed_files == []
+
+    def test_dotbottle_config_is_relocated_then_copied_into_the_prefix(
+        self, tmp_path
+    ) -> None:
+        """Test bottled config is substituted in-stream and copied in as a real file.
+
+        `.bottle/etc` sits inside the version directory, so it is part of the keg
+        and its placeholders should be rewritten like any other listed text file.
+        """
+        base = _keg()
+        keg, result = _pour(
+            tmp_path,
+            [
+                ("file", f"{base}/bin/x", b"plain\n", 0o755),
+                ("dir", f"{base}/.bottle/etc/foo", 0o755),
+                (
+                    "file",
+                    f"{base}/.bottle/etc/foo/foo.conf",
+                    b'root = "@@HOMEBREW_PREFIX@@/var/foo"\n',
+                    0o644,
+                ),
+            ],
+            text_files=[".bottle/etc/foo/foo.conf"],
+        )
+
+        prefix = tmp_path / "prefix"
+        copied = install_etc_var(keg, prefix=prefix)
+
+        conf = prefix / "etc" / "foo" / "foo.conf"
+        assert result.changed_files == [".bottle/etc/foo/foo.conf"]
+        assert conf.read_bytes() == f'root = "{PREFIX}/var/foo"\n'.encode()
+        assert not conf.is_symlink()
+        assert copied.copied == ["etc/foo/foo.conf"]
 
     def test_ar_archive_with_a_placeholder_is_rejected(self, tmp_path) -> None:
         """Test a static archive is deferred and still fails the marker check.

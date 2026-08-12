@@ -251,7 +251,11 @@ def _parse_formula(
         "version_scheme": obj.get("version_scheme", 0),
         "keg_only": bool(obj.get("keg_only", False)),
         "has_service": bool(obj.get("service")),
-        "post_install": bool(obj.get("post_install_defined", False)),
+        # Core has migrated to declarative `post_install_steps`, so the older
+        # `post_install_defined` flag is false everywhere; both still gate the hook
+        "post_install": bool(
+            obj.get("post_install_defined", False) or obj.get("post_install_steps")
+        ),
         "bottle_url": bottle.url if bottle else None,
         "bottle_sha256": bottle.sha256 if bottle else None,
         "bottle_cellar": bottle.cellar if bottle else None,
