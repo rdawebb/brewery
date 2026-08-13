@@ -84,6 +84,10 @@ class _Held:
     fd: int = -1
     depth: int = 0
 
+    # `time.monotonic()` of the last acquisition that waited out its whole budget
+    # and still lost, or 0.0 if the last attempt succeeded
+    contended_at: float = 0.0
+
 
 _REGISTRY: dict[Path, _Held] = {}
 _REGISTRY_GUARD = threading.Lock()
@@ -116,13 +120,21 @@ def _release(fd: int) -> None:
         os.close(fd)
 
 
-def _acquire_fd(path: Path, *, subject: str, deadline: float) -> int:
+def _acquire_fd(
+    path: Path, *, subject: str, deadline: float, held: _Held, grace: float
+) -> int:
     """Open and `flock` a lock file, polling until `deadline`.
+
+    If a previous caller in this process already waited out its whole budget on a
+    peer, the poll loop is skipped: the first non-blocking attempt becomes a probe,
+    and losing it fails immediately.
 
     Args:
         path: The lock file to create and lock.
         subject: What is being locked, for the error message.
         deadline: `time.monotonic()` value past which contention is fatal.
+        held: This process's record for `path`, carrying the contention latch.
+        grace: How long a recorded contention stays trusted; the caller's own timeout.
 
     Returns:
         A locked file descriptor, owned by the caller.
@@ -135,6 +147,9 @@ def _acquire_fd(path: Path, *, subject: str, deadline: float) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
     delay = _POLL_MIN
     changed = 0
+    probe_only = bool(held.contended_at) and (
+        time.monotonic() - held.contended_at < grace
+    )
 
     while True:
         # Python opens descriptors non-inheritable (PEP 446), which is brew's
@@ -145,8 +160,18 @@ def _acquire_fd(path: Path, *, subject: str, deadline: float) -> int:
 
         except BlockingIOError:
             os.close(fd)
-            remaining = deadline - time.monotonic()
+            now = time.monotonic()
+
+            # The peer a previous caller lost to is still there; do not re-wait
+            if probe_only:
+                raise OperationInProgressError(subject, path=path) from None
+
+            remaining = deadline - now
             if remaining <= 0:
+                # Fail-fast caller found the lock busy; probe-only re-raises
+                if grace > 0:
+                    held.contended_at = now
+
                 raise OperationInProgressError(subject, path=path) from None
 
             time.sleep(min(delay, remaining))
@@ -160,6 +185,8 @@ def _acquire_fd(path: Path, *, subject: str, deadline: float) -> int:
         # Locked file has been replaced; retry with a new FD
         try:
             if os.fstat(fd).st_ino == path.stat().st_ino:
+                held.contended_at = 0.0
+
                 return fd
 
         except FileNotFoundError:
@@ -181,6 +208,10 @@ def file_lock(path: Path, *, subject: str, timeout: float = 0.0) -> Iterator[Non
 
     Reentrant within a thread; exclusive against other threads and processes.
     The lock file is left in place on release, and removed by `cleanup`.
+
+    Once one caller has waited out `timeout` and lost to a peer process, callers
+    that follow it within `timeout` probe once and fail immediately rather than
+    each waiting again.
 
     Args:
         path: The lock file.
@@ -206,7 +237,9 @@ def file_lock(path: Path, *, subject: str, timeout: float = 0.0) -> Iterator[Non
 
     try:
         if held.depth == 0:
-            held.fd = _acquire_fd(path, subject=subject, deadline=deadline)
+            held.fd = _acquire_fd(
+                path, subject=subject, deadline=deadline, held=held, grace=timeout
+            )
 
         held.depth += 1
 

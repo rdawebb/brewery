@@ -28,6 +28,7 @@ from brewery.core.errors import (
 )
 from brewery.core.locks import formula_lock
 from brewery.core.logging import BreweryLogger, get_logger
+from brewery.providers.bottle_config import install_etc_var
 from brewery.providers.cellar import install_to_cellar, rmtree
 from brewery.providers.downloader import BottleRef, ProgressCb
 from brewery.providers.extractor import extract_bottle
@@ -40,7 +41,7 @@ from brewery.providers.receipt import (
     read_receipt,
     write_receipt,
 )
-from brewery.providers.relocator import formula_tokens, relocate_keg
+from brewery.providers.relocator import StreamRelocator, formula_tokens
 from brewery.providers.retention import mark_replaced
 
 log: BreweryLogger = get_logger(__name__)
@@ -386,6 +387,7 @@ class _NativeResult:
     stage: str | None  # None = success; else 'lock' | 'install' | 'link'
     dest: Path | None = None
     error: str | None = None
+    config_error: str | None = None  # Bottled etc/var config that would not copy
 
 
 class Orchestrator:
@@ -775,6 +777,9 @@ class Orchestrator:
         if old is not None and result.stage != "install":
             await asyncio.to_thread(mark_replaced, old, by=fr.version)
 
+        if result.config_error is not None:
+            report.add_note(name, f"config: {result.config_error}")
+
         if result.stage is None:
             if fr.post_install:
                 await self.brew.post_install(name)  # Best-effort hook
@@ -898,9 +903,10 @@ class Orchestrator:
 
         dest: Path | None = None
         try:
-            keg = extract_bottle(bottle_path, staging)
-            relocate_keg(
-                keg,
+            # Relocation runs inside extraction: text members are substituted
+            # before they are written and symlink targets are resolved before
+            # links are created
+            sink = StreamRelocator(
                 prefix=self.cfg.prefix,
                 cellar=self.cfg.cellar,
                 repository=self.cfg.repository,
@@ -913,6 +919,9 @@ class Orchestrator:
                 ),
                 text_files=tab.changed_files,
             )
+            keg = extract_bottle(bottle_path, staging, sink=sink)
+            sink.finish(keg)
+
             dest = install_to_cellar(
                 keg, prefix=self.cfg.prefix, name=name, version=pkg_version
             )
@@ -929,6 +938,7 @@ class Orchestrator:
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
+        result = _NativeResult(stage=None, dest=dest)
         try:
             if old_keg is not None and old_keg != dest:
                 unlink_keg(old_keg, prefix=self.cfg.prefix, name=name)
@@ -937,9 +947,18 @@ class Orchestrator:
 
         # A contended structure lock is a link failure, not an install failure
         except (LinkError, OperationInProgressError, OSError) as exc:
-            return _NativeResult(stage="link", dest=dest, error=str(exc))
+            result = _NativeResult(stage="link", dest=dest, error=str(exc))
 
-        return _NativeResult(stage=None, dest=dest)
+        # After linking, so the keg's own `etc` links land first and the copy
+        # arbitrates on top, even if that linking failed (as in `brew`)
+        try:
+            install_etc_var(dest, prefix=self.cfg.prefix)
+
+        except OSError as exc:
+            log.warning(event="etc_var_failed", formula=name, error=str(exc))
+            result.config_error = str(exc)
+
+        return result
 
     def _cleanup_partial(self, dest: Path, name: str) -> None:
         """Remove a keg left in the Cellar by a receipt-stage failure, so brew can re-try.

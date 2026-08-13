@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING
 import pytest
 
 if TYPE_CHECKING:
+    import httpx
+
     from brewery.core.config import BreweryENV
 
 # Isolates on disk state at import time, before any brewery module is imported
@@ -100,7 +102,7 @@ class MockHTTPClient:
         headers: dict[str, str] | None = None,
         timeout: float = 30.0,
         follow_redirects: bool = False,
-    ) -> None:
+    ) -> httpx.Response | None:
         """
         Simulate an HTTP GET request.
 
@@ -109,6 +111,12 @@ class MockHTTPClient:
             headers: Headers to include in the request.
             timeout: Request timeout.
             follow_redirects: Whether to follow redirects.
+
+        Returns:
+            The canned response for `url`, or None if none was configured.
+
+        Raises:
+            AssertionError: If a mapping was given and `url` is not in it.
         """
         self.last_url = url
         self.last_headers = dict(headers or {})

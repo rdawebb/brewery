@@ -314,21 +314,109 @@ class TestAttachSizes:
         assert rec.size_kb is None
 
     def test_uninstalled_dropped_from_cache(self, kegs, tmp_path) -> None:
-        """Test that the rebuilt size cache drops packages no longer present.
+        """Test that a keg no longer on disk is pruned from the cache file."""
+        import shutil
 
-        attach_sizes rebuilds the cache from current records, so a package sized
-        in one run but absent in the next is pruned from the cache file.
-        """
         a, b = kegs
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()
         attach_sizes([_record("a", str(a)), _record("b", str(b))], cache_dir=cache_dir)
 
-        # Second run includes only "a"
+        # "b" is uninstalled, so the next run has nothing to keep its entry for
+        shutil.rmtree(b)
         attach_sizes([_record("a", str(a))], cache_dir=cache_dir)
         data = orjson.loads((cache_dir / "keg_sizes.json").read_bytes())
         assert "a" in data
         assert "b" not in data
+
+    def test_a_package_absent_from_the_records_is_kept(self, kegs, tmp_path) -> None:
+        """Test that sizing a subset does not evict the packages it leaves out."""
+        a, b = kegs
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        attach_sizes([_record("a", str(a)), _record("b", str(b))], cache_dir=cache_dir)
+
+        attach_sizes([_record("a", str(a))], cache_dir=cache_dir)
+        data = orjson.loads((cache_dir / "keg_sizes.json").read_bytes())
+        assert "b" in data, "a keg that is still installed was evicted"
+
+    def test_an_empty_record_list_keeps_the_cache(self, kegs, tmp_path) -> None:
+        """Test that a scan returning nothing does not empty the cache file."""
+        a, b = kegs
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        attach_sizes([_record("a", str(a)), _record("b", str(b))], cache_dir=cache_dir)
+
+        attach_sizes([], cache_dir=cache_dir)
+        data = orjson.loads((cache_dir / "keg_sizes.json").read_bytes())
+        assert set(data) == {"a", "b"}
+
+    def test_du_failure_does_not_evict_the_previous_size(
+        self, kegs, tmp_path, monkeypatch
+    ) -> None:
+        """Test that a keg whose re-measure failed keeps its old cache entry."""
+        import os
+        import time
+
+        a, _ = kegs
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        attach_sizes([_record("a", str(a))], cache_dir=cache_dir)
+
+        # Invalidate by mtime so the next call has to measure, then break du
+        os.utime(a, (time.time() + 10, time.time() + 10))
+
+        def _fail(*args, **kwargs) -> None:
+            """Simulate du failing to spawn."""
+            raise OSError("spawn failed")
+
+        monkeypatch.setattr(keg_sizes_mod.subprocess, "run", _fail)
+        attach_sizes([_record("a", str(a))], cache_dir=cache_dir)
+
+        data = orjson.loads((cache_dir / "keg_sizes.json").read_bytes())
+        assert "a" in data
+
+    def test_size_cache_is_written_atomically(
+        self, kegs, tmp_path, monkeypatch
+    ) -> None:
+        """Test that a failed write leaves the previous cache intact."""
+        a, b = kegs
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        attach_sizes([_record("a", str(a)), _record("b", str(b))], cache_dir=cache_dir)
+        before = (cache_dir / "keg_sizes.json").read_bytes()
+
+        real_write = Path.write_bytes
+
+        def _write_then_fail(self, data) -> None:
+            """Write, then fail as a crash between truncating and finishing would.
+
+            Args:
+                self: The path being written.
+                data: The bytes to write.
+            """
+            real_write(self, data)
+            raise OSError("no space left on device")
+
+        monkeypatch.setattr(Path, "write_bytes", _write_then_fail)
+        keg_sizes_mod._save_size_cache(cache_dir=cache_dir, data={"c": [1, 2, "/c"]})
+
+        assert (cache_dir / "keg_sizes.json").read_bytes() == before
+        assert not list(cache_dir.glob("*.tmp"))
+
+    def test_an_older_schema_entry_is_still_read(self, kegs, tmp_path) -> None:
+        """Test that a two-field entry from an earlier version still hits."""
+        a, _ = kegs
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        mtime_ns = a.stat().st_mtime_ns
+        (cache_dir / "keg_sizes.json").write_bytes(
+            orjson.dumps({"a": [mtime_ns, 4242]})
+        )
+
+        rec = _record("a", str(a))
+        attach_sizes([rec], cache_dir=cache_dir)
+        assert rec.size_kb == 4242
 
     def test_du_failure_leaves_size_none(self, kegs, tmp_path, monkeypatch) -> None:
         """Test that a du spawn failure leaves sizes unset rather than raising."""

@@ -494,38 +494,12 @@ async def test_progress_total_none_without_content_length(tmp_path) -> None:
     assert seen and all(total is None for _, total in seen)
 
 
-async def test_fetch_all_returns_name_to_path_mapping(tmp_path) -> None:
-    """Test that fetch_all returns a mapping from names to paths."""
-    blobs = {f"f{i}": _blob(20 + i) for i in range(4)}
-    refs = [_ref(b, name=n) for n, b in blobs.items()]
-    by_sha = {hashlib.sha256(b).hexdigest(): b for b in blobs.values()}
+async def test_concurrent_fetches_are_bounded(tmp_path) -> None:
+    """Test that in-flight downloads never exceed max_concurrency.
 
-    def handler(req: httpx.Request) -> httpx.Response:
-        """Redirect requests to the CDN.
-
-        Args:
-            req: The HTTP request to redirect.
-
-        Returns:
-            The HTTP response with the redirect location.
-        """
-        if req.url.host == "ghcr.io":
-            return httpx.Response(307, headers={"Location": CDN + "?" + req.url.path})
-        sha = req.url.params.get("") or req.url.query.decode()
-
-        # Map back to the blob via the sha embedded in the original ghcr path
-        sha = sha.rsplit("sha256:", 1)[-1]
-        return httpx.Response(200, content=by_sha[sha])
-
-    async with _make(tmp_path, handler) as dl:
-        result = await dl.fetch_all(refs)
-    assert set(result) == set(blobs)
-    for ref in refs:
-        assert result[ref.name] == dl.cache_path(ref.sha256)
-
-
-async def test_fetch_all_bounds_concurrency(tmp_path) -> None:
-    """Test that fetch_all respects the max_concurrency limit."""
+    The semaphore lives in `fetch`, so the bound holds for any caller that runs
+    several fetches at once.
+    """
     live = _LiveCounter()
     blobs = [_blob(40 + i, size=2048) for i in range(6)]
     by_sha = {hashlib.sha256(b).hexdigest(): b for b in blobs}
@@ -544,32 +518,5 @@ async def test_fetch_all_bounds_concurrency(tmp_path) -> None:
         return httpx.Response(200, stream=_SlowStream(by_sha[sha], live))
 
     async with _make(tmp_path, handler, max_concurrency=2) as dl:
-        await dl.fetch_all(refs)
+        await asyncio.gather(*(dl.fetch(ref) for ref in refs))
     assert live.peak <= 2, f"in-flight peaked at {live.peak}, limit was 2"
-
-
-async def test_fetch_all_fails_fast_on_bad_ref(tmp_path, no_backoff) -> None:
-    """Test that fetch_all fails fast on a bad reference."""
-    good = _blob(60)
-    bad_url = _ref(_blob(61), name="bad", host="example.org").url
-
-    def handler(req: httpx.Request) -> httpx.Response:
-        """Handle HTTP requests.
-
-        Args:
-            req: The HTTP request to handle.
-
-        Returns:
-            The HTTP response with the requested content.
-        """
-        if "bad" in req.url.path:
-            return httpx.Response(404)
-        return httpx.Response(200, content=good)
-
-    refs = [
-        _ref(good, name="ok", host="example.org"),
-        BottleRef("bad", bad_url, "1" * 64),
-    ]
-    async with _make(tmp_path, handler, max_retries=1) as dl:
-        with pytest.raises(DownloadError):
-            await dl.fetch_all(refs)

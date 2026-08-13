@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 import brewery.providers.orchestrator as orch_mod
-from brewery.core.errors import DownloadError, ManifestError
+from brewery.core.errors import DownloadError, LinkError, ManifestError
 from brewery.core.locks import lock_path
 from brewery.providers.downloader import BottleRef
 from brewery.providers.linker import link_keg
@@ -26,6 +26,17 @@ from brewery.providers.orchestrator import (
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
 CFG = InstallConfig(prefix=Path("/opt/hb"), repository=Path("/opt/hb"), api_path="/api")
+
+
+class _NullSink:
+    """Stands in for StreamRelocator where the keg is already staged."""
+
+    def finish(self, keg: Path) -> None:
+        """Do nothing, as there is nothing staged to relocate.
+
+        Args:
+            keg: The keg directory, ignored.
+        """
 
 
 def _tab(name: str = "x") -> BottleTabInfo:
@@ -80,11 +91,11 @@ class MockFormula:
         self.bottle_rebuild = 0
 
 
-class MockCatalog:
-    """Mock catalog class for testing."""
+class MockCatalogPort:
+    """Mock of Orchestrator's CatalogPort for testing."""
 
     def __init__(self, formulae, deps, satisfied=(), aliases=None) -> None:
-        """Initialises a mock catalog.
+        """Initialises a mock CatalogPort.
 
         Args:
             formulae: The formulae to include in the catalog.
@@ -97,7 +108,7 @@ class MockCatalog:
         self._sat = set(satisfied)
         self._al = aliases or {}
 
-    def get_formula(self, name: str):
+    def get_formula(self, name: str) -> MockFormula | None:
         """Gets a formula by name.
 
         Args:
@@ -360,7 +371,7 @@ class TestSchedulingOrdering:
     async def test_installs_in_dependency_order(self) -> None:
         """Tests that installations occur in the order dictated by their dependencies."""
         deps = {"app": ["libA", "libB"], "libA": ["libC"], "libB": [], "libC": []}
-        cat = MockCatalog(_graph(deps), deps)
+        cat = MockCatalogPort(_graph(deps), deps)
         order = []
         o = _make(cat, MockDownloader(), MockTab(), MockBrew(), native={}, order=order)
         report = await o.install(["app"])
@@ -371,7 +382,7 @@ class TestSchedulingOrdering:
     async def test_leaf_dep_installs_while_large_keg_downloads(self) -> None:
         """Tests that leaf dependencies are installed while large keg downloads are in progress."""
         deps = {"big": ["small"], "small": []}
-        cat = MockCatalog(_graph(deps), deps)
+        cat = MockCatalogPort(_graph(deps), deps)
         dl = MockDownloader(delays={"big": 0.2, "small": 0.0})
         order = []
         o = _make(cat, dl, MockTab(), MockBrew(), native={}, order=order)
@@ -384,7 +395,7 @@ class TestSchedulingOrdering:
     async def test_satisfied_deps_are_dropped(self) -> None:
         """Tests that satisfied dependencies are dropped from the installation plan."""
         deps = {"app": ["dep"], "dep": []}
-        cat = MockCatalog(_graph(deps), deps, satisfied={"dep"})
+        cat = MockCatalogPort(_graph(deps), deps, satisfied={"dep"})
         order = []
         o = _make(cat, MockDownloader(), MockTab(), MockBrew(), native={}, order=order)
         report = await o.install(["app"])
@@ -394,7 +405,7 @@ class TestSchedulingOrdering:
     async def test_nothing_to_do_when_all_satisfied(self) -> None:
         """Tests that nothing is done when all dependencies are satisfied."""
         deps = {"x": []}
-        cat = MockCatalog(_graph(deps), deps, satisfied={"x"})
+        cat = MockCatalogPort(_graph(deps), deps, satisfied={"x"})
         o = _make(cat, MockDownloader(), MockTab(), MockBrew(), native={})
         report = await o.install(["x"])
         assert report.outcomes == {}
@@ -405,7 +416,7 @@ class TestFallbackPaths:
 
     async def test_download_failure_falls_back_to_brew_install(self) -> None:
         """Tests that download failures fall back to brew install."""
-        cat = MockCatalog({"x": MockFormula("x")}, {"x": []})
+        cat = MockCatalogPort({"x": MockFormula("x")}, {"x": []})
         brew = MockBrew()
         o = _make(cat, FailingDownloader(), MockTab(), brew, native={})
         report = await o.install(["x"])
@@ -414,7 +425,7 @@ class TestFallbackPaths:
 
     async def test_missing_tab_falls_back_to_brew_install(self) -> None:
         """Tests that missing tabs fall back to brew install."""
-        cat = MockCatalog({"x": MockFormula("x")}, {"x": []})
+        cat = MockCatalogPort({"x": MockFormula("x")}, {"x": []})
         brew = MockBrew()
         o = _make(cat, MockDownloader(), MockTab(fail={"x"}), brew, native={})
         report = await o.install(["x"])
@@ -422,7 +433,7 @@ class TestFallbackPaths:
 
     async def test_install_stage_failure_falls_back_to_brew_install(self) -> None:
         """Tests that install stage failures fall back to brew install."""
-        cat = MockCatalog({"x": MockFormula("x")}, {"x": []})
+        cat = MockCatalogPort({"x": MockFormula("x")}, {"x": []})
         brew = MockBrew()
         o = _make(
             cat,
@@ -437,7 +448,7 @@ class TestFallbackPaths:
 
     async def test_link_failure_falls_back_to_brew_link(self) -> None:
         """Tests that link failures fall back to brew link."""
-        cat = MockCatalog({"x": MockFormula("x")}, {"x": []})
+        cat = MockCatalogPort({"x": MockFormula("x")}, {"x": []})
         brew = MockBrew(link_ok=True)
         o = _make(
             cat,
@@ -454,7 +465,7 @@ class TestFallbackPaths:
 
     async def test_link_failure_then_brew_link_fails_leaves_unlinked(self) -> None:
         """Tests that link failures followed by brew link failures leave the formula unlinked."""
-        cat = MockCatalog({"x": MockFormula("x")}, {"x": []})
+        cat = MockCatalogPort({"x": MockFormula("x")}, {"x": []})
         brew = MockBrew(link_ok=False)
         o = _make(
             cat,
@@ -468,7 +479,7 @@ class TestFallbackPaths:
 
     async def test_brew_install_failure_marks_failed(self) -> None:
         """Tests that brew install failures are marked as failed."""
-        cat = MockCatalog({"x": MockFormula("x")}, {"x": []})
+        cat = MockCatalogPort({"x": MockFormula("x")}, {"x": []})
         brew = MockBrew(install_ok=False)
         o = _make(cat, FailingDownloader(), MockTab(), brew, native={})
         report = await o.install(["x"])
@@ -478,7 +489,7 @@ class TestFallbackPaths:
     async def test_dependent_skipped_when_dependency_fails(self) -> None:
         """Tests that dependent formulas are skipped when a dependency fails."""
         deps = {"app": ["badlib"], "badlib": []}
-        cat = MockCatalog(_graph(deps), deps)
+        cat = MockCatalogPort(_graph(deps), deps)
         brew = MockBrew(install_ok=False)  # badlib's brew fallback also fails
         o = _make(
             cat,
@@ -499,7 +510,7 @@ class TestKegOnlyPostInstall:
         """Tests that aliases are resolved on the loop thread, not the worker thread."""
         import threading
 
-        cat = MockCatalog(
+        cat = MockCatalogPort(
             {"x": MockFormula("x")}, {"x": []}, aliases={"x": ["x-alias"]}
         )
         main_ident = threading.get_ident()
@@ -549,7 +560,7 @@ class TestKegOnlyPostInstall:
     async def test_report_records_failure_reasons(self) -> None:
         """Tests that failure reasons are recorded in the report."""
         deps = {"app": ["badlib"], "badlib": []}
-        cat = MockCatalog(_graph(deps), deps)
+        cat = MockCatalogPort(_graph(deps), deps)
         brew = MockBrew(install_ok=False)
         o = _make(
             cat,
@@ -566,8 +577,8 @@ class TestKegOnlyPostInstall:
         )
 
     async def test_successful_brew_fallback_is_a_note_not_an_error(self) -> None:
-        """A formula brew poured successfully is diagnosed but not an error."""
-        cat = MockCatalog({"x": MockFormula("x")}, {"x": []})
+        """Test that a formula brew poured successfully is diagnosed but not an error."""
+        cat = MockCatalogPort({"x": MockFormula("x")}, {"x": []})
         o = _make(
             cat,
             MockDownloader(),
@@ -583,8 +594,8 @@ class TestKegOnlyPostInstall:
         assert report.errors == {}  # ...but it did not fail
 
     async def test_locked_rack_fails_without_a_brew_fallback(self) -> None:
-        """brew locks the same rack, so retrying through brew would fail too."""
-        cat = MockCatalog({"x": MockFormula("x")}, {"x": []})
+        """Test that brew locks the same rack, so retrying through brew would fail too."""
+        cat = MockCatalogPort({"x": MockFormula("x")}, {"x": []})
         brew = MockBrew()
         o = _make(
             cat,
@@ -600,7 +611,7 @@ class TestKegOnlyPostInstall:
         assert brew.calls == []  # No pointless fallback onto the same lock
 
     async def test_notes_accumulate_rather_than_clobber(self) -> None:
-        """A second diagnostic for one formula does not overwrite the first."""
+        """Test that a second diagnostic for one formula does not overwrite the first."""
         report = InstallReport()
         report.add_note("x", "first")
         report.add_note("x", "second")
@@ -611,9 +622,9 @@ class TestKegOnlyPostInstall:
         assert report.errors["x"] == "first; second"
 
     async def test_unexpected_error_fails_one_formula_not_the_run(self) -> None:
-        """An uncaught exception degrades to FAILED instead of losing the report."""
+        """Test that an uncaught exception degrades to FAILED instead of losing the report."""
         deps = {"app": ["lib"], "lib": [], "other": []}
-        cat = MockCatalog(_graph(deps), deps)
+        cat = MockCatalogPort(_graph(deps), deps)
         o = _make(cat, MockDownloader(), MockTab(), MockBrew(install_ok=False))
 
         def mock_native(
@@ -636,14 +647,14 @@ class TestKegOnlyPostInstall:
 
     async def test_keg_only_reports_native_keg_only(self) -> None:
         """Tests that keg-only formulas are reported as native keg-only."""
-        cat = MockCatalog({"ko": MockFormula("ko", keg_only=True)}, {"ko": []})
+        cat = MockCatalogPort({"ko": MockFormula("ko", keg_only=True)}, {"ko": []})
         o = _make(cat, MockDownloader(), MockTab(), MockBrew(), native={})
         report = await o.install(["ko"])
         assert report.outcomes["ko"] is Outcome.NATIVE_KEG_ONLY
 
     async def test_post_install_hook_invoked(self) -> None:
         """Tests that post-install hooks are invoked."""
-        cat = MockCatalog({"p": MockFormula("p", post_install=True)}, {"p": []})
+        cat = MockCatalogPort({"p": MockFormula("p", post_install=True)}, {"p": []})
         brew = MockBrew()
         o = _make(cat, MockDownloader(), MockTab(), brew, native={})
         await o.install(["p"])
@@ -659,7 +670,7 @@ class TestRuntimeDeps:
         formulae = {n: MockFormula(n) for n in deps}
         formulae["lib"].revision = 2  # -> pkg_version 1.0_2
         formulae["sub"].bottle_rebuild = 3
-        cat = MockCatalog(formulae, deps)
+        cat = MockCatalogPort(formulae, deps)
         o = Orchestrator(
             catalog=cat,
             downloader=MockDownloader(),
@@ -684,7 +695,7 @@ class TestPartialCleanup:
         """Tests that partial cleanup removes the keg and dangling opt."""
         cfg = InstallConfig(prefix=tmp_path, repository=tmp_path, api_path="/api")
         o = Orchestrator(
-            catalog=MockCatalog({}, {}),
+            catalog=MockCatalogPort({}, {}),
             downloader=MockDownloader(),
             tab_fetcher=MockTab(),
             brew=MockBrew(),
@@ -710,7 +721,7 @@ class TestPartialCleanup:
         """Tests that partial cleanup keeps the opt symlink pointing at another version."""
         cfg = InstallConfig(prefix=tmp_path, repository=tmp_path, api_path="/api")
         o = Orchestrator(
-            catalog=MockCatalog({}, {}),
+            catalog=MockCatalogPort({}, {}),
             downloader=MockDownloader(),
             tab_fetcher=MockTab(),
             brew=MockBrew(),
@@ -736,7 +747,7 @@ class TestUpgradeForceGate:
 
     async def test_satisfied_target_forced_dep_skipped(self) -> None:
         """Test that a satisfied target with a forced dep is skipped."""
-        cat = MockCatalog(
+        cat = MockCatalogPort(
             {"wget": MockFormula("wget"), "openssl": MockFormula("openssl")},
             {"wget": ["openssl"]},
             satisfied={"wget", "openssl"},
@@ -786,7 +797,9 @@ class TestUpgradeMarking:
     async def test_marks_old_on_native_success(self, monkeypatch) -> None:
         """Test that old version is marked when native upgrade succeeds."""
         old = Path("/hb/Cellar/wget/1.0")
-        cat = MockCatalog({"wget": self._row("2.0")}, {"wget": []}, satisfied={"wget"})
+        cat = MockCatalogPort(
+            {"wget": self._row("2.0")}, {"wget": []}, satisfied={"wget"}
+        )
         o = _make(
             cat,
             MockDownloader(),
@@ -805,7 +818,7 @@ class TestUpgradeMarking:
     async def test_no_mark_when_pour_falls_back_to_brew(self, monkeypatch) -> None:
         """Test that no mark is recorded when pour falls back to brew."""
         old = Path("/hb/Cellar/wget/1.0")
-        cat = MockCatalog({"wget": self._row()}, {"wget": []}, satisfied={"wget"})
+        cat = MockCatalogPort({"wget": self._row()}, {"wget": []}, satisfied={"wget"})
         brew = MockBrew()
         o = _make(
             cat,
@@ -824,7 +837,9 @@ class TestUpgradeMarking:
     async def test_marks_old_when_link_stage_falls_back(self, monkeypatch) -> None:
         """Test that old version is marked when link stage falls back."""
         old = Path("/hb/Cellar/wget/1.0")
-        cat = MockCatalog({"wget": self._row("2.0")}, {"wget": []}, satisfied={"wget"})
+        cat = MockCatalogPort(
+            {"wget": self._row("2.0")}, {"wget": []}, satisfied={"wget"}
+        )
         o = _make(
             cat,
             MockDownloader(),
@@ -867,7 +882,7 @@ class TestUpgradeOnRequest:
 
             return _NativeResult(stage=None, dest=Path("/d"))
 
-        cat = MockCatalog(
+        cat = MockCatalogPort(
             {"wget": MockFormula("wget")}, {"wget": []}, satisfied={"wget"}
         )
         o = Orchestrator(
@@ -933,8 +948,10 @@ class TestUpgradeSwap:
         (staged / "bin" / "foo").write_text("v2")
 
         # Stub only the bottle-handling stages; install_to_cellar/unlink/link run for real
-        monkeypatch.setattr(orch_mod, "extract_bottle", lambda bp, st: staged)
-        monkeypatch.setattr(orch_mod, "relocate_keg", lambda *a, **k: None)
+        monkeypatch.setattr(
+            orch_mod, "extract_bottle", lambda bp, st, *, sink=None: staged
+        )
+        monkeypatch.setattr(orch_mod, "StreamRelocator", lambda **kw: _NullSink())
         monkeypatch.setattr(orch_mod, "write_receipt", lambda d, r: None)
 
         fr = MockFormula("wget")
@@ -942,7 +959,7 @@ class TestUpgradeSwap:
         fr.bottle_cellar = ":any_skip_relocation"  # Avoid the relocate path entirely
         tab = _tab("wget")
         o = Orchestrator(
-            catalog=MockCatalog({}, {}),
+            catalog=MockCatalogPort({}, {}),
             downloader=MockDownloader(),
             tab_fetcher=MockTab(),
             brew=MockBrew(),
@@ -961,11 +978,156 @@ class TestUpgradeSwap:
         assert old.exists()  # Retained, no rmtree
 
 
+class TestBottledConfig:
+    """Test that a bottle's `.bottle/etc` and `.bottle/var` reach the prefix."""
+
+    def _pour(self, tmp_path, monkeypatch, *, keg_only: bool = False) -> tuple:
+        """Pour a staged keg carrying bottled config into a temp prefix.
+
+        Args:
+            tmp_path: The pytest-provided temporary directory.
+            monkeypatch: The monkeypatch fixture.
+            keg_only: Whether the formula is keg-only, so nothing is linked.
+
+        Returns:
+            The prefix and the `_NativeResult` of the pour.
+        """
+        prefix = tmp_path / "prefix"
+        cfg = InstallConfig(
+            prefix=prefix,
+            repository=prefix / "Library",
+            api_path="/api",
+            staging_root=prefix / "var" / "staging",
+        )
+
+        staged = tmp_path / "staged"
+        (staged / "bin").mkdir(parents=True)
+        (staged / "bin" / "foo").write_text("v1")
+        (staged / ".bottle" / "etc" / "pkg").mkdir(parents=True)
+        (staged / ".bottle" / "etc" / "pkg" / "pkg.conf").write_text("default\n")
+        (staged / ".bottle" / "var" / "cache" / "pkg").mkdir(parents=True)
+
+        monkeypatch.setattr(
+            orch_mod, "extract_bottle", lambda bp, st, *, sink=None: staged
+        )
+        monkeypatch.setattr(orch_mod, "StreamRelocator", lambda **kw: _NullSink())
+        monkeypatch.setattr(orch_mod, "write_receipt", lambda d, r: None)
+
+        fr = MockFormula("pkg", keg_only=keg_only)
+        fr.bottle_cellar = ":any_skip_relocation"
+        o = Orchestrator(
+            catalog=MockCatalogPort({}, {}),
+            downloader=MockDownloader(),
+            tab_fetcher=MockTab(),
+            brew=MockBrew(),
+            config=cfg,
+        )
+
+        return prefix, o._native_install(
+            "pkg", fr, Path("bottle"), _tab("pkg"), True, [], []
+        )
+
+    @pytest.mark.integration
+    async def test_config_is_copied_into_the_prefix(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Test that bottled config lands as a real file, not a link."""
+        prefix, res = self._pour(tmp_path, monkeypatch)
+
+        conf = prefix / "etc" / "pkg" / "pkg.conf"
+        assert res.stage is None
+        assert res.config_error is None
+        assert conf.read_text() == "default\n"
+        assert not conf.is_symlink()
+        assert (prefix / "var" / "cache" / "pkg").is_dir()
+
+    @pytest.mark.integration
+    async def test_keg_only_formula_still_gets_its_config(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Test that config is restored even though a keg-only formula is not linked.
+
+        Args:
+            tmp_path: The pytest-provided temporary directory.
+            monkeypatch: The monkeypatch fixture.
+        """
+        prefix, res = self._pour(tmp_path, monkeypatch, keg_only=True)
+
+        assert res.stage is None
+        assert (prefix / "etc" / "pkg" / "pkg.conf").read_text() == "default\n"
+        assert not (prefix / "bin" / "foo").exists()  # Keg-only: nothing linked
+
+    @pytest.mark.integration
+    async def test_config_is_copied_even_when_linking_failed(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Test that a link failure does not cost the formula its config."""
+
+        def boom(*args, **kwargs) -> None:
+            """Fail the link stage.
+
+            Args:
+                *args: Ignored positional arguments.
+                **kwargs: Ignored keyword arguments.
+
+            Raises:
+                LinkError: Always.
+            """
+            raise LinkError([("/prefix/bin/foo", "an existing file")])
+
+        monkeypatch.setattr(orch_mod, "link_keg", boom)
+        prefix, res = self._pour(tmp_path, monkeypatch)
+
+        assert res.stage == "link"
+        assert (prefix / "etc" / "pkg" / "pkg.conf").read_text() == "default\n"
+
+    @pytest.mark.integration
+    async def test_a_failed_copy_is_recorded_on_the_result(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Test that a config copy failure is carried back, not raised."""
+
+        def boom(keg, *, prefix) -> None:
+            """Fail the config copy.
+
+            Args:
+                keg: The keg directory, ignored.
+                prefix: The prefix, ignored.
+
+            Raises:
+                OSError: Always.
+            """
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr(orch_mod, "install_etc_var", boom)
+        _, res = self._pour(tmp_path, monkeypatch)
+
+        assert res.stage is None  # The keg is installed and linked regardless
+        assert res.config_error == "read-only file system"
+
+    async def test_config_failure_notes_but_does_not_change_the_outcome(self) -> None:
+        """Test that a failed config copy leaves the formula installed, with a note."""
+        cat = MockCatalogPort({"pkg": MockFormula("pkg")}, {"pkg": []})
+        native = {
+            "pkg": _NativeResult(
+                stage=None,
+                dest=Path("/opt/hb/Cellar/pkg/1.0"),
+                config_error="read-only file system",
+            )
+        }
+        o = _make(cat, MockDownloader(), MockTab(), MockBrew(), native=native)
+
+        report = await o.install(["pkg"])
+
+        assert report.outcomes["pkg"] is Outcome.NATIVE
+        assert "config: read-only file system" in report.notes["pkg"]
+
+
 class TestRackLock:
-    """The native pour holds the formula's rack lock while it mutates the Cellar."""
+    """Test that the native pour holds the formula's rack lock while it mutates the Cellar."""
 
     async def test_locked_rack_stops_the_pour(self, tmp_path) -> None:
-        """A peer holding the rack lock aborts before anything is extracted."""
+        """Test that a peer holding the rack lock aborts before anything is extracted."""
         prefix = tmp_path / "prefix"
         cfg = InstallConfig(
             prefix=prefix,
@@ -974,7 +1136,7 @@ class TestRackLock:
             staging_root=prefix / "var" / "staging",
         )
         o = Orchestrator(
-            catalog=MockCatalog({}, {}),
+            catalog=MockCatalogPort({}, {}),
             downloader=MockDownloader(),
             tab_fetcher=MockTab(),
             brew=MockBrew(),
@@ -1022,11 +1184,11 @@ class _RecordingProgress:
 
 
 class TestProgressEvents:
-    """The orchestrator drives the ProgressPort in the expected order."""
+    """Test that the orchestrator drives the ProgressPort in the expected order."""
 
     async def test_single_install_emits_ordered_events(self) -> None:
         """Test a single install emits the expected progress events."""
-        cat = MockCatalog({"x": MockFormula("x")}, {"x": []})
+        cat = MockCatalogPort({"x": MockFormula("x")}, {"x": []})
         progress = _RecordingProgress()
         o = _make(cat, MockDownloader(), MockTab(), MockBrew(), native={})
         o.progress = progress
@@ -1044,7 +1206,7 @@ class TestProgressEvents:
 
     async def test_end_emitted_even_when_nothing_to_install(self) -> None:
         """Test begin/end not emitted on already-satisfied request."""
-        cat = MockCatalog({"x": MockFormula("x")}, {"x": []}, satisfied={"x"})
+        cat = MockCatalogPort({"x": MockFormula("x")}, {"x": []}, satisfied={"x"})
         progress = _RecordingProgress()
         o = _make(cat, MockDownloader(), MockTab(), MockBrew(), native={})
         o.progress = progress

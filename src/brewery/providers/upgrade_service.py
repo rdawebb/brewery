@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 
 from brewery.core.config import BreweryENV, get_brewery_env
-from brewery.providers.install_service import build_orchestrator
+from brewery.providers.install_service import PIPELINE_TIMEOUT, build_orchestrator
 from brewery.providers.orchestrator import InstallReport, ProgressPort
 
 RunBrew = Callable[[list[str]], Awaitable[object]]
@@ -37,7 +37,7 @@ async def run_upgrade(
         The InstallReport (per-formula outcomes).
     """
     env = env or get_brewery_env()
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
         orch = build_orchestrator(
             repo,
             client=client,

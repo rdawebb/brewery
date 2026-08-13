@@ -29,7 +29,7 @@ class MockMetaStore:
         """
         self._d = dict(initial or {})
 
-    def get_meta(self, key) -> None:
+    def get_meta(self, key) -> str | None:
         """Get a value from the meta store.
 
         Args:

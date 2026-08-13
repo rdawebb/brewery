@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -549,12 +550,12 @@ class TestLinkConcurrency:
         _mk(keg, "bin/xtool")  # Leaf file -> lock-free
 
         plan = linker._build_plan(keg, prefix)
-        dir_dsts = {dst for dst, _ in plan.dir_links}
-        leaf_dsts = {dst for dst, _ in plan.links}
+        dir_rels = {rel for rel, _ in plan.dir_links}
+        leaf_rels = {rel for rel, _ in plan.links}
 
-        assert prefix / "include/X11" in dir_dsts
-        assert prefix / "bin/xtool" in leaf_dsts
-        assert dir_dsts.isdisjoint(leaf_dsts)
+        assert "include/X11" in dir_rels
+        assert "bin/xtool" in leaf_rels
+        assert dir_rels.isdisjoint(leaf_rels)
 
     def test_concurrent_links_sharing_a_dir_dont_clobber(
         self, tmp_path, prefix
@@ -593,6 +594,102 @@ class TestLinkConcurrency:
         for i, (keg, _) in enumerate(kegs):
             assert _points_to(x11 / f"h{i}.h", keg / f"include/X11/h{i}.h")
             assert _points_to(prefix / "bin" / f"tool{i}", keg / "bin" / f"tool{i}")
+
+    def test_plan_is_built_under_the_structure_lock(
+        self, tmp_path, prefix, monkeypatch
+    ) -> None:
+        """Test that the structure lock is held while building the link plan."""
+        keg = tmp_path / "Cellar" / "libx11" / "1.8"
+        _mk(keg, "include/X11/Xlib.h")
+
+        held: list[bool] = []
+        orig = linker._build_plan
+
+        def spy(keg_dir: Path, prefix_dir: Path):
+            """Record whether the structure lock is held while planning."""
+
+            # Probed from another thread
+            def probe() -> None:
+                """Probe the structure lock from another thread."""
+                got = linker._STRUCTURE_LOCK.acquire(blocking=False)
+                held.append(not got)
+                if got:
+                    linker._STRUCTURE_LOCK.release()
+
+            t = threading.Thread(target=probe)
+            t.start()
+            t.join()
+
+            return orig(keg_dir, prefix_dir)
+
+        monkeypatch.setattr(linker, "_build_plan", spy)
+        link_keg(keg, prefix=prefix, name="libx11")
+
+        assert held == [True]
+
+    def test_concurrent_links_into_a_nested_shared_tree(self, tmp_path, prefix) -> None:
+        """Test that concurrent links into a nested shared tree do not clobber.
+
+        qt's `share/qt/mkspecs` is an example of a nested shared tree.
+        """
+        cellar = tmp_path / "Cellar"
+        base = cellar / "qtbase" / "6.11"
+        for rel in (
+            "share/qt/mkspecs/features/qt.prf",
+            "share/qt/mkspecs/modules/qt_lib_core.pri",
+            "share/qt/libexec/tracegen",
+            "bin/qmake",
+        ):
+            _mk(base, rel)
+
+        kegs = [(base, "qtbase")]
+        n = 8
+        for i in range(n):
+            keg = cellar / f"qtmod{i}" / "6.11"
+            _mk(keg, f"share/qt/mkspecs/modules/qt_lib_mod{i}.pri")
+            _mk(keg, f"share/qt/modules/Mod{i}.json")
+            kegs.append((keg, f"qtmod{i}"))
+
+        barrier = threading.Barrier(len(kegs))
+        errors: list[Exception] = []
+
+        def worker(keg: Path, name: str) -> None:
+            """Link one keg, once every thread is ready."""
+            barrier.wait()
+            try:
+                link_keg(keg, prefix=prefix, name=name)
+
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=kv) for kv in kegs]
+        for t in threads:
+            t.start()
+
+        for t in threads:
+            t.join()
+
+        assert not errors, errors
+
+        modules = prefix / "share/qt/mkspecs/modules"
+        assert modules.is_dir() and not modules.is_symlink()
+        assert _points_to(
+            modules / "qt_lib_core.pri",
+            base / "share/qt/mkspecs/modules/qt_lib_core.pri",
+        )
+        assert _points_to(
+            prefix / "share/qt/mkspecs/features/qt.prf",
+            base / "share/qt/mkspecs/features/qt.prf",
+        )
+        for i, (keg, _) in enumerate(kegs[1:]):
+            assert _points_to(
+                modules / f"qt_lib_mod{i}.pri",
+                keg / f"share/qt/mkspecs/modules/qt_lib_mod{i}.pri",
+            )
+            assert _points_to(
+                prefix / "share/qt/modules" / f"Mod{i}.json",
+                keg / f"share/qt/modules/Mod{i}.json",
+            )
 
 
 class TestLeafLinkRaces:
@@ -828,6 +925,55 @@ class TestCrossProcessStructureLock:
             os.close(fd)
 
         assert not (prefix / "lib" / "pkgconfig").exists()
+
+    def test_queued_threads_do_not_each_burn_the_timeout(
+        self, keg_and_prefix, monkeypatch
+    ) -> None:
+        """Test that N threads behind one peer cost one timeout, not N of them.
+
+        The install pipeline runs up to `install_concurrency` pours at once, all
+        funnelling through `_STRUCTURE_LOCK`.
+        """
+        keg, prefix = keg_and_prefix
+        timeout = 0.4
+        workers = 6
+        monkeypatch.setattr(core_locks, "_STRUCTURE_TIMEOUT", timeout)
+
+        path = core_locks.lock_path(prefix, "brewery", kind="structure")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+        errors: list[Exception] = []
+        guard = threading.Lock()
+        start_together = threading.Barrier(workers)
+
+        def attempt() -> None:
+            """Link behind the peer's back and record the refusal."""
+            start_together.wait()
+            try:
+                link_keg(keg, prefix=prefix, name="openssl@3")
+
+            except Exception as exc:  # noqa: BLE001 - recorded for the assertion
+                with guard:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=attempt) for _ in range(workers)]
+        start = time.monotonic()
+        for t in threads:
+            t.start()
+
+        for t in threads:
+            t.join()
+
+        elapsed = time.monotonic() - start
+        os.close(fd)
+
+        assert len(errors) == workers
+        assert all(isinstance(e, OperationInProgressError) for e in errors)
+
+        # One thread waits the budget; the rest probe once
+        assert elapsed < timeout * 2
 
     def test_unlink_refuses_while_a_peer_holds_it(self, keg_and_prefix, peer) -> None:
         """Test that unlinking waits on the same lock, so removals cannot interleave either."""
@@ -1193,11 +1339,14 @@ def test_plan_matches_brew_links() -> None:
     plan = linker._build_plan(keg, prefix)
 
     # Against an already-linked keg, every target lands in `already`, not `links`
-    brewery_links = (
-        {str(dst) for dst, _ in plan.links}
-        | {str(dst) for dst, _ in plan.dir_links}
-        | {str(p) for p in plan.already}
-    )
+    brewery_links = {
+        f"{prefix}/{rel}"
+        for rel in (
+            *(rel for rel, _ in plan.links),
+            *(rel for rel, _ in plan.dir_links),
+            *plan.already,
+        )
+    }
 
     # brew's real links into this keg, restricted to the eligible roots.
     keg_real = os.path.realpath(keg)

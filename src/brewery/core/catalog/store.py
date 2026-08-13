@@ -29,7 +29,7 @@ CREATE TABLE formula (
     version_scheme INTEGER NOT NULL DEFAULT 0,
     keg_only       INTEGER NOT NULL DEFAULT 0,
     has_service    INTEGER NOT NULL DEFAULT 0,  -- formula ships a `service` block
-    post_install   INTEGER NOT NULL DEFAULT 0,  -- gates a future `brew postinstall`
+    post_install   INTEGER NOT NULL DEFAULT 0,  -- gates the `brew postinstall` hook
     bottle_url     TEXT,                        -- resolved for the current platform tag
     bottle_sha256  TEXT,
     bottle_cellar  TEXT,                        -- :any_skip_relocation | :any | <path>

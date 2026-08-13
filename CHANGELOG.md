@@ -8,22 +8,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Changed
 
+- Installing a large dependency tree is around five times faster: relocation reads each file directly rather than memory-mapping it, which on macOS stalled every other formula's extraction and linking
+- Bottles extract in about half the time, by deciding that a tar member stays inside the staging directory from its name rather than by resolving every member against the filesystem
+- Formulae that ship thousands of individual files link around four times faster due to reduced object allocations
+- Mach-O install names are rewritten natively instead of by spawning `install_name_tool` subprocesses, cutting the relocation step time of an install on binary-heavy formulae; `install_name_tool` is still used where a rewritten path no longer fits its load command, and `BREWERY_NO_NATIVE_MACHO=1` forces every binary through it
+- An install that collides with a concurrent `brew` or brewery process now reports the conflict after a single lock timeout instead of one timeout per formula waiting behind it
+- A binary that already lists the relocated search path no longer fails to install; the duplicate `LC_RPATH` entry is harmless to the dynamic loader, where `install_name_tool` rejected it outright
 - Install timestamps in the table view are shown as `YYYY-MM-DD HH:MM` local time instead of a full ISO-8601 string
+- Upgrading a formula by name when it is already up to date now reports it as up to date instead of reinstalling it, matching the way a bulk upgrade already treated it
 
 ### Fixed
 
+- Formulae that ship default config (`etc` and `var` files) are copied into the prefix as real files, instead of being left in the keg and never appearing
+- An edited config is never overwritten; the new default is added beside it as `<name>.default`, while a config left untouched since an earlier version is updated in place
+- Post-install steps run again for the formulae that define them; they had stopped firing entirely after Homebrew moved the flag brewery was reading
+- The link plan is now built under the same lock that applies it, so a peer can no longer replace a directory while the plan is still reading it
+- A formula shipping the same file under two names no longer intermittently fails to install with a permission error, and both names keep the permissions the bottle shipped instead of one being left writable
+- The keg size cache is merged rather than rebuilt, so partial/failed commands no longer empty it and leave the next command measuring every keg again; it is also written atomically, so a concurrent refresh cannot catch it half-written
 - Install, upgrade, uninstall, link/unlink and cleanup now take Homebrew's own per-formula lock, so brewery and a concurrent `brew` no longer modify the same formula at the same time; a formula another process is holding is reported rather than waited on
 - Changes to shared prefix directories are serialised across brewery processes, so a background cleanup or a second brewery run can no longer interleave with linking
 - Two formulae installing at once that both provide the same file are now reported as a conflict instead of one silently overwriting the other's link; the formula that loses the race leaves the prefix untouched and falls back to `brew link`
+- A bottle containing a hard link to a file it does not ship is now reported as a failed extraction instead of aborting the install with a traceback
 - A corrupt or older-schema installed-records cache now rebuilds itself instead of failing the command
 - An unexpected error installing one formula no longer discards the whole install report, and no longer lets worker threads keep writing to the Cellar after the command has returned
 - A formula that fell back to `brew` successfully is no longer reported as an error
 - The bottle cache directory is created before it is probed, so a first run with no existing Homebrew cache works
+- A bottle download that pauses for a few seconds on a slow or congested connection is no longer abandoned and handed to `brew` to start over
 
 ### Security
 
 - Bottle downloads are capped, so a response that overruns its advertised length is aborted rather than filling the disk before the checksum is verified
 - Bottle extraction is capped on total size and member count, rejecting a decompression bomb before anything is written
+- A bottle can no longer write outside the keg through a symlink it ships itself, and a bottle whose top-level entry is a symlink is rejected rather than followed into the Cellar
 
 ## [0.4.0] - 2026-07-21
 
