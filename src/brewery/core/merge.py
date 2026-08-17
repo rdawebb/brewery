@@ -10,8 +10,8 @@ from brewery.core.models import (
     Package,
     PackageKind,
     PackageStatus,
-    effective_version,
 )
+from brewery.core.version import PkgVersion
 
 
 def merge_one(record: InstalledRecord, catalog: Catalog) -> Package:
@@ -86,13 +86,15 @@ def _merge_formula(record: InstalledRecord, row: FormulaRow | None) -> Package:
     if row is not None:
         desc = row.desc
         tap = record.tap or row.tap
-        latest = effective_version(version=row.version, revision=row.revision)
+        latest = str(PkgVersion(version=row.version, revision=row.revision))
         if row.keg_only:
             status |= PackageStatus.KEG_ONLY
             # Keg-only formulae are unlinked by design
             status &= ~PackageStatus.NOT_LINKED
+
         if row.has_service:
             status |= PackageStatus.HAS_SERVICE
+
         if _formula_outdated(record=record, row=row):
             status |= PackageStatus.OUTDATED
 
@@ -126,7 +128,7 @@ def _merge_cask(record: InstalledRecord, row: CaskRow | None) -> Package:
 def _formula_outdated(record: InstalledRecord, row: FormulaRow) -> bool:
     """Whether an installed formula is outdated against the catalog.
 
-    Inequality of effective versions, skipping HEAD installs.
+    Version scheme first, then version ordering, skipping HEAD installs.
 
     Args:
         record: The installed record.
@@ -135,16 +137,22 @@ def _formula_outdated(record: InstalledRecord, row: FormulaRow) -> bool:
     Returns:
         True if the formula is outdated, False otherwise.
     """
-    if record.head:
+    if record.head or not row.version:
         return False
 
-    if record.version_scheme is not None and row.version_scheme > record.version_scheme:
-        return True
+    installed = PkgVersion(version=record.version, revision=record.revision)
+    latest = PkgVersion(version=row.version, revision=row.revision)
 
-    installed: str = effective_version(version=record.version, revision=record.revision)
-    latest: str = effective_version(version=row.version, revision=row.revision)
+    # A missing receipt leaves the scheme unset
+    scheme: int = record.version_scheme if record.version_scheme is not None else 0
 
-    return bool(latest) and installed != latest
+    if row.version_scheme > scheme:
+        return latest != installed
+
+    if row.version_scheme < scheme:
+        return False
+
+    return latest > installed
 
 
 def _package(
@@ -167,7 +175,7 @@ def _package(
     Returns:
         The assembled Package.
     """
-    installed: str = effective_version(version=record.version, revision=record.revision)
+    installed: str = str(PkgVersion(version=record.version, revision=record.revision))
 
     return Package(
         name=record.name,
@@ -258,7 +266,7 @@ def _catalog_formula_package(catalog: Catalog, row: FormulaRow) -> Package:
     Returns:
         A catalog-only formula Package.
     """
-    latest: str = effective_version(version=row.version, revision=row.revision)
+    latest: str = str(PkgVersion(version=row.version, revision=row.revision))
 
     return Package(
         name=row.name,

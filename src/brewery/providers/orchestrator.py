@@ -28,6 +28,7 @@ from brewery.core.errors import (
 )
 from brewery.core.locks import formula_lock
 from brewery.core.logging import BreweryLogger, get_logger
+from brewery.core.version import PkgVersion
 from brewery.providers.bottle_config import install_etc_var
 from brewery.providers.cellar import install_to_cellar, rmtree
 from brewery.providers.downloader import BottleRef, ProgressCb
@@ -605,9 +606,7 @@ class Orchestrator:
             if dfr is None:
                 continue
 
-            pkg_version = (
-                f"{dfr.version}_{dfr.revision}" if dfr.revision else dfr.version
-            )
+            pkg_version = str(PkgVersion(version=dfr.version, revision=dfr.revision))
 
             entries.append(
                 RuntimeDependency(
@@ -896,7 +895,7 @@ class Orchestrator:
         Returns:
             The result of the installation.
         """
-        pkg_version = f"{fr.version}_{fr.revision}" if fr.revision else fr.version
+        pkg_version = str(PkgVersion(version=fr.version, revision=fr.revision))
         staging_root = self.cfg.staging()
         staging_root.mkdir(parents=True, exist_ok=True)
         staging = Path(tempfile.mkdtemp(dir=staging_root))

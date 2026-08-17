@@ -6,60 +6,9 @@ from datetime import UTC, datetime
 
 import pytest
 
-from brewery.core.models import (
-    InstalledRecord,
-    PackageKind,
-    effective_version,
-    split_keg_version,
-)
+from brewery.core.models import InstalledRecord, PackageKind
 
 pytestmark = pytest.mark.unit
-
-
-class TestEffectiveVersion:
-    """Tests for effective_version."""
-
-    @pytest.mark.parametrize(
-        ("version", "revision", "expected"),
-        [
-            pytest.param("1.2.3", 0, "1.2.3", id="zero_revision_bare_version"),
-            pytest.param("1.2.3", None, "1.2.3", id="revision_defaults_to_zero"),
-            pytest.param("1.2.3", 4, "1.2.3.4", id="positive_revision_appended"),
-            pytest.param("1.2.3", -1, "1.2.3", id="negative_revision_ignored"),
-            pytest.param("", 0, "", id="empty_version_no_revision"),
-            pytest.param("", 2, ".2", id="empty_version_with_revision"),
-        ],
-    )
-    def test_effective_version(self, version, revision, expected) -> None:
-        """Test that effective_version combines version and revision correctly."""
-        # revision=None exercises the default-argument path
-        if revision is None:
-            assert effective_version(version) == expected
-        else:
-            assert effective_version(version, revision) == expected
-
-
-class TestSplitKegVersion:
-    """Tests for split_keg_version.
-
-    A trailing `_<digits>` splits into (version, revision); anything else yields revision
-    zero with the name returned unchanged, and partition uses the first underscore only.
-    """
-
-    @pytest.mark.parametrize(
-        ("keg", "expected"),
-        [
-            pytest.param("1.2.3_4", ("1.2.3", 4), id="version_and_revision_split"),
-            pytest.param("1.2.3", ("1.2.3", 0), id="no_underscore_zero_revision"),
-            pytest.param("1.2.3_beta", ("1.2.3_beta", 0), id="non_digit_tail"),
-            pytest.param("1_2_3", ("1_2_3", 0), id="first_underscore_only"),
-            pytest.param("1.2.3_", ("1.2.3_", 0), id="trailing_underscore_empty_tail"),
-            pytest.param("1.2_3_4", ("1.2_3_4", 0), id="multiple_underscores"),
-        ],
-    )
-    def test_split_keg_version(self, keg, expected) -> None:
-        """Test that split_keg_version splits the keg string correctly."""
-        assert split_keg_version(keg) == expected
 
 
 class TestRecordCacheRoundTrip:

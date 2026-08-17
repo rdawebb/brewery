@@ -66,6 +66,12 @@ class TestScanFormulae:
         assert rec.deps == []
         assert rec.installed_on_request is False
 
+    def test_head_detected_from_keg_name_without_receipt(self, brew) -> None:
+        """Test that a HEAD keg is still flagged when its receipt is gone."""
+        brew.formula("neovim", "HEAD-abc123", receipt=None)
+        rec = _by_name(scan_installed(brew.env))["neovim"]
+        assert rec.head is True
+
     def test_corrupt_receipt_falls_back(self, brew) -> None:
         """Test that an unparseable receipt is treated as absent."""
         keg = brew.formula("broken", "1.0", receipt=None)

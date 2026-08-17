@@ -9,7 +9,8 @@ import orjson
 
 from brewery.core.config import BreweryENV, get_brewery_env
 from brewery.core.logging import BreweryLogger, get_logger
-from brewery.core.models import InstalledRecord, PackageKind, split_keg_version
+from brewery.core.models import InstalledRecord, PackageKind
+from brewery.core.version import PkgVersion, is_head
 
 log: BreweryLogger = get_logger(name=__name__)
 
@@ -306,9 +307,11 @@ def _formula_record(
     Returns:
         InstalledRecord for the active keg
     """
-    version, revision = split_keg_version(active.name)
+    keg = PkgVersion.parse(active.name)
+    version, revision = keg.version, keg.revision
 
-    # If no receipt, fall back to the keg mtime for the install date and skip flags
+    # If no receipt, fall back to the keg mtime for the install date and skip flags,
+    # unless the version is `HEAD`, then determine `head` from the keg name
     if receipt is None:
         log.warning(event="receipt_missing", name=name, path=str(object=active))
         return InstalledRecord(
@@ -317,6 +320,7 @@ def _formula_record(
             version=version,
             revision=revision,
             installed_on=_mtime_dt(active),
+            head=is_head(version),
             path=str(object=active),
             stale_versions=stale,
         )

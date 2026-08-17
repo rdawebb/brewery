@@ -16,9 +16,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - A binary that already lists the relocated search path no longer fails to install; the duplicate `LC_RPATH` entry is harmless to the dynamic loader, where `install_name_tool` rejected it outright
 - Install timestamps in the table view are shown as `YYYY-MM-DD HH:MM` local time instead of a full ISO-8601 string
 - Upgrading a formula by name when it is already up to date now reports it as up to date instead of reinstalling it, matching the way a bulk upgrade already treated it
+- A package revision is shown the way Homebrew shows it, so the displayed version now matches the keg directory name
 
 ### Fixed
 
+- Versions are now compared by Homebrew's own ordering rather than tested for inequality, which prevents formulae whose installed version is newer than the catalog's being erroneously marked as outdated
+- A formula built from `HEAD` whose install receipt has gone missing is no longer reported as outdated and overwritten, the `HEAD` build is recognised from the keg name and ranks above every released version
 - Formulae that ship default config (`etc` and `var` files) are copied into the prefix as real files, instead of being left in the keg and never appearing
 - An edited config is never overwritten; the new default is added beside it as `<name>.default`, while a config left untouched since an earlier version is updated in place
 - Post-install steps run again for the formulae that define them; they had stopped firing entirely after Homebrew moved the flag brewery was reading

@@ -316,19 +316,19 @@ class TestMergeFormula:
         assert pkg.metadata["latest_version"] == "1.21.5"
 
     def test_latest_includes_revision(self) -> None:
-        """Test that a non-zero catalog revision is folded into latest_version."""
+        """Test that a non-zero catalog revision is rendered into latest_version."""
         record = make_record("wget", version="1.21.4")
         catalog = MockRepoCatalog(
             formulae={"wget": make_formula_row("wget", version="1.21.4", revision=2)}
         )
         pkg = merge_one(record, catalog)
-        assert pkg.metadata["latest_version"] == "1.21.4.2"
+        assert pkg.metadata["latest_version"] == "1.21.4_2"
 
     def test_keg_only_sets_flag_and_clears_not_linked(self) -> None:
         """Test that keg_only sets KEG_ONLY and clears NOT_LINKED.
 
-        A keg-only formula is unlinked by design, so the unlinked-install
-        signal must not be reported as a problem.
+        A keg-only formula is unlinked by design, so the unlinked-install signal must
+        not be reported as a problem.
         """
         record = make_record("openssl", linked=False)
         catalog = MockRepoCatalog(
@@ -341,8 +341,8 @@ class TestMergeFormula:
     def test_unlinked_non_keg_only_keeps_not_linked(self) -> None:
         """Test that an unlinked, non-keg-only formula keeps NOT_LINKED.
 
-        This is the contrast case proving the keg-only branch is what clears
-        the flag, not the merge in general.
+        This is the contrast case proving the keg-only branch is what clears the flag,
+        not the merge in general.
         """
         record = make_record("wget", linked=False)
         catalog = MockRepoCatalog(formulae={"wget": make_formula_row("wget")})
@@ -396,12 +396,7 @@ class TestMergeFormula:
 
 
 class TestFormulaOutdated:
-    """Tests for the outdated decision, exercised via merge_one.
-
-    A HEAD install is never outdated; otherwise a higher catalog version,
-    version_scheme, or revision marks the installed package outdated, while
-    equal effective versions (and a lower catalog scheme) do not.
-    """
+    """Tests for the outdated decision, exercised via merge_one."""
 
     @pytest.mark.parametrize(
         ("record", "row", "expected"),
@@ -414,7 +409,7 @@ class TestFormulaOutdated:
             ),
             pytest.param(
                 make_record("wget", version="1.21.4", version_scheme=0),
-                make_formula_row("wget", version="1.21.4", version_scheme=1),
+                make_formula_row("wget", version="1.21.5", version_scheme=1),
                 True,
                 id="higher_version_scheme_forces_outdated",
             ),
@@ -435,6 +430,68 @@ class TestFormulaOutdated:
                 make_formula_row("wget", version="1.21.4", version_scheme=1),
                 False,
                 id="lower_catalog_scheme_not_outdated",
+            ),
+            pytest.param(
+                make_record("turso", version="1.0.26"),
+                make_formula_row("turso", version="0.6.1"),
+                False,
+                id="locally_newer_version_not_outdated",
+            ),
+            pytest.param(
+                make_record("wget", version="1.21.4", revision=2),
+                make_formula_row("wget", version="1.21.4", revision=1),
+                False,
+                id="locally_newer_revision_not_outdated",
+            ),
+            pytest.param(
+                make_record("wget", version="1.21.10"),
+                make_formula_row("wget", version="1.21.9"),
+                False,
+                id="numeric_ordering_not_lexical",
+            ),
+            pytest.param(
+                make_record("wget", version="1.22.0"),
+                make_formula_row("wget", version="1.22.0rc1"),
+                False,
+                id="catalog_prerelease_does_not_supersede_release",
+            ),
+            pytest.param(
+                make_record("wget", version="1.21.4", revision=4),
+                make_formula_row("wget", version="1.21.4.4"),
+                True,
+                id="revision_is_not_the_same_as_a_version_component",
+            ),
+            # A scheme bump only counts when the package version also moved
+            pytest.param(
+                make_record("wget", version="1.21.4", version_scheme=0),
+                make_formula_row("wget", version="1.21.4", version_scheme=1),
+                False,
+                id="higher_scheme_same_version_not_outdated",
+            ),
+            pytest.param(
+                make_record("wget", version="1.21.4", version_scheme=1),
+                make_formula_row("wget", version="0.1.0", version_scheme=2),
+                True,
+                id="higher_scheme_older_version_still_outdated",
+            ),
+            # A missing receipt leaves the scheme unset; brew's tab defaults it to zero
+            pytest.param(
+                make_record("wget", version="1.21.4", version_scheme=None),
+                make_formula_row("wget", version="1.21.4", version_scheme=1),
+                False,
+                id="unset_scheme_reads_as_zero_same_version",
+            ),
+            pytest.param(
+                make_record("wget", version="1.21.4", version_scheme=None),
+                make_formula_row("wget", version="1.21.5", version_scheme=0),
+                True,
+                id="unset_scheme_still_compares_versions",
+            ),
+            pytest.param(
+                make_record("wget", version="1.21.4"),
+                make_formula_row("wget", version=""),
+                False,
+                id="empty_catalog_version_not_outdated",
             ),
         ],
     )
