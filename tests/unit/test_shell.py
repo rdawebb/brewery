@@ -65,15 +65,13 @@ def _patch(monkeypatch, proc, *, have_brew=True) -> dict[str, Any]:
     Args:
         monkeypatch: The monkeypatch fixture.
         proc: The mock process to return.
-        have_brew: Whether the brew command is available.
+        have_brew: Whether the brew command is available. When False the exec raises
+            FileNotFoundError, which is how a missing brew presents itself.
 
     Returns:
         A dict accumulating the `cmd`, `stdout`, and `stderr` args
         passed to the most recent `create_subprocess_exec` call.
     """
-    monkeypatch.setattr(
-        shell.shutil, "which", lambda _: "/usr/bin/brew" if have_brew else None
-    )
     calls = {}
 
     async def mock_exec(*cmd, stdout=None, stderr=None, env=None, **kwargs) -> MockProc:
@@ -89,7 +87,13 @@ def _patch(monkeypatch, proc, *, have_brew=True) -> dict[str, Any]:
 
         Returns:
             A mock process with the specified output.
+
+        Raises:
+            FileNotFoundError: `have_brew` is False.
         """
+        if not have_brew:
+            raise FileNotFoundError(2, "No such file or directory", "brew")
+
         calls["cmd"] = cmd
         calls["stdout"] = stdout
         calls["stderr"] = stderr

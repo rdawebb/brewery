@@ -106,7 +106,7 @@ def main() -> None:
 
     except CatalogFetchError as e:
         # Transient: launchd will retry at the next interval
-        log.warning(event="catalog_refresh_failed", error=str(object=e))
+        log.warning(event="catalog_refresh_failed", error=str(e))
 
     except Exception:
         # KeyboardInterrupt/SystemExit are BaseException and still propagate

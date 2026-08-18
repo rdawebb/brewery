@@ -21,6 +21,9 @@ if TYPE_CHECKING:
 
 log: BreweryLogger = get_logger(name=__name__)
 
+# Racks swept concurrently by `cleanup_packages`, matching the download/install bounds
+_CLEANUP_CONCURRENCY = 8
+
 
 class Repository:
     """Repository for managing package data from various backends."""
@@ -303,20 +306,40 @@ class Repository:
     ) -> tuple[list[str], list[str]]:
         """Return (removed, failed) based on filesystem presence.
 
+        A package counts as installed only while its directory still holds a version.
+        The lookup is case-insensitive so a mixed-case cask token still finds its
+        directory on a case-sensitive volume.
+
         Args:
-            names: List of package names to verify.
-            kind: Package kind (formula or cask).
+            names: Package names to verify.
+            kind: Package kind (formula or cask), selecting cellar or caskroom.
 
         Returns:
             Tuple of (removed, failed) package names.
         """
+        import contextlib
+
+        from brewery.core.fs_state import child_dirs
+
         env = self.cache_mgr.env or get_brewery_env()
 
         base_dir = env.cellar if kind == PackageKind.FORMULA else env.caskroom
+        index: dict[str, Path] = {d.name.casefold(): d for d in child_dirs(base_dir)}
 
         removed, failed = [], []
         for name in names:
-            (failed if (base_dir / name).exists() else removed).append(name)
+            survivor: Path | None = index.get(name.casefold())
+
+            if survivor is not None and child_dirs(survivor):
+                failed.append(name)
+                continue
+
+            if survivor is not None:
+                # Nothing installed under it; drop the shell so the tree matches
+                with contextlib.suppress(OSError):
+                    survivor.rmdir()
+
+            removed.append(name)
 
         return removed, failed
 
@@ -453,27 +476,74 @@ class Repository:
             Tuple of (removed "name version" strings, (label, reason) failures).
         """
         import asyncio
+        from collections import defaultdict
 
         from brewery.core.errors import OperationInProgressError
         from brewery.core.locks import formula_lock
         from brewery.core.settings import load_settings
         from brewery.providers.cellar import rmtree
-        from brewery.providers.retention import cleanup_candidates
+        from brewery.providers.retention import CleanupCandidate, cleanup_candidates
 
         s = load_settings().retention
         age = s.age_days if max_age_days is None else max_age_days
 
         env = self.cache_mgr.env or get_brewery_env()
 
-        def remove(keg: Path, name: str) -> None:
-            """Delete one stale keg under its formula's rack lock.
+        def remove_rack(
+            name: str, kegs: list[CleanupCandidate]
+        ) -> tuple[list[str], list[tuple[str, str]]]:
+            """Delete every stale keg of one formula under a single rack lock.
+
+            One lock acquisition per rack, not per keg: the rack lock is
+            non-reentrant across threads, so two kegs of the same formula removed
+            concurrently would make one of them look locked by a peer process.
 
             Args:
-                keg: The keg to delete.
                 name: The name of the formula.
+                kegs: That formula's stale kegs, in selection order.
+
+            Returns:
+                Tuple of (removed "name version" strings, (label, reason) failures).
+
+            Raises:
+                OperationInProgressError: Another process holds the rack lock.
             """
+            done: list[str] = []
+            failed: list[tuple[str, str]] = []
+
             with formula_lock(name, prefix=env.prefix):
-                rmtree(keg)
+                for c in kegs:
+                    label = f"{c.name} {c.version}"
+                    try:
+                        rmtree(c.keg)
+                        done.append(label)
+
+                    except OSError as e:
+                        failed.append((label, str(e)))
+
+            return done, failed
+
+        async def sweep_rack(
+            name: str, kegs: list[CleanupCandidate]
+        ) -> tuple[list[str], list[tuple[str, str]]]:
+            """Remove one rack's stale kegs off the event loop, bounded by `sem`.
+
+            Args:
+                name: The name of the formula.
+                kegs: That formula's stale kegs, in selection order.
+
+            Returns:
+                Tuple of (removed "name version" strings, (label, reason) failures).
+            """
+            async with sem:
+                try:
+                    return await asyncio.to_thread(remove_rack, name, kegs)
+
+                except OperationInProgressError:
+                    # Mid-install process on this rack; the next sweep picks it up
+                    log.info(event="cleanup_skipped_locked", formula=name)
+
+                    return [], []
 
         installed = self.cache_mgr.installed_packages(kind=PackageKind.FORMULA)
         active = {Path(p.path) for p in installed if p.path}
@@ -484,8 +554,7 @@ class Repository:
             if p.path and p.size_kb is not None
         }
 
-        removed: list[str] = []
-        failures: list[tuple[str, str]] = []
+        by_rack: dict[str, list[CleanupCandidate]] = defaultdict(list)
         for c in cleanup_candidates(
             env.cellar,
             active=active,
@@ -494,17 +563,19 @@ class Repository:
             max_cellar_mb=s.max_cellar_mb,
             active_sizes=active_sizes,
         ):
-            label = f"{c.name} {c.version}"
-            try:
-                await asyncio.to_thread(remove, c.keg, c.name)
-                removed.append(label)
+            by_rack[c.name].append(c)
 
-            except OperationInProgressError:
-                # There is mid-install process on this rack; the next sweep picks it up
-                log.info(event="cleanup_skipped_locked", keg=str(c.keg))
+        sem = asyncio.Semaphore(_CLEANUP_CONCURRENCY)
+        results = await asyncio.gather(
+            *(sweep_rack(name, kegs) for name, kegs in by_rack.items())
+        )
 
-            except OSError as e:
-                failures.append((label, str(e)))
+        removed: list[str] = []
+        failures: list[tuple[str, str]] = []
+        # Flattened in submission order, so the summary stays deterministic
+        for done, failed in results:
+            removed += done
+            failures += failed
 
         if removed:
             self.cache_mgr.invalidate()

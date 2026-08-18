@@ -18,6 +18,38 @@ T = TypeVar("T")
 F = TypeVar("F", bound=Callable[..., Any])
 
 
+def _log_context(
+    sig: inspect.Signature | None,
+    log_args: list[str],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve the logged arguments of one call to a name -> value mapping.
+
+    Args:
+        sig: The decorated function's signature, or None when nothing is logged.
+        log_args: Parameter names to pick out of the call.
+        args: The call's positional arguments.
+        kwargs: The call's keyword arguments.
+
+    Returns:
+        The subset of the call's arguments named by `log_args`; empty when there is
+        nothing to log, or when the call does not match the signature.
+    """
+    if sig is None:
+        return {}
+
+    try:
+        bound = sig.bind(*args, **kwargs)
+
+    except TypeError:
+        return {}
+
+    bound.apply_defaults()
+
+    return {k: bound.arguments[k] for k in log_args if k in bound.arguments}
+
+
 def log_operation(
     event_prefix: str,
     log_args: list[str] | None = None,
@@ -36,23 +68,14 @@ def log_operation(
     def decorator(func: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
         is_async = inspect.iscoroutinefunction(func)
 
+        # Resolved once per decoration; skipped entirely when nothing is logged
+        sig: inspect.Signature | None = inspect.signature(func) if log_args else None
+
         @functools.wraps(wrapped=func)
         async def async_wrapper(*args: Any, **kwargs: Any) -> T:
             start: float = time.perf_counter()
 
-            sig = inspect.signature(func)
-            try:
-                bound_args = sig.bind(*args, **kwargs)
-                bound_args.apply_defaults()
-                log_context = {
-                    k: bound_args.arguments[k]
-                    for k in (log_args or [])
-                    if k in bound_args.arguments
-                }
-
-            except TypeError:
-                log_context = {}
-
+            log_context = _log_context(sig, log_args, args, kwargs)
             log.info(event=f"{event_prefix}_start", **log_context)
 
             try:
@@ -80,7 +103,7 @@ def log_operation(
                 duration_ms = int((time.perf_counter() - start) * 1000)
                 log.exception(
                     event=f"{event_prefix}_failed",
-                    error=str(object=e),
+                    error=str(e),
                     duration_ms=duration_ms,
                     **log_context,
                 )
@@ -89,22 +112,12 @@ def log_operation(
         @functools.wraps(wrapped=func)
         def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
             start: float = time.perf_counter()
-            sig = inspect.signature(func)
-            try:
-                bound_args = sig.bind(*args, **kwargs)
-                bound_args.apply_defaults()
-                log_context = {
-                    k: bound_args.arguments[k]
-                    for k in (log_args or [])
-                    if k in bound_args.arguments
-                }
-            except TypeError:
-                log_context = {}
 
+            log_context = _log_context(sig, log_args, args, kwargs)
             log.info(event=f"{event_prefix}_start", **log_context)
 
             try:
-                result = func(*args, **kwargs)  # no await
+                result = func(*args, **kwargs)  # No await
 
                 duration_ms = int((time.perf_counter() - start) * 1000)
                 log_event_data: dict = {
@@ -125,7 +138,7 @@ def log_operation(
                 duration_ms = int((time.perf_counter() - start) * 1000)
                 log.exception(
                     event=f"{event_prefix}_failed",
-                    error=str(object=e),
+                    error=str(e),
                     duration_ms=duration_ms,
                     **log_context,
                 )

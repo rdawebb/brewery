@@ -350,7 +350,7 @@ class Catalog:
         log.info(
             event="catalog_schema_created",
             version=SCHEMA_VERSION,
-            path=str(object=self.db_path),
+            path=str(self.db_path),
         )
 
     def is_empty(self) -> bool:
@@ -662,7 +662,7 @@ class Catalog:
             self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
         except sqlite3.Error as e:
-            log.debug(event="catalog_checkpoint_failed", error=str(object=e))
+            log.debug(event="catalog_checkpoint_failed", error=str(e))
 
         self._conn.close()
 

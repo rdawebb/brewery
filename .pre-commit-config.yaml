@@ -9,7 +9,7 @@ repos:
       - id: check-yaml
         name: Check YAML
       - id: check-added-large-files
-        args: ['--maxkb=100']
+        args: ["--maxkb=100"]
         name: Check added large files
       - id: check-toml
         name: Check TOML

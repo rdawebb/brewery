@@ -93,7 +93,7 @@ def _load_width_cache() -> None:
 
     # An unreadable or malformed cache just means widths get recomputed
     except (OSError, ValueError, TypeError, AttributeError) as e:
-        log.debug(event="width_cache_read_failed", error=str(object=e))
+        log.debug(event="width_cache_read_failed", error=str(e))
 
 
 def _ensure_width_cache_loaded() -> None:
@@ -378,7 +378,7 @@ def _save_width_cache() -> None:
 
     # The cache is an optimisation; failing to persist it is not an error
     except (OSError, TypeError) as e:
-        log.debug(event="width_cache_write_failed", error=str(object=e))
+        log.debug(event="width_cache_write_failed", error=str(e))
 
 
 def package_table(pkgs: Iterable[Package]) -> Table:
@@ -550,6 +550,6 @@ def package_details(pkg: Package) -> Table:
     if pkg.tap:
         t.add_row("Tap", pkg.tap)
     if pkg.path:
-        t.add_row("Path", str(object=pkg.path))
+        t.add_row("Path", str(pkg.path))
 
     return t

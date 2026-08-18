@@ -165,7 +165,7 @@ def handle_error(error: Exception) -> int:
             return EXIT_USER_ERROR
 
     else:
-        log.error(event="unexpected_error", error=str(object=error), exc_info=error)
+        log.error(event="unexpected_error", error=str(error), exc_info=error)
         console.print(f"\n⚠ Unexpected error occurred: {error}\n", style="bold red")
         return EXIT_SYSTEM_ERROR
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 import sys
 
 from typer_extensions import ExtendedTyper
@@ -10,7 +9,7 @@ from typer_extensions import ExtendedTyper
 # Importing the commands package registers every command and sub-app onto `app`
 import brewery.cli.commands  # noqa: F401  (registration side effects)
 from brewery.cli.context import app, console
-from brewery.core.errors import EXIT_SYSTEM_ERROR
+from brewery.core.errors import EXIT_SYSTEM_ERROR, BrewCommandError
 from brewery.core.shell import BrewOutput, run_brew
 
 
@@ -51,10 +50,6 @@ def _brew_passthrough(argv: list[str]) -> int:
     Returns:
         The exit code of the brew command.
     """
-    if shutil.which("brew") is None:
-        console.print("\n✗ brew not found on PATH\n", style="bold red")
-        return EXIT_SYSTEM_ERROR
-
     try:
         import asyncio
 
@@ -62,8 +57,9 @@ def _brew_passthrough(argv: list[str]) -> int:
             run_brew(argv, output=BrewOutput.INHERIT, check=False, timeout=None)
         ).returncode
 
-    except FileNotFoundError:
-        console.print("\n✗ brew not found\n", style="bold red")
+    # check=False, so the only failure left is brew missing from PATH
+    except BrewCommandError:
+        console.print("\n✗ brew not found on PATH\n", style="bold red")
         return EXIT_SYSTEM_ERROR
 
     except KeyboardInterrupt:

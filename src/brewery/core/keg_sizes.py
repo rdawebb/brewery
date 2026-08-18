@@ -110,7 +110,7 @@ def du_many(paths: list[Path]) -> dict[str, int]:
 
         try:
             proc = subprocess.run(
-                ["du", "-sk", *(str(object=p) for p in batch)],
+                ["du", "-sk", *(str(p) for p in batch)],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -122,7 +122,7 @@ def du_many(paths: list[Path]) -> dict[str, int]:
             continue
 
         except OSError as e:
-            log.warning(event="keg_size_error", count=len(batch), error=str(object=e))
+            log.warning(event="keg_size_error", count=len(batch), error=str(e))
             continue
 
         out, err, code = proc.stdout, proc.stderr, proc.returncode
@@ -195,4 +195,4 @@ def _save_size_cache(cache_dir: Path, data: dict[str, list]) -> None:
         with contextlib.suppress(OSError):
             tmp.unlink()
 
-        log.warning(event="size_cache_write_failed", error=str(object=e))
+        log.warning(event="size_cache_write_failed", error=str(e))

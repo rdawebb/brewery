@@ -154,7 +154,7 @@ def _decode_feed(name: str, body: bytes) -> list[Any]:
     except orjson.JSONDecodeError as e:
         raise CatalogFetchError(
             message=f"Catalog feed '{name}' is not valid JSON",
-            context={"feed": name, "bytes": len(body), "error": str(object=e)},
+            context={"feed": name, "bytes": len(body), "error": str(e)},
         ) from e
 
     if not isinstance(entries, list) or not entries:

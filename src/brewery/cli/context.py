@@ -19,7 +19,29 @@ log: BreweryLogger = get_logger(name=__name__)
 
 app = ExtendedTyper(help="Brewery: A package management CLI tool")
 
-console = Console(emoji=False, highlight=False)
+
+def _make_console() -> Console:
+    """Build the CLI console, honouring `display.format`.
+
+    "plain" is compact single-column list/search, no live progress display,
+    no colour, no snytax highlighting, and no emojis.
+
+    Returns:
+        The console every command renders through.
+    """
+    from brewery.core.settings import load_settings
+
+    plain: bool = load_settings().display.format == "plain"
+
+    return Console(
+        emoji=False,
+        highlight=False,
+        no_color=plain,
+        force_terminal=False if plain else None,
+    )
+
+
+console = _make_console()
 
 
 def _print_version(value: bool) -> None:
@@ -91,7 +113,7 @@ def _ensure_catalog_populated(repo: Repository) -> None:
 
     # Bootstrapping is best-effort: the command still runs on an empty catalog
     except Exception as e:  # noqa: BLE001
-        log.warning(event="catalog_bootstrap_failed", error=str(object=e))
+        log.warning(event="catalog_bootstrap_failed", error=str(e))
 
 
 def run_async(coro: Coroutine) -> Any:

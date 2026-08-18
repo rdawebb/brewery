@@ -33,7 +33,7 @@ class Cache:
         log.debug(
             event="cache_initialised",
             namespace=namespace,
-            path=str(object=self.cache_path),
+            path=str(self.cache_path),
         )
 
     def _file(self, key: str) -> Path:
@@ -68,7 +68,7 @@ class Cache:
         """Compute the current filesystem-state token.
 
         Note: a version change made by brew directly is not visible here.
-        After using brew directly, pass `--refresh`.
+        After using brew directly, pass `--rescan`.
 
         Returns:
             A string token representing the current state.
@@ -133,7 +133,7 @@ class Cache:
             return None
 
         if self._update_token() == data.get("_token"):
-            log.info(event="cache_hit", key=key, namespace=self.cache_path.name)
+            log.debug(event="cache_hit", key=key, namespace=self.cache_path.name)
             return data.get("value")
 
         log.debug(event="cache_invalid", key=key, namespace=self.cache_path.name)
@@ -166,13 +166,13 @@ class Cache:
                 event="cache_write_error",
                 key=key,
                 namespace=self.cache_path.name,
-                error=str(object=e),
+                error=str(e),
             )
             raise CacheError(
                 key=key,
                 namespace=self.cache_path.name,
                 operation="write",
-                path=str(object=f),
+                path=str(f),
             ) from e
 
     def delete(self, key: str) -> None:

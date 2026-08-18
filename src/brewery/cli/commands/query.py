@@ -16,8 +16,9 @@ def list_pkgs(
     kind: Annotated[
         PackageKind | None, app.Option("--kind", "-k", help="formula | cask | all")
     ] = None,
-    refresh: Annotated[
-        bool, app.Option("--refresh", "-r", help="Refresh cache")
+    rescan: Annotated[
+        bool,
+        app.Option("--rescan", "-r", help="Re-scan installed packages from disk"),
     ] = False,
     table: Annotated[
         bool,
@@ -28,7 +29,8 @@ def list_pkgs(
 
     Args:
         kind: Filter by package kind.
-        refresh: Refresh cache before listing packages.
+        rescan: Re-scan the Cellar and Caskroom before listing, instead of reading
+            the filesystem-state cache.
         table: Show the full multi-column table instead of the compact view.
     """
     from brewery.cli.renderers import (
@@ -41,8 +43,8 @@ def list_pkgs(
     with _repository() as repo:
         pkgs: list[Package]
 
-        if refresh:
-            with spinner("Refreshing cache..."):
+        if rescan:
+            with spinner("Re-scanning installed packages..."):
                 repo.cache_mgr.invalidate()
                 pkgs = repo.get_all_installed(kind_filter=kind)
         else:

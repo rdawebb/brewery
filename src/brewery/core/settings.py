@@ -40,6 +40,7 @@ class DaemonSettings:
 class DisplaySettings:
     """Output presentation."""
 
+    # "plain" renders with no colour, no progress display, single-column list/search
     format: str = "rich"  # "rich" | "plain"
 
 

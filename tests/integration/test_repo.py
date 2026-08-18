@@ -527,6 +527,51 @@ class TestUninstall:
         assert _provider_calls(mock_brew, "uninstall")
 
 
+class TestVerifyRemoved:
+    """Tests for Repository._verify_removed's definition of "still installed"."""
+
+    def test_rack_holding_a_keg_is_a_failure(self, repo, mock_env) -> None:
+        """Test that a formula whose rack still holds a keg counts as not removed."""
+        assert repo._verify_removed(["yazi"], PackageKind.FORMULA) == ([], ["yazi"])
+
+    def test_absent_rack_is_removed(self, repo, mock_env) -> None:
+        """Test that a formula with no rack at all counts as removed."""
+        assert repo._verify_removed(["ripgrep"], PackageKind.FORMULA) == (
+            ["ripgrep"],
+            [],
+        )
+
+    def test_emptied_rack_is_removed_and_pruned(self, repo, mock_env) -> None:
+        """Test that a rack left behind holding no keg counts as removed.
+
+        `fs_state` reports a rack with no keg directory as not installed, so
+        reporting it as an uninstall failure would contradict the next `list`.
+        """
+        import shutil
+
+        rack = mock_env.cellar / "yazi"
+        shutil.rmtree(rack / "26.5.6")
+
+        assert repo._verify_removed(["yazi"], PackageKind.FORMULA) == (["yazi"], [])
+
+        # The empty shell is swept up, so the tree agrees with the verdict
+        assert not rack.exists()
+
+    def test_cask_token_matches_case_insensitively(self, repo, mock_env) -> None:
+        """Test that a differently-cased cask token still finds its Caskroom dir."""
+        assert repo._verify_removed(["IINA"], PackageKind.CASK) == ([], ["IINA"])
+
+    def test_cask_token_with_only_metadata_is_removed(self, repo, mock_env) -> None:
+        """Test that a token directory holding no version directory counts as removed."""
+        import shutil
+
+        token = mock_env.caskroom / "iina"
+        shutil.rmtree(token / "1.4.1,160")
+        (token / ".metadata").mkdir(exist_ok=True)
+
+        assert repo._verify_removed(["iina"], PackageKind.CASK) == (["iina"], [])
+
+
 class TestUpgrade:
     """Tests for Repository.upgrade_packages."""
 
@@ -942,6 +987,81 @@ class TestCleanup:
         assert not old.exists()  # Old stale: removed
         assert recent.exists()  # Recent stale: kept
         assert (cellar / "wget" / "2.0").exists()  # Active: kept
+
+    async def test_cleanup_removes_every_stale_keg_of_one_rack(
+        self, brew, empty_catalog, monkeypatch
+    ) -> None:
+        """Test that several stale kegs of one formula are all removed.
+
+        The rack lock is per formula and not reentrant across threads, so a sweep
+        that parallelised per keg rather than per rack would find its own sibling
+        holding the lock and silently skip it.
+        """
+        import time
+
+        from brewery.core import config
+        from brewery.core.repo import Repository
+        from brewery.providers.retention import mark_replaced
+
+        DAY = 86400
+        brew.formula(
+            "wget",
+            "3.0",
+            receipt={"source": {"tap": "homebrew/core"}, "runtime_dependencies": []},
+            link_opt=True,
+        )
+        monkeypatch.setattr(config, "_env_cache", brew.env)
+
+        now = int(time.time())
+        stale = []
+        for version in ("1.0", "1.5", "2.0"):
+            keg = brew.cellar / "wget" / version
+            keg.mkdir(parents=True)
+            mark_replaced(keg, by="3.0", at=now - 40 * DAY)
+            stale.append(keg)
+
+        removed, failures = await Repository(catalog=empty_catalog).cleanup_packages()
+
+        assert failures == []
+        assert sorted(removed) == ["wget 1.0", "wget 1.5", "wget 2.0"]
+        assert not any(keg.exists() for keg in stale)
+        assert (brew.cellar / "wget" / "3.0").exists()
+
+    async def test_cleanup_sweeps_several_racks(
+        self, brew, empty_catalog, monkeypatch
+    ) -> None:
+        """Test that stale kegs across racks are all removed, one lock per rack."""
+        import time
+
+        from brewery.core import config
+        from brewery.core.repo import Repository
+        from brewery.providers.retention import mark_replaced
+
+        DAY = 86400
+        monkeypatch.setattr(config, "_env_cache", brew.env)
+
+        now = int(time.time())
+        stale = []
+        for name in ("wget", "curl", "jq"):
+            brew.formula(
+                name,
+                "2.0",
+                receipt={
+                    "source": {"tap": "homebrew/core"},
+                    "runtime_dependencies": [],
+                },
+                link_opt=True,
+            )
+            keg = brew.cellar / name / "1.0"
+            keg.mkdir(parents=True)
+            mark_replaced(keg, by="2.0", at=now - 40 * DAY)
+            stale.append(keg)
+
+        removed, failures = await Repository(catalog=empty_catalog).cleanup_packages()
+
+        assert failures == []
+        assert sorted(removed) == ["curl 1.0", "jq 1.0", "wget 1.0"]
+        assert not any(keg.exists() for keg in stale)
 
     async def test_cleanup_skips_a_locked_rack(
         self, brew, empty_catalog, monkeypatch

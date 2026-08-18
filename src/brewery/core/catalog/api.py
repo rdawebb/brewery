@@ -132,7 +132,7 @@ async def fetch_feed(
             context={
                 "feed": feed.name,
                 "url": feed.url,
-                "error": str(object=e),
+                "error": str(e),
             },
         ) from e
 
@@ -206,7 +206,7 @@ async def fetch_single_formula(
             context={
                 "name": name,
                 "url": url,
-                "error": str(object=e),
+                "error": str(e),
             },
         ) from e
 

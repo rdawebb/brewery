@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shutil
 from dataclasses import dataclass
 from enum import Enum
 
@@ -60,13 +59,6 @@ async def run_brew(
         BrewCommandError: brew missing, or non-zero exit with check=True.
         BrewTimeoutError: the command exceeded timeout.
     """
-    if shutil.which("brew") is None:
-        raise BrewCommandError(
-            command="brew " + " ".join(args),
-            returncode=127,
-            error="brew not found on PATH",
-        )
-
     cmd = ["brew", *args]
     capture = output is BrewOutput.CAPTURE
 
@@ -81,13 +73,22 @@ async def run_brew(
         else {}
     )
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE if capture else None,
-        stderr=asyncio.subprocess.PIPE if capture else None,
-        env=env,
-        **extra,
-    )
+    # The exec is the brew-on-PATH check
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE if capture else None,
+            stderr=asyncio.subprocess.PIPE if capture else None,
+            env=env,
+            **extra,
+        )
+
+    except FileNotFoundError:
+        raise BrewCommandError(
+            command=" ".join(cmd),
+            returncode=127,
+            error="brew not found on PATH",
+        ) from None
 
     try:
         if capture:

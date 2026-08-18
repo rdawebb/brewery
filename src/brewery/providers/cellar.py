@@ -35,7 +35,7 @@ def _clonefile(src: Path, dst: Path) -> None:
 
     if libc.clonefile(os.fsencode(filename=src), os.fsencode(filename=dst), 0) != 0:
         err = ctypes.get_errno()
-        raise OSError(err, os.strerror(err), str(object=dst))
+        raise OSError(err, os.strerror(err), str(dst))
 
 
 def clone_tree(src: Path, dst: Path, *, use_clonefile: bool | None = None) -> None:

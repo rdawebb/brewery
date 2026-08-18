@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
+from brewery.core import decorators
 from brewery.core.decorators import log_operation, retry_on_transient
 from brewery.core.errors import TransientError, UserError
 
@@ -229,6 +231,86 @@ class TestLogOperation:
             await op()
 
         assert any("myop_failed" in r.getMessage() for r in caplog.records)
+
+    async def test_signature_is_resolved_once_per_decoration(self, monkeypatch) -> None:
+        """Test that inspect.signature runs at decoration time, not per call."""
+        import inspect
+
+        calls: list[Any] = []
+        real = inspect.signature
+
+        def counting_signature(*args, **kwargs):
+            """Count signature resolutions and delegate to the real one.
+
+            Args:
+                *args: Positional arguments for inspect.signature.
+                **kwargs: Keyword arguments for inspect.signature.
+
+            Returns:
+                The resolved signature.
+            """
+            calls.append(args[0] if args else None)
+
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(decorators.inspect, "signature", counting_signature)
+
+        @log_operation(event_prefix="myop", log_args=["name"])
+        async def op(name) -> str:
+            """Return the name it was given.
+
+            Args:
+                name: The name to return.
+
+            Returns:
+                The name.
+            """
+            return name
+
+        assert len(calls) == 1
+
+        await op(name="a")
+        await op(name="b")
+        assert len(calls) == 1
+
+    async def test_no_log_args_skips_signature(self, monkeypatch, caplog) -> None:
+        """Test that a decoration with no log_args never resolves a signature."""
+        import logging
+
+        def fail_signature(*args, **kwargs) -> None:
+            """Stand in for inspect.signature.
+
+            Args:
+                *args: Positional arguments for inspect.signature.
+                **kwargs: Keyword arguments for inspect.signature.
+
+            Raises:
+                AssertionError: Always; the signature should not be needed.
+            """
+            raise AssertionError("signature resolved with no log_args")
+
+        monkeypatch.setattr(decorators.inspect, "signature", fail_signature)
+
+        @log_operation(event_prefix="bare")
+        async def op(name) -> str:
+            """Return the name it was given.
+
+            Args:
+                name: The name to return.
+
+            Returns:
+                The name.
+            """
+            return name
+
+        with caplog.at_level(logging.INFO, logger="brewery.core.decorators"):
+            assert await op(name="foo") == "foo"
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("bare_start" in m for m in messages)
+
+        # Nothing was named, so no argument context is logged
+        assert not any("name=foo" in m for m in messages)
 
     async def test_log_result_counts_sized_results(self, caplog) -> None:
         """Test that log_operation logs result counts for sized results."""

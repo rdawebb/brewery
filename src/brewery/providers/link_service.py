@@ -111,7 +111,7 @@ def run_link(
             failures.append((pkg.name, _conflict_reason(name=pkg.name, error=e)))
 
         except (OperationInProgressError, OSError) as e:
-            failures.append((pkg.name, str(object=e)))
+            failures.append((pkg.name, str(e)))
 
         else:
             linked.append((pkg.name, result))
@@ -148,7 +148,7 @@ def run_unlink(
                 )
 
         except (OperationInProgressError, OSError) as e:
-            failures.append((pkg.name, str(object=e)))
+            failures.append((pkg.name, str(e)))
 
         else:
             unlinked.append((pkg.name, result))

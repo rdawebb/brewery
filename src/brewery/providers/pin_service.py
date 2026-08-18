@@ -56,7 +56,7 @@ def pin(prefix: Path, name: str, keg: Path) -> bool:
         return False
 
     make_relative_symlink(pin_path(prefix=prefix, name=name), keg)
-    log.info(event="formula_pinned", name=name, keg=str(object=keg))
+    log.info(event="formula_pinned", name=name, keg=str(keg))
 
     return True
 

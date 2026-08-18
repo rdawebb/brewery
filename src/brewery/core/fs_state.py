@@ -64,7 +64,7 @@ def _scan_formulae(env: BreweryENV) -> list[InstalledRecord]:
         One InstalledRecord per installed formula.
     """
     records: list[InstalledRecord] = []
-    for formula_dir in _children(env.cellar):
+    for formula_dir in child_dirs(env.cellar):
         name: str = formula_dir.name
         active: Path | None = _active_keg(
             name=name, cellar=env.cellar, prefix=env.prefix
@@ -74,7 +74,7 @@ def _scan_formulae(env: BreweryENV) -> list[InstalledRecord]:
             log.warning(event="formula_no_active_keg", name=name)
             continue
 
-        stale: list[str] = [d.name for d in _children(formula_dir) if d != active]
+        stale: list[str] = [d.name for d in child_dirs(formula_dir) if d != active]
         receipt: dict | None = _read_receipt(active / _RECEIPT_NAME)
         records.append(
             _formula_record(name=name, active=active, receipt=receipt, stale=stale)
@@ -96,9 +96,10 @@ def _scan_casks(env: BreweryENV) -> list[InstalledRecord]:
         One InstalledRecord per installed cask.
     """
     records: list[InstalledRecord] = []
-    for token_dir in _children(env.caskroom):
-        # `.metadata` is excluded by _children (hidden), so any remaining child is a version directory
-        version_dirs = _children(token_dir)
+    for token_dir in child_dirs(env.caskroom):
+        # `.metadata` is excluded by child_dirs (hidden), so any remaining child is a
+        # version directory
+        version_dirs = child_dirs(token_dir)
 
         if not version_dirs:
             log.warning(event="cask_no_version_dir", token=token_dir.name)
@@ -112,7 +113,7 @@ def _scan_casks(env: BreweryENV) -> list[InstalledRecord]:
                 kind=PackageKind.CASK,
                 version=active.name,
                 installed_on=_mtime_dt(active),
-                path=str(object=active),
+                path=str(active),
                 stale_versions=stale,
             )
         )
@@ -208,8 +209,8 @@ def _bookkeeping_names(prefix: Path, candidates: tuple[Path, ...]) -> set[str] |
             except OSError as e:
                 log.warning(
                     event="bookkeeping_dir_unreadable",
-                    path=str(object=directory),
-                    error=str(object=e),
+                    path=str(directory),
+                    error=str(e),
                 )
                 return None
 
@@ -286,7 +287,7 @@ def _active_keg(name: str, cellar: Path, prefix: Path) -> Path | None:
         # Broken symlink, loop, or missing target: fall through to the scan
         pass
 
-    candidates: list[Path] = _children(cellar / name)
+    candidates: list[Path] = child_dirs(cellar / name)
     if not candidates:
         return None
 
@@ -313,7 +314,7 @@ def _formula_record(
     # If no receipt, fall back to the keg mtime for the install date and skip flags,
     # unless the version is `HEAD`, then determine `head` from the keg name
     if receipt is None:
-        log.warning(event="receipt_missing", name=name, path=str(object=active))
+        log.warning(event="receipt_missing", name=name, path=str(active))
         return InstalledRecord(
             name=name,
             kind=PackageKind.FORMULA,
@@ -321,7 +322,7 @@ def _formula_record(
             revision=revision,
             installed_on=_mtime_dt(active),
             head=is_head(version),
-            path=str(object=active),
+            path=str(active),
             stale_versions=stale,
         )
 
@@ -349,7 +350,7 @@ def _formula_record(
         deps=deps,
         head=source.get("spec") == "head",
         tap=source.get("tap"),
-        path=str(object=active),
+        path=str(active),
         stale_versions=stale,
     )
 
@@ -370,15 +371,13 @@ def _read_receipt(path: Path) -> dict | None:
         return None
 
     except (OSError, orjson.JSONDecodeError) as e:
-        log.warning(
-            event="receipt_unreadable", path=str(object=path), error=str(object=e)
-        )
+        log.warning(event="receipt_unreadable", path=str(path), error=str(e))
         return None
 
     return data if isinstance(data, dict) else None
 
 
-def _children(base: Path) -> list[Path]:
+def child_dirs(base: Path) -> list[Path]:
     """Return non-hidden subdirectories of `base` (empty if base is absent).
 
     Args:

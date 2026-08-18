@@ -17,7 +17,7 @@ def outdated(
         False,
         "--check",
         "-c",
-        help="Live check for outdated packages and refresh cache",
+        help="Refetch the catalog, then re-scan installed packages",
     ),
 ) -> None:
     """List outdated packages.
@@ -26,7 +26,8 @@ def outdated(
     as the last install/uninstall/check. Pass --check to query brew directly.
 
     Args:
-        check: If True, performs a live brew outdated check and updates cache.
+        check: If True, refetches the upstream catalog and re-scans installed
+            packages before filtering.
     """
     with _repository() as repo:
         pkgs: list[Package]

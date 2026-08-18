@@ -87,8 +87,8 @@ def _resolve_brew_path(flag: str, cache_file: Path, fallback: Path) -> Path:
     try:
         value = Path(subprocess.check_output(args=["brew", flag], text=True).strip())
         ensure_cache_dir()
-        cache_file.write_text(data=str(object=value))
-        log.info(event=f"brew_{flag.lstrip('-')}_cached", path=str(object=value))
+        cache_file.write_text(data=str(value))
+        log.info(event=f"brew_{flag.lstrip('-')}_cached", path=str(value))
 
         return value
 

@@ -399,7 +399,7 @@ class BrewCommandError(SysError):
 
     Genuinely transient causes (network, service outages, rate limiting) are
     possible but indistinguishable from the deterministic majority via the
-    exit code, so this is NOT retried automatically. It instead drives the
+    exit code, so this is not retried automatically. It instead drives the
     native fallback path where callers catch it explicitly.
     """
 
@@ -546,6 +546,10 @@ class LinkError(UserError):
         - A manually placed file occupies a path Homebrew needs to own
         - A previous partial install left stale files in the prefix
         - Another formula already owns the conflicting path
+
+    Inside the install pipeline this is a control-flow signal that drives the
+    `brew link` fallback and never reaches the CLI. Raised by `brewery link` it is
+    a conflict only the user can clear.
     """
 
     def __init__(self, conflicts: list[tuple[str, str]]) -> None:
