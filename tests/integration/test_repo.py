@@ -386,7 +386,7 @@ class TestUninstall:
             """
             raise OSError("native failed")
 
-        monkeypatch.setattr(svc, "_remove_formula", _boom)
+        monkeypatch.setattr(svc, "remove_rack", _boom)
 
         # mock_brew logs but does not delete the keg, so _verify_removed sees it
         removed, failures = await repo.uninstall_packages(
@@ -522,7 +522,7 @@ class TestUninstall:
             """
             raise OSError("native failed")
 
-        monkeypatch.setattr(svc, "_remove_formula", _boom)
+        monkeypatch.setattr(svc, "remove_rack", _boom)
         await repo.uninstall_packages(["yazi"], kind=PackageKind.FORMULA)
         assert _provider_calls(mock_brew, "uninstall")
 
@@ -723,8 +723,8 @@ class TestUpgrade:
 
         import orjson
 
-        import brewery.providers.install_service as install_svc
         import brewery.providers.orchestrator as orch_mod
+        import brewery.providers.pipeline as install_svc
         from brewery.core import config
         from brewery.core.repo import Repository
         from brewery.core.shell import BrewResult

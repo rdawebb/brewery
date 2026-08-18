@@ -49,19 +49,67 @@ log: BreweryLogger = get_logger(__name__)
 
 
 class FormulaRowP(Protocol):
-    """Protocol for interacting with formula rows."""
+    """Protocol for interacting with formula rows.
 
-    name: str
-    tap: str | None
-    version: str
-    revision: int
-    version_scheme: int
-    keg_only: bool
-    post_install: bool
-    bottle_url: str
-    bottle_sha256: str
-    bottle_cellar: str | None
-    bottle_rebuild: int
+    Declared as read-only properties rather than plain attributes: a protocol's
+    mutable attributes are invariant and require a writable target, which the
+    frozen `catalog.store.FormulaRow` is not. Nothing here ever writes to a row.
+    """
+
+    @property
+    def name(self) -> str:
+        """The canonical formula name."""
+        ...
+
+    @property
+    def tap(self) -> str | None:
+        """The tap the formula came from, if recorded."""
+        ...
+
+    @property
+    def version(self) -> str:
+        """The upstream version string."""
+        ...
+
+    @property
+    def revision(self) -> int:
+        """Homebrew's packaging revision."""
+        ...
+
+    @property
+    def version_scheme(self) -> int:
+        """The formula's version-comparison scheme."""
+        ...
+
+    @property
+    def keg_only(self) -> bool:
+        """Whether the formula is keg-only (never linked into the prefix)."""
+        ...
+
+    @property
+    def post_install(self) -> bool:
+        """Whether the formula defines a post-install step."""
+        ...
+
+    @property
+    def bottle_url(self) -> str | None:
+        """The bottle download URL, or None when no bottle exists here."""
+        ...
+
+    @property
+    def bottle_sha256(self) -> str | None:
+        """The bottle's sha256, or None when no bottle exists here."""
+        ...
+
+    @property
+    def bottle_cellar(self) -> str | None:
+        """The cellar path the bottle was built for, if recorded."""
+        ...
+
+    @property
+    def bottle_rebuild(self) -> int:
+        """The bottle's rebuild counter."""
+        ...
 
 
 class CatalogPort(Protocol):
@@ -640,7 +688,8 @@ class Orchestrator:
         if fr is None or fr.bottle_url is None or fr.bottle_sha256 is None:
             return None, None, "no bottle in catalog", "no bottle in catalog"
 
-        ref = BottleRef(name, fr.bottle_url, fr.bottle_sha256)
+        sha256: str = fr.bottle_sha256
+        ref = BottleRef(name, fr.bottle_url, sha256)
         tab_error: str | None = None
         bottle_error: str | None = None
 
@@ -656,7 +705,7 @@ class Orchestrator:
                     return await self.tab_fetcher(
                         name=name,
                         version=fr.version,
-                        bottle_sha256=fr.bottle_sha256,
+                        bottle_sha256=sha256,
                         revision=fr.revision,
                         rebuild=fr.bottle_rebuild,
                     )

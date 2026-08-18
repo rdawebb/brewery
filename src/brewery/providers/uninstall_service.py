@@ -3,64 +3,42 @@
 from __future__ import annotations
 
 import asyncio
-import shutil
 
 from brewery.core.config import BreweryENV, get_brewery_env
 from brewery.core.errors import BrewCommandError, OperationInProgressError
-from brewery.core.locks import formula_lock
 from brewery.core.logging import BreweryLogger, get_logger
-from brewery.providers.linker import unlink_keg
+from brewery.providers.base import UninstallBackend
+from brewery.providers.cellar import remove_rack
 
 log: BreweryLogger = get_logger(name=__name__)
 
 
 async def run_uninstall(
-    repo, names: list[str], *, env: BreweryENV | None = None
+    names: list[str],
+    *,
+    formula: UninstallBackend,
+    env: BreweryENV | None = None,
 ) -> None:
     """Unlink + remove each formula's kegs, brew-falling-back per formula.
 
     Args:
-        repo: The Repository (for prefix/cellar paths).
         names: Canonical formula names to uninstall.
-        run_brew: Async `brew <args>` runner for the fallback path.
+        formula: Formula backend for the per-formula brew fallback.
         env: Brewery environment (paths), resolved if omitted.
     """
     env = env or get_brewery_env()
     for name in names:
         try:
-            await asyncio.to_thread(
-                _remove_formula, env.cellar / name, env.prefix, name
-            )
+            await asyncio.to_thread(remove_rack, env.cellar / name, env.prefix, name)
 
         except OperationInProgressError as exc:
             # brew locks the same rack, so falling back to it would fail too;
-            # repo._verify_removed reports the survivor as a failure
+            # the caller's removal verification reports the survivor as a failure
             log.warning(event="uninstall_rack_locked", formula=name, error=str(exc))
 
         except OSError:
             try:
-                await repo.formula.uninstall(names=[name])
+                await formula.uninstall(names=[name])
 
             except BrewCommandError:
-                pass  # repo._verify_removed reports the survivor as a failure
-
-
-def _remove_formula(cellar_dir, prefix, name: str) -> None:
-    """Unlink every installed keg of a formula, then delete its cellar dir.
-
-    Args:
-        cellar_dir: <prefix>/Cellar/<name>.
-        prefix: The Homebrew prefix.
-        name: The formula name.
-
-    Raises:
-        OperationInProgressError: Another process holds the formula's rack lock.
-    """
-    if not cellar_dir.exists():
-        return
-
-    with formula_lock(name, prefix=prefix):
-        for keg in sorted(p for p in cellar_dir.iterdir() if p.is_dir()):
-            unlink_keg(keg, prefix=prefix, name=name)  # realpath no-ops old kegs
-
-        shutil.rmtree(cellar_dir)
+                pass  # verification reports the survivor as a failure

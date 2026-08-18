@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Self
+from typing import Any, Self
 
 import httpx
 
@@ -36,8 +36,8 @@ class MockClient:
 def patch_httpx(monkeypatch) -> MockClient:
     """Patch httpx.AsyncClient with a stub that records its constructor kwargs.
 
-    Both service modules do a plain `import httpx`, so patching the attribute on
-    the shared module object covers whichever service is under test.
+    The pipeline module does a plain `import httpx`, so patching the attribute on
+    the shared module object covers whichever entry point is under test.
 
     Args:
         monkeypatch: The pytest monkeypatch fixture.
@@ -65,14 +65,18 @@ def patch_httpx(monkeypatch) -> MockClient:
     return client
 
 
-class MockRepo:
-    """Minimal repo stub exposing catalog, cache_mgr, and formula attributes."""
+class MockPorts:
+    """The three ports the pipeline needs, as opaque sentinels.
+
+    The pipeline only forwards them, so identity is all a test needs to assert;
+    they are `Any` because no method on them is ever called.
+    """
 
     def __init__(self) -> None:
-        """Initialise with mock catalog, cache_mgr, and formula objects."""
-        self.catalog = object()
-        self.cache_mgr = object()
-        self.formula = object()
+        """Initialise with distinct catalog, cache_mgr, and formula sentinels."""
+        self.catalog: Any = object()
+        self.cache_mgr: Any = object()
+        self.formula: Any = object()
 
 
 async def _run_brew(args) -> None:

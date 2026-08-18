@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -13,7 +14,7 @@ from brewery.core.errors import (
     PinnedPackageWarning,
 )
 from brewery.core.models import Package, PackageKind
-from brewery.providers.install_adapters import BrewAdapter, RepositoryCatalogAdapter
+from brewery.providers.install_adapters import BrewAdapter, CatalogAdapter
 
 pytestmark = pytest.mark.asyncio
 
@@ -25,8 +26,10 @@ class MockCatalog:
         """Initialise the mock catalog with an empty call log."""
         self.calls = []
 
-    def get_formula(self, name: str) -> str:
+    def get_formula(self, name: str) -> Any:
         """Record the call and return a row sentinel string.
+
+        The adapter forwards the row untouched, so a marker stands in for one.
 
         Args:
             name: The formula name to look up.
@@ -90,7 +93,9 @@ class MockCacheMgr:
         self._installed: dict[str, str | None] = installed or {}
         self.calls: list = []
 
-    def find_installed(self, name: str, kind: PackageKind) -> Package | None:
+    def find_installed(
+        self, name: str, kind: PackageKind | None = None
+    ) -> Package | None:
         """Return a Package if *name* is in the installed set, else None.
 
         Args:
@@ -104,33 +109,36 @@ class MockCacheMgr:
         if name not in self._installed:
             return None
 
-        return Package(name, kind, path=self._installed[name])
+        return Package(name, kind or PackageKind.FORMULA, path=self._installed[name])
 
 
-class MockRepo:
-    """Minimal repo stub wiring together a MockCatalog and MockCacheMgr."""
+def _adapter(
+    installed: dict[str, str | None] | None = None,
+) -> tuple[CatalogAdapter, MockCatalog, MockCacheMgr]:
+    """Build a CatalogAdapter over fresh catalog and cache-manager stubs.
 
-    def __init__(self, installed: dict[str, str | None] | None = None) -> None:
-        """Initialise the mock repo.
+    Args:
+        installed: Mapping of package name -> keg path passed to MockCacheMgr.
 
-        Args:
-            installed: Mapping of package name -> keg path passed to MockCacheMgr.
-        """
-        self.catalog = MockCatalog()
-        self.cache_mgr = MockCacheMgr(installed)
-        self.formula = None
+    Returns:
+        The adapter under test and the two stubs behind it, so a test can read
+        their call logs without reaching through the adapter's private fields.
+    """
+    catalog = MockCatalog()
+    cache_mgr = MockCacheMgr(installed)
+
+    return CatalogAdapter(catalog, cache_mgr), catalog, cache_mgr
 
 
-async def test_catalog_methods_delegate_to_repo_catalog() -> None:
-    """Test that each CatalogPort method delegates to repo.catalog."""
-    repo = MockRepo(installed={})
-    adapter = RepositoryCatalogAdapter(repo)
+async def test_catalog_methods_delegate_to_the_catalog() -> None:
+    """Test that each CatalogPort method delegates to the injected catalog."""
+    adapter, catalog, _ = _adapter(installed={})
     assert adapter.get_formula("wget") == "row:wget"
     assert adapter.resolve_alias("py") == "canon:py"
     assert adapter.runtime_deps("wget") == ["wget-dep"]
     assert adapter.aliases_of("openssl@3") == ["openssl@3-alias"]
-    assert ("get_formula", "wget") in repo.catalog.calls
-    assert ("aliases_of", "openssl@3") in repo.catalog.calls
+    assert ("get_formula", "wget") in catalog.calls
+    assert ("aliases_of", "openssl@3") in catalog.calls
 
 
 async def test_is_satisfied_true_when_installed_with_receipt(
@@ -141,16 +149,14 @@ async def test_is_satisfied_true_when_installed_with_receipt(
     keg.mkdir(parents=True)
     (keg / "INSTALL_RECEIPT.json").write_text(json.dumps({}))
 
-    repo = MockRepo(installed={"wget": str(keg)})
-    adapter = RepositoryCatalogAdapter(repo)
+    adapter, _, cache_mgr = _adapter(installed={"wget": str(keg)})
     assert adapter.is_satisfied("wget") is True
-    assert repo.cache_mgr.calls == [("wget", PackageKind.FORMULA)]
+    assert cache_mgr.calls == [("wget", PackageKind.FORMULA)]
 
 
 async def test_is_satisfied_false_when_absent() -> None:
     """Test that is_satisfied returns False when the package is absent from the cache."""
-    repo = MockRepo(installed={})
-    adapter = RepositoryCatalogAdapter(repo)
+    adapter, _, _ = _adapter(installed={})
     assert adapter.is_satisfied("wget") is False
 
 
@@ -163,15 +169,13 @@ async def test_is_satisfied_false_when_keg_has_no_receipt(tmp_path: Path) -> Non
     keg = tmp_path / "wget" / "1.21.4"
     keg.mkdir(parents=True)
 
-    repo = MockRepo(installed={"wget": str(keg)})
-    adapter = RepositoryCatalogAdapter(repo)
+    adapter, _, _ = _adapter(installed={"wget": str(keg)})
     assert adapter.is_satisfied("wget") is False
 
 
 async def test_is_satisfied_false_when_pkg_has_no_path() -> None:
     """Test that is_satisfied returns False when find_installed returns a Package with no path."""
-    repo = MockRepo(installed={"wget": None})
-    adapter = RepositoryCatalogAdapter(repo)
+    adapter, _, _ = _adapter(installed={"wget": None})
     assert adapter.is_satisfied("wget") is False
 
 
@@ -192,6 +196,21 @@ class MockBackend:
 
         Args:
             names: The list of package names to install.
+
+        Returns:
+            The names list on success.
+        """
+        self.calls.append(names)
+        if self.exc is not None:
+            raise self.exc
+
+        return names
+
+    async def upgrade(self, names) -> list[str]:
+        """Record the call and optionally raise the configured exception.
+
+        Args:
+            names: The list of package names to upgrade.
 
         Returns:
             The names list on success.

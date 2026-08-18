@@ -10,7 +10,12 @@ from pathlib import Path
 import pytest
 
 import brewery.providers.cellar as _cellar
-from brewery.providers.cellar import CellarError, clone_tree, install_to_cellar
+from brewery.providers.cellar import (
+    CellarError,
+    clone_tree,
+    install_to_cellar,
+    remove_rack,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -220,3 +225,48 @@ def test_clonefile_matches_copytree(staged_keg, tmp_path) -> None:
         return out
 
     assert snapshot(via_clone) == snapshot(via_copy)
+
+
+class TestRemoveRack:
+    """Tests for remove_rack, the native removal of one formula's kegs."""
+
+    def test_refuses_a_locked_rack(self, tmp_path) -> None:
+        """The rack lock is really taken: a peer's hold keeps the kegs in place."""
+        import fcntl
+
+        from brewery.core.errors import OperationInProgressError
+        from brewery.core.locks import lock_path
+
+        cellar = tmp_path / "Cellar" / "tool"
+        (cellar / "1.0" / "bin").mkdir(parents=True)
+        prefix = tmp_path / "prefix"
+
+        path = lock_path(prefix, "tool")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            with pytest.raises(OperationInProgressError):
+                remove_rack(cellar, prefix, "tool")
+
+        finally:
+            os.close(fd)
+
+        assert cellar.exists()
+
+    def test_missing_dir_is_noop(self, tmp_path) -> None:
+        """A missing cellar dir is a clean no-op (already-removed success path)."""
+        remove_rack(tmp_path / "Cellar" / "ghost", tmp_path / "prefix", "ghost")
+
+    def test_unlinks_all_versions_then_removes(self, tmp_path, monkeypatch) -> None:
+        """Every version keg is unlinked before the formula's cellar dir is removed."""
+        cellar = tmp_path / "Cellar" / "tool"
+        (cellar / "1.0" / "bin").mkdir(parents=True)
+        (cellar / "2.0" / "bin").mkdir(parents=True)
+        seen: list[str] = []
+        monkeypatch.setattr(
+            _cellar, "unlink_keg", lambda keg, *, prefix, name: seen.append(keg.name)
+        )
+        remove_rack(cellar, tmp_path / "prefix", "tool")
+        assert sorted(seen) == ["1.0", "2.0"]
+        assert not cellar.exists()

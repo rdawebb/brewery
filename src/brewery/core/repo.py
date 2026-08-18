@@ -153,9 +153,16 @@ class Repository:
             await self.cask.install(names=names)
 
         else:
-            from brewery.providers.install_service import run_install
+            from brewery.providers.pipeline import run_install
 
-            await run_install(self, names, run_brew=run_brew, progress=progress)
+            await run_install(
+                names,
+                catalog=self.catalog,
+                cache_mgr=self.cache_mgr,
+                formula=self.formula,
+                run_brew=run_brew,
+                progress=progress,
+            )
 
         self.cache_mgr.invalidate()
         installed_by_name: dict[str, Package] = {
@@ -238,7 +245,7 @@ class Repository:
         if formula_names:
             from brewery.providers.uninstall_service import run_uninstall
 
-            await run_uninstall(self, formula_names)
+            await run_uninstall(formula_names, formula=self.formula)
 
         if cask_names:
             await self.cask.uninstall(names=cask_names)
@@ -426,7 +433,7 @@ class Repository:
         }
 
         if formula_names:
-            from brewery.providers.upgrade_service import run_upgrade
+            from brewery.providers.pipeline import run_upgrade
 
             old_kegs = {
                 p.name: Path(p.path)
@@ -434,7 +441,13 @@ class Repository:
                 if p.kind == PackageKind.FORMULA and p.path
             }
             await run_upgrade(
-                self, formula_names, old_kegs, run_brew=run_brew, progress=progress
+                formula_names,
+                old_kegs,
+                catalog=self.catalog,
+                cache_mgr=self.cache_mgr,
+                formula=self.formula,
+                run_brew=run_brew,
+                progress=progress,
             )
 
         if cask_names:
@@ -620,7 +633,7 @@ class Repository:
         Returns:
             Tuple of (pinned names, (name, reason) advisories, (name, reason) failures).
         """
-        from brewery.providers.pin_service import pin
+        from brewery.providers.pinning import pin
 
         env: BreweryENV = self.cache_mgr.env or get_brewery_env()
         pkgs, failures = self._resolve_installed_formulae(names)
@@ -654,7 +667,7 @@ class Repository:
         Returns:
             Tuple of (unpinned names, (name, reason) advisories, (name, reason) failures).
         """
-        from brewery.providers.pin_service import unpin
+        from brewery.providers.pinning import unpin
 
         env: BreweryENV = self.cache_mgr.env or get_brewery_env()
         pkgs, failures = self._resolve_installed_formulae(names)

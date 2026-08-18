@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 
 from brewery.core.errors import CellarError
+from brewery.core.locks import formula_lock
+from brewery.providers.linker import unlink_keg
 
 _IS_DARWIN = sys.platform == "darwin"
 
@@ -95,6 +97,27 @@ def rmtree(path: Path) -> None:
         func(p)
 
     shutil.rmtree(path, onerror=onerror)
+
+
+def remove_rack(cellar_dir: Path, prefix: Path, name: str) -> None:
+    """Unlink every installed keg of a formula, then delete its cellar dir.
+
+    Args:
+        cellar_dir: <prefix>/Cellar/<name>.
+        prefix: The Homebrew prefix.
+        name: The formula name.
+
+    Raises:
+        OperationInProgressError: Another process holds the formula's rack lock.
+    """
+    if not cellar_dir.exists():
+        return
+
+    with formula_lock(name, prefix=prefix):
+        for keg in sorted(p for p in cellar_dir.iterdir() if p.is_dir()):
+            unlink_keg(keg, prefix=prefix, name=name)  # realpath no-ops old kegs
+
+        shutil.rmtree(cellar_dir)
 
 
 def _link_opt(prefix: Path, name: str, version: str) -> Path:
