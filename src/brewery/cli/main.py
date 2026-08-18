@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 
 from typer_extensions import ExtendedTyper
@@ -10,7 +11,10 @@ from typer_extensions import ExtendedTyper
 import brewery.cli.commands  # noqa: F401  (registration side effects)
 from brewery.cli.context import app, console
 from brewery.core.errors import EXIT_SYSTEM_ERROR, BrewCommandError
+from brewery.core.logging import BreweryLogger, configure_logging, get_logger
 from brewery.core.shell import BrewOutput, run_brew
+
+log: BreweryLogger = get_logger(name=__name__)
 
 
 def _derive_known_commands(app: ExtendedTyper = app) -> set[str]:
@@ -50,20 +54,27 @@ def _brew_passthrough(argv: list[str]) -> int:
     Returns:
         The exit code of the brew command.
     """
-    try:
-        import asyncio
+    import asyncio
 
-        return asyncio.run(
+    # main() exits here before app(), so the setup callback never configures logging
+    configure_logging(console_level=os.environ.get("BREWERY_LOG_CONSOLE"))
+
+    try:
+        returncode = asyncio.run(
             run_brew(argv, output=BrewOutput.INHERIT, check=False, timeout=None)
         ).returncode
 
     # check=False, so the only failure left is brew missing from PATH
     except BrewCommandError:
         console.print("\n✗ brew not found on PATH\n", style="bold red")
-        return EXIT_SYSTEM_ERROR
+        returncode = EXIT_SYSTEM_ERROR
 
     except KeyboardInterrupt:
-        return 130
+        returncode = 130
+
+    log.info(event="brew_passthrough", argv=" ".join(argv), returncode=returncode)
+
+    return returncode
 
 
 def main(argv: list[str] | None = None) -> None:
