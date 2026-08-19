@@ -14,6 +14,7 @@ from brewery.cli.output import (
     spinner,
 )
 from brewery.core.models import PackageKind
+from brewery.services.uninstall import uninstall_packages
 
 
 @app.command(aliases=["rm", "del"])
@@ -41,7 +42,7 @@ def uninstall(
 
     with _repository() as repo:
         with spinner("Uninstalling..."):
-            removed, failures = run_async(coro=repo.uninstall_packages(names, kind))
+            removed, failures = run_async(coro=uninstall_packages(repo, names, kind))
 
         print_result(
             f"✓ Uninstalled {len(removed)} package(s)\n", removed, style="bold green"
