@@ -4,17 +4,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from brewery.core.config import BreweryENV
+from brewery.core.config import BreweryENV, get_brewery_env
+from brewery.core.decorators import log_operation
 from brewery.core.errors import LinkError, OperationInProgressError
 from brewery.core.fs_state import is_effectively_linked, linked_names
 from brewery.core.locks import formula_lock
-from brewery.core.models import Package, PackageStatus
+from brewery.core.models import Notes, Package, PackageStatus
+from brewery.core.repo import Repository
 from brewery.providers.linker import LinkResult, UnlinkResult, link_keg, unlink_keg
+from brewery.services.resolve import installed_formulae
 
 # Conflicting paths quoted back to the user before the list is elided
 _MAX_QUOTED_CONFLICTS = 3
 
-Notes = list[tuple[str, str]]  # (name, reason) advisories or failures
 LinkOutcome = tuple[list[tuple[str, LinkResult]], Notes, Notes]
 UnlinkOutcome = tuple[list[tuple[str, UnlinkResult]], Notes, Notes]
 
@@ -172,3 +174,69 @@ def _keg(pkg: Package) -> Path:
         raise ValueError(f"{pkg.name} has no keg path")
 
     return Path(pkg.path)
+
+
+@log_operation(event_prefix="link_packages", log_args=["names"])
+def link_packages(
+    repo: Repository,
+    names: list[str],
+    *,
+    overwrite: bool = False,
+    force: bool = False,
+    dry_run: bool = False,
+    env: BreweryENV | None = None,
+) -> LinkOutcome:
+    """Symlink formulae into the prefix.
+
+    Args:
+        repo: The data facade to read installed state through.
+        names: Name(s) of the formulae to link.
+        overwrite: Delete conflicting prefix files while linking.
+        force: Allow keg-only formulae to be linked.
+        dry_run: Report what would be linked without touching the filesystem.
+        env: Brewery environment (paths), resolved if omitted.
+
+    Returns:
+        Tuple of ((name, LinkResult) pairs, advisories, failures).
+    """
+    env = env or repo.cache_mgr.env or get_brewery_env()
+    pkgs, failures = installed_formulae(repo, names)
+
+    linked, advisories, link_failures = run_link(
+        pkgs, env=env, overwrite=overwrite, force=force, dry_run=dry_run
+    )
+
+    if linked and not dry_run:
+        repo.cache_mgr.invalidate()
+
+    return linked, advisories, failures + link_failures
+
+
+@log_operation(event_prefix="unlink_packages", log_args=["names"])
+def unlink_packages(
+    repo: Repository,
+    names: list[str],
+    *,
+    dry_run: bool = False,
+    env: BreweryENV | None = None,
+) -> UnlinkOutcome:
+    """Remove formulae's symlinks from the prefix.
+
+    Args:
+        repo: The data facade to read installed state through.
+        names: Name(s) of the formulae to unlink.
+        dry_run: Report what would be removed without touching the filesystem.
+        env: Brewery environment (paths), resolved if omitted.
+
+    Returns:
+        Tuple of ((name, UnlinkResult) pairs, advisories, failures).
+    """
+    env = env or repo.cache_mgr.env or get_brewery_env()
+    pkgs, failures = installed_formulae(repo, names)
+
+    unlinked, advisories, unlink_failures = run_unlink(pkgs, env=env, dry_run=dry_run)
+
+    if unlinked and not dry_run:
+        repo.cache_mgr.invalidate()
+
+    return unlinked, advisories, failures + unlink_failures

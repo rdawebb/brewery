@@ -12,6 +12,7 @@ from brewery.cli.output import (
     print_failures,
     print_result,
 )
+from brewery.services import link as link_service
 
 if TYPE_CHECKING:
     from brewery.providers.linker import LinkResult
@@ -21,7 +22,7 @@ def _preview_link(linked: list[tuple[str, LinkResult]]) -> None:
     """Print the paths a real `link` would create and, with --overwrite, delete.
 
     Args:
-        linked: The (name, result) pairs reported by the repository.
+        linked: The (name, result) pairs reported by the link service.
     """
     for name, result in linked:
         print_result(
@@ -62,8 +63,8 @@ def link(
     """
     with _repository() as repo:
         sys.stdout.write("\n")
-        linked, advisories, failures = repo.link_packages(
-            names, overwrite=overwrite, force=force, dry_run=dry_run
+        linked, advisories, failures = link_service.link_packages(
+            repo, names, overwrite=overwrite, force=force, dry_run=dry_run
         )
 
         print_advisories(advisories)
@@ -104,7 +105,9 @@ def unlink(
     """
     with _repository() as repo:
         sys.stdout.write("\n")
-        unlinked, advisories, failures = repo.unlink_packages(names, dry_run=dry_run)
+        unlinked, advisories, failures = link_service.unlink_packages(
+            repo, names, dry_run=dry_run
+        )
 
         print_advisories(advisories)
 

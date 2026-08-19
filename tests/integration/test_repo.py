@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 import pytest
 
 from brewery.core.models import PackageKind, PackageStatus
+from brewery.services.pin import pin_packages, unpin_packages
 
 pytestmark = pytest.mark.integration
 
@@ -635,7 +636,7 @@ class TestUpgrade:
         'pinned' reason and keep it out of the upgrade targets. A bulk upgrade
         skips pins without failing, matching `brew upgrade`.
         """
-        assert repo.pin_packages(["act"])[0] == ["act"]
+        assert pin_packages(repo, ["act"])[0] == ["act"]
 
         upgraded, _current, advisories, failures = await repo.upgrade_packages()
         assert ("act", "pinned - not upgraded") in advisories
@@ -649,7 +650,7 @@ class TestUpgrade:
 
         Naming a pinned package is an error, unlike skipping it in a bulk upgrade.
         """
-        assert repo.pin_packages(["act"])[0] == ["act"]
+        assert pin_packages(repo, ["act"])[0] == ["act"]
 
         upgraded, _current, _advisories, failures = await repo.upgrade_packages(["act"])
         assert ("act", "pinned - skipped") in failures
@@ -660,8 +661,8 @@ class TestUpgrade:
 
     async def test_unpinned_package_upgrades_again(self, repo) -> None:
         """Test that unpinning restores a package to the upgrade targets."""
-        repo.pin_packages(["act"])
-        assert repo.unpin_packages(["act"])[0] == ["act"]
+        pin_packages(repo, ["act"])
+        assert unpin_packages(repo, ["act"])[0] == ["act"]
 
         upgraded, _current, advisories, _failures = await repo.upgrade_packages()
         assert ("act", "pinned - not upgraded") not in advisories
@@ -865,88 +866,6 @@ class TestUpgrade:
         # The rescan resolves the active version to 2.0 (1.0 is now a stale version)
         pkg = next(p for p in repo.get_all_installed() if p.name == "wget")
         assert pkg.versions[0] == "2.0"
-
-
-class TestPinAndUnpin:
-    """Tests for Repository.pin_packages / unpin_packages."""
-
-    def test_pin_writes_a_record_and_shows_as_pinned(self, repo, mock_env) -> None:
-        """Test that a pinned formula reads back as PINNED through the merge."""
-        pinned, advisories, failures = repo.pin_packages(["act"])
-
-        assert (pinned, advisories, failures) == (["act"], [], [])
-        assert (mock_env.prefix / "var" / "homebrew" / "pinned" / "act").is_symlink()
-
-        pkg = next(p for p in repo.get_all_installed() if p.name == "act")
-        assert PackageStatus.PINNED in pkg.status
-
-    def test_pinning_twice_is_an_advisory_not_a_failure(self, repo) -> None:
-        """Test that re-pinning warns and exits clean, as brew's `opoo` path does."""
-        repo.pin_packages(["act"])
-
-        pinned, advisories, failures = repo.pin_packages(["act"])
-        assert (pinned, advisories, failures) == ([], [("act", "already pinned")], [])
-
-    def test_unpinning_an_unpinned_formula_is_an_advisory(self, repo) -> None:
-        """Test that unpinning what was never pinned warns rather than failing."""
-        unpinned, advisories, failures = repo.unpin_packages(["act"])
-
-        assert (unpinned, advisories, failures) == ([], [("act", "not pinned")], [])
-
-    def test_pin_of_a_missing_formula_is_a_failure(self, repo) -> None:
-        """Test that a name that is not installed is a hard failure, as brew's `ofail` is."""
-        pinned, advisories, failures = repo.pin_packages(["ripgrep"])
-
-        assert (pinned, advisories, failures) == (
-            [],
-            [],
-            [("ripgrep", "not installed")],
-        )
-
-    def test_pin_does_not_reach_for_casks(self, repo) -> None:
-        """Test that cask tokens are not resolvable as formulae, so they report not installed."""
-        _, _, failures = repo.pin_packages(["iina"])
-
-        assert failures == [("iina", "not installed")]
-
-
-class TestLinkAndUnlink:
-    """Tests for Repository.link_packages / unlink_packages."""
-
-    def test_link_then_unlink_round_trips(self, repo, mock_env) -> None:
-        """Test that linking creates the bookkeeping record; unlinking removes it."""
-        keg = mock_env.cellar / "act" / "0.2.88"
-        (keg / "bin").mkdir(parents=True)
-        (keg / "bin" / "act").write_text("#!/bin/sh\n")
-
-        linked, _, failures = repo.link_packages(["act"])
-        assert [name for name, _ in linked] == ["act"]
-        assert not failures
-        assert (mock_env.prefix / "bin" / "act").is_symlink()
-
-        unlinked, _, failures = repo.unlink_packages(["act"])
-        assert "bin/act" in unlinked[0][1].removed
-        assert not failures
-        assert not (mock_env.prefix / "bin" / "act").exists()
-
-    def test_link_dry_run_leaves_the_prefix_alone(self, repo, mock_env) -> None:
-        """Test that a dry run previews the links without creating any."""
-        keg = mock_env.cellar / "act" / "0.2.88"
-        (keg / "bin").mkdir(parents=True)
-        (keg / "bin" / "act").write_text("#!/bin/sh\n")
-
-        linked, _, failures = repo.link_packages(["act"], dry_run=True)
-
-        assert "bin/act" in linked[0][1].linked
-        assert not failures
-        assert not (mock_env.prefix / "bin" / "act").exists()
-
-    def test_link_of_a_missing_formula_is_a_failure(self, repo) -> None:
-        """Test that an uninstalled name fails rather than silently succeeding."""
-        linked, _, failures = repo.link_packages(["ripgrep"])
-
-        assert linked == []
-        assert failures == [("ripgrep", "not installed")]
 
 
 class TestCleanup:

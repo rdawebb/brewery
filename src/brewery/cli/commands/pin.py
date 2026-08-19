@@ -12,6 +12,7 @@ from brewery.cli.output import (
     print_result,
 )
 from brewery.core.errors import UserError
+from brewery.services import pin as pin_service
 
 
 def _reject_casks(cask: bool, command: str, names: list[str]) -> None:
@@ -77,7 +78,7 @@ def pin(
 
     with _repository() as repo:
         sys.stdout.write("\n")
-        pinned, advisories, failures = repo.pin_packages(names)
+        pinned, advisories, failures = pin_service.pin_packages(repo, names)
 
         _report("pin", pinned, advisories, failures)
 
@@ -102,7 +103,7 @@ def unpin(
 
     with _repository() as repo:
         sys.stdout.write("\n")
-        unpinned, advisories, failures = repo.unpin_packages(names)
+        unpinned, advisories, failures = pin_service.unpin_packages(repo, names)
 
         _report("unpin", unpinned, advisories, failures)
 
