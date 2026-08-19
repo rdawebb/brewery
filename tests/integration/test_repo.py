@@ -1,65 +1,12 @@
-"""Integration tests for Repository orchestration over catalog + scanner + providers."""
+"""Integration tests for the Repository data facade over catalog + FS cache."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from brewery.core.repo import Repository
-
 import pytest
-from _repo_helpers import _add_alias, _provider_calls
 
 from brewery.core.models import PackageKind, PackageStatus
 
 pytestmark = pytest.mark.integration
-
-
-def _repo_with_providers(catalog, *, formula=None, cask=None) -> Repository:
-    """Build a Repository with per-test provider backends.
-
-    The default brew_formula/brew_cask backends are shared module singletons, so
-    a test must never mutate repo.formula/repo.cask in place. Injecting fresh
-    backends via the constructor keeps stateful mocks isolated to one test.
-
-    Args:
-        catalog: The catalog to use for the repository.
-        formula: An optional formula backend to use.
-        cask: An optional cask backend to use.
-
-    Returns:
-        A Repository instance with the specified backends.
-    """
-    from types import SimpleNamespace
-
-    from brewery.core.repo import Repository
-    from brewery.providers import brew
-
-    async def _noop(names) -> list[str]:
-        """Simulate a no-op operation.
-
-        Args:
-            names: The names to operate on.
-
-        Returns:
-            The names unchanged.
-        """
-        return names
-
-    formula_backend = SimpleNamespace(
-        install=_noop,
-        uninstall=formula or _noop,
-        upgrade=formula or _noop,
-    )
-    cask_backend = SimpleNamespace(
-        install=_noop, uninstall=cask or _noop, upgrade=cask or _noop
-    )
-
-    return Repository(
-        catalog=catalog,
-        formula_backend=formula_backend if formula else brew.formula_backend,
-        cask_backend=cask_backend if cask else brew.cask_backend,
-    )
 
 
 class TestGetAllInstalled:
@@ -228,68 +175,3 @@ class TestSearch:
             repo: The Repository instance to test with
         """
         assert repo.search("zzzznomatch") == []
-
-
-class TestInstall:
-    """Tests for Repository.install_packages."""
-
-    async def test_install_calls_provider(self, repo, mock_brew) -> None:
-        """Test that installing a formula not already in the Cellar falls back to brew install."""
-        await repo.install_packages(["ripgrep"], kind=PackageKind.FORMULA)
-        assert _provider_calls(mock_brew, "install")
-
-    async def test_install_reports_present_package_as_installed(self, repo) -> None:
-        """Test that a package present on the mock fs is reported installed.
-
-        yazi already exists in the mock Cellar, so after the (mocked) install and
-        re-scan it is found and returned.
-        """
-        installed, failures = await repo.install_packages(
-            ["yazi"], kind=PackageKind.FORMULA
-        )
-        assert [p.name for p in installed] == ["yazi"]
-        assert failures == []
-
-    async def test_install_reports_absent_package_as_failure(self, repo) -> None:
-        """Test that a package absent from the fs after install is a failure.
-
-        The mock does not create the keg, so a never-installed name re-scans as
-        missing and is reported as a failure rather than a success.
-        """
-        installed, failures = await repo.install_packages(
-            ["ripgrep"], kind=PackageKind.FORMULA
-        )
-        assert installed == []
-        assert failures == [("ripgrep", "install failed or not found")]
-
-    async def test_install_appearing_package_is_detected(self, repo, mock_env) -> None:
-        """Test that a keg created during install is detected on re-scan.
-
-        Simulating brew creating the keg (plus a receipt) makes the package show
-        up after invalidation, exercising the cache-invalidate-then-rescan path.
-        """
-        import orjson
-
-        keg = mock_env.cellar / "ripgrep" / "14.1.0"
-        keg.mkdir(parents=True)
-        (keg / "INSTALL_RECEIPT.json").write_bytes(
-            orjson.dumps({"source": {"tap": "homebrew/core"}})
-        )
-        installed, failures = await repo.install_packages(
-            ["ripgrep"], kind=PackageKind.FORMULA
-        )
-        assert [p.name for p in installed] == ["ripgrep"]
-        assert failures == []
-
-    async def test_install_via_alias_verified_by_canonical_name(self, repo) -> None:
-        """Test that an installed alias verifies against its canonical name.
-
-        Requesting "yazi-cli" (an alias for the present "yazi") must report the
-        canonical package as installed.
-        """
-        _add_alias(repo.catalog, "yazi-cli", "yazi")
-        installed, failures = await repo.install_packages(
-            ["yazi-cli"], kind=PackageKind.FORMULA
-        )
-        assert [p.name for p in installed] == ["yazi"]
-        assert failures == []

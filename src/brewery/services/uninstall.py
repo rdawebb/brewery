@@ -14,6 +14,7 @@ from brewery.core.repo import Repository
 from brewery.providers import brew
 from brewery.providers.base import PackageBackend, UninstallBackend
 from brewery.providers.uninstall_service import run_uninstall
+from brewery.services.cask import uninstall_casks
 
 
 @log_operation(event_prefix="uninstall_package", log_args=["name", "kind"])
@@ -94,7 +95,7 @@ async def uninstall_packages(
         await run_uninstall(formula_names, formula=formula, env=env)
 
     if cask_names:
-        await cask.uninstall(names=cask_names)
+        await uninstall_casks(cask_names, backend=cask)
 
     repo.cache_mgr.invalidate()
 

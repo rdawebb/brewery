@@ -13,6 +13,7 @@ from brewery.core.shell import run_brew
 from brewery.providers import brew
 from brewery.providers.base import PackageBackend
 from brewery.providers.pipeline import run_upgrade
+from brewery.services.cask import upgrade_casks
 
 if TYPE_CHECKING:
     from brewery.providers.orchestrator import ProgressPort
@@ -142,7 +143,7 @@ async def upgrade_packages(
         )
 
     if cask_names:
-        await cask.upgrade(names=cask_names)
+        await upgrade_casks(cask_names, backend=cask)
 
     # Only invalidate the cache if something actually changed
     if formula_names or cask_names:

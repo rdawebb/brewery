@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from brewery.core.cache import Cache, CacheManager
 from brewery.core.catalog import Catalog
 from brewery.core.config import BreweryENV
@@ -11,11 +9,7 @@ from brewery.core.decorators import log_operation
 from brewery.core.errors import PackageNotFoundError
 from brewery.core.logging import BreweryLogger, get_logger
 from brewery.core.models import Package, PackageKind, PackageStatus
-from brewery.core.shell import run_brew
 from brewery.providers import brew
-
-if TYPE_CHECKING:
-    from brewery.providers.orchestrator import ProgressPort
 
 log: BreweryLogger = get_logger(name=__name__)
 
@@ -122,60 +116,3 @@ class Repository:
         packages: list[Package] = self.cache_mgr.installed_packages()
 
         return [p for p in packages if PackageStatus.OUTDATED in p.status]
-
-    @log_operation(event_prefix="install_package", log_args=["name", "kind"])
-    async def install_packages(
-        self,
-        names: list[str],
-        kind: PackageKind = PackageKind.FORMULA,
-        *,
-        progress: ProgressPort | None = None,
-    ) -> tuple[list[Package], list[tuple[str, str]]]:
-        """Install a package or packages and return details.
-
-        Args:
-            names: Name of the package(s) to install.
-            kind: Kind of the package(s) - formula (default or cask).
-            progress: Optional progress sink for the native pipeline.
-
-        Returns:
-            Package(s) details on success.
-
-        Raises:
-            BrewCommandError: Propagated from provider.
-        """
-        if kind == PackageKind.CASK:
-            await self.cask.install(names=names)
-
-        else:
-            from brewery.providers.pipeline import run_install
-
-            await run_install(
-                names,
-                catalog=self.catalog,
-                cache_mgr=self.cache_mgr,
-                formula=self.formula,
-                run_brew=run_brew,
-                progress=progress,
-            )
-
-        self.cache_mgr.invalidate()
-        installed_by_name: dict[str, Package] = {
-            p.name: p for p in self.cache_mgr.installed_packages(kind=kind)
-        }
-
-        resolved: dict[str, str] = {n: self.catalog.resolve_alias(n) for n in names}
-
-        installed: list[Package] = [
-            installed_by_name[resolved[n]]
-            for n in names
-            if resolved[n] in installed_by_name
-        ]
-
-        failures: list[tuple[str, str]] = [
-            (n, "install failed or not found")
-            for n in names
-            if resolved[n] not in installed_by_name
-        ]
-
-        return installed, failures
