@@ -17,6 +17,7 @@ from brewery.cli.output import (
 from brewery.cli.progress import make_reporter
 from brewery.core.errors import PinnedPackageWarning
 from brewery.core.models import Package, PackageKind
+from brewery.services.upgrade import upgrade_packages
 
 
 @app.command(aliases=["u", "up"])
@@ -71,7 +72,7 @@ def upgrade(
                 return
 
         upgraded, current, advisories, failures = run_async(
-            coro=repo.upgrade_packages(names, kind, progress=make_reporter(console))
+            coro=upgrade_packages(repo, names, kind, progress=make_reporter(console))
         )
 
         if not upgraded and not advisories and not failures and not current:

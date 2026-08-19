@@ -1,10 +1,4 @@
-"""Assemble and run the native bottle pipeline for a set of formulae.
-
-Install and upgrade share one Orchestrator assembly; only the terminal call
-differs. Nothing here knows about `Repository` -- the ports it needs are passed
-in explicitly, so the command policy that chooses the formulae lives a layer up
-in `brewery.services`.
-"""
+"""Assemble and run the native bottle pipeline for a set of formulae."""
 
 from __future__ import annotations
 
