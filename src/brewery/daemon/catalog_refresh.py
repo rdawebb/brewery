@@ -69,6 +69,7 @@ async def _maybe_cleanup(catalog: Catalog) -> None:
     from brewery.core.config import ensure_cache_dir
     from brewery.core.repo import Repository
     from brewery.providers.retention import due_for_cleanup, mark_cleanup_run
+    from brewery.services.cleanup import cleanup_packages
 
     cache_dir = ensure_cache_dir()
     if not due_for_cleanup(cache_dir):
@@ -77,7 +78,7 @@ async def _maybe_cleanup(catalog: Catalog) -> None:
     try:
         # Borrows the caller's catalog, so must not be closed here
         repo = Repository(catalog=catalog)
-        removed, _failures = await repo.cleanup_packages()
+        removed, _failures = await cleanup_packages(repo)
         mark_cleanup_run(cache_dir)
         if removed:
             log.info(event="daemon_cleanup", removed=len(removed))

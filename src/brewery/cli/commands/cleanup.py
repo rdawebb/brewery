@@ -7,6 +7,7 @@ import sys
 from brewery.cli.context import _repository, app, console, run_async
 from brewery.cli.error_formatting import CommandFailed, command_error
 from brewery.cli.output import print_failures, print_result, spinner
+from brewery.services.cleanup import cleanup_packages
 
 
 @app.command(name="cleanup", aliases=["c", "clean"])
@@ -16,7 +17,7 @@ def cleanup() -> None:
     with _repository() as repo:
         sys.stdout.write("\n")
         with spinner("Cleaning up..."):
-            removed, failures = run_async(coro=repo.cleanup_packages())
+            removed, failures = run_async(coro=cleanup_packages(repo))
 
         if not removed and not failures:
             console.print("✓ Nothing to clean up\n", style="bold green")

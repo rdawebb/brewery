@@ -13,6 +13,7 @@ from brewery.core.catalog import api
 from brewery.daemon import catalog_refresh as cr
 from brewery.daemon.catalog_refresh import refresh_catalog
 from brewery.providers import retention
+from brewery.services import cleanup as cleanup_service
 
 pytestmark = pytest.mark.integration
 
@@ -313,17 +314,23 @@ class TestMaybeCleanup:
                 """
                 calls.append("init")
 
-            async def cleanup_packages(self) -> tuple[list, list]:
-                """Simulates the cleanup_packages method, returning any cleanup results.
+        async def _sweep(repo, *a, **k) -> tuple[list, list]:
+            """Stands in for the cleanup service, returning any cleanup results.
 
-                Returns:
-                    The cleanup results.
-                """
-                calls.append("cleanup")
+            Args:
+                repo: The repository the daemon built.
+                *a: Ignored positional arguments.
+                **k: Ignored keyword arguments.
 
-                return cleanup() if cleanup is not None else ([], [])
+            Returns:
+                The cleanup results.
+            """
+            calls.append("cleanup")
+
+            return cleanup() if cleanup is not None else ([], [])
 
         monkeypatch.setattr("brewery.core.repo.Repository", MockRepo)
+        monkeypatch.setattr(cleanup_service, "cleanup_packages", _sweep)
 
         return calls, marks
 
