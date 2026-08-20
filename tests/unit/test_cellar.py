@@ -270,3 +270,17 @@ class TestRemoveRack:
         remove_rack(cellar, tmp_path / "prefix", "tool")
         assert sorted(seen) == ["1.0", "2.0"]
         assert not cellar.exists()
+
+    def test_removes_a_read_only_keg(self, tmp_path, monkeypatch) -> None:
+        """Bottles ship read-only files, so removal must go through cellar.rmtree."""
+        cellar = tmp_path / "Cellar" / "tool"
+        share = cellar / "1.0" / "share"
+        share.mkdir(parents=True)
+        (share / "data").write_text("x")
+        os.chmod(share / "data", 0o444)
+        os.chmod(share, 0o555)
+
+        monkeypatch.setattr(_cellar, "unlink_keg", lambda keg, *, prefix, name: None)
+        remove_rack(cellar, tmp_path / "prefix", "tool")
+
+        assert not cellar.exists()

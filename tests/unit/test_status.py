@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from brewery.analysis.status import derive_local_status
+from brewery.core.merge import derive_local_status
 from brewery.core.models import PackageKind, PackageStatus
 
 pytestmark = pytest.mark.unit

@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from brewery.providers.orchestrator import ProgressPort
 
 
-@log_operation(event_prefix="install_package", log_args=["name", "kind"])
+@log_operation(event_prefix="install_package", log_args=["names", "kind"])
 async def install_packages(
     repo: Repository,
     names: list[str],

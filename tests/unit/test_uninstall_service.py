@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import brewery.providers.uninstall_service as svc
+import brewery.services.uninstall as svc
 from brewery.core.errors import BrewCommandError, OperationInProgressError
 
 

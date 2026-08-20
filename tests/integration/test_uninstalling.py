@@ -23,7 +23,7 @@ class TestUninstall:
         The mock does not delete the keg, so _verify_removed sees it still present
         and reports failure rather than a phantom success.
         """
-        import brewery.providers.uninstall_service as svc
+        import brewery.services.uninstall as svc
 
         def _boom(*a, **k) -> None:
             """Raise OSError to simulate native uninstall failure.
@@ -163,7 +163,7 @@ class TestUninstall:
         self, repo, mock_brew, monkeypatch
     ) -> None:
         """Test that a native failure falls back to brew uninstall for that formula."""
-        import brewery.providers.uninstall_service as svc
+        import brewery.services.uninstall as svc
 
         def _boom(*a, **k) -> None:
             """Raise OSError to simulate native uninstall failure.

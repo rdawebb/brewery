@@ -38,6 +38,13 @@ repos:
         entry: uv run ty check src tests
         language: system
         types: [python]
+      # Layering
+      - id: import-linter
+        name: Check import layering
+        entry: uv run lint-imports
+        language: system
+        pass_filenames: false
+        types: [python]
       # Syntax Checking
       - id: python-syntax-check
         name: Check for Python syntax errors

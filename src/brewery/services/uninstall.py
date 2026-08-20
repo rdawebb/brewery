@@ -2,22 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from pathlib import Path
 
 from brewery.core.config import BreweryENV, get_brewery_env
 from brewery.core.decorators import log_operation
 from brewery.core.deps import blocking_dependents
+from brewery.core.errors import BrewCommandError, OperationInProgressError
 from brewery.core.fs_state import child_dirs
+from brewery.core.logging import BreweryLogger, get_logger
 from brewery.core.models import Notes, Package, PackageKind
 from brewery.core.repo import Repository
 from brewery.providers import brew
 from brewery.providers.base import PackageBackend, UninstallBackend
-from brewery.providers.uninstall_service import run_uninstall
+from brewery.providers.cellar import remove_rack
 from brewery.services.cask import uninstall_casks
 
+log: BreweryLogger = get_logger(name=__name__)
 
-@log_operation(event_prefix="uninstall_package", log_args=["name", "kind"])
+
+@log_operation(event_prefix="uninstall_package", log_args=["names", "kind"])
 async def uninstall_packages(
     repo: Repository,
     names: list[str],
@@ -116,6 +121,36 @@ async def uninstall_packages(
     failures.extend((n, "uninstall failed") for n in failed)
 
     return removed, failures
+
+
+async def run_uninstall(
+    names: list[str],
+    *,
+    formula: UninstallBackend,
+    env: BreweryENV | None = None,
+) -> None:
+    """Unlink + remove each formula's kegs, brew-falling-back per formula.
+
+    Args:
+        names: Canonical formula names to uninstall.
+        formula: Formula backend for the per-formula brew fallback.
+        env: Brewery environment (paths), resolved if omitted.
+    """
+    env = env or get_brewery_env()
+    for name in names:
+        try:
+            await asyncio.to_thread(remove_rack, env.cellar / name, env.prefix, name)
+
+        except OperationInProgressError as exc:
+            # brew locks the same rack, so falling back to it would fail too
+            log.warning(event="uninstall_rack_locked", formula=name, error=str(exc))
+
+        except OSError:
+            try:
+                await formula.uninstall(names=[name])
+
+            except BrewCommandError:
+                pass  # Verification reports the survivor as a failure
 
 
 def _verify_removed(

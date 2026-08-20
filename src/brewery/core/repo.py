@@ -9,21 +9,18 @@ from brewery.core.decorators import log_operation
 from brewery.core.errors import PackageNotFoundError
 from brewery.core.logging import BreweryLogger, get_logger
 from brewery.core.models import Package, PackageKind, PackageStatus
-from brewery.providers import brew
 
 log: BreweryLogger = get_logger(name=__name__)
 
 
 class Repository:
-    """Repository for managing package data from various backends."""
+    """Read-only access to installed packages and the catalog."""
 
     def __init__(
         self,
         cache: Cache | None = None,
         catalog: Catalog | None = None,
         cache_mgr: CacheManager | None = None,
-        formula_backend=brew.formula_backend,
-        cask_backend=brew.cask_backend,
         env: BreweryENV | None = None,
     ) -> None:
         """Initialise the repository.
@@ -32,8 +29,6 @@ class Repository:
             cache: Optional cache instance.
             catalog: Optional catalog instance.
             cache_mgr: Optional cache manager instance.
-            formula_backend: Backend for formulae.
-            cask_backend: Backend for casks.
             env: Optional Brewery environment.
         """
         _cache = cache or Cache(namespace="repository")
@@ -41,8 +36,6 @@ class Repository:
         self.cache_mgr: CacheManager = cache_mgr or CacheManager(
             _cache, self.catalog, env
         )
-        self.formula = formula_backend
-        self.cask = cask_backend
 
     def close(self) -> None:
         """Close the catalog connection."""

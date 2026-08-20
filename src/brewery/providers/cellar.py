@@ -117,7 +117,7 @@ def remove_rack(cellar_dir: Path, prefix: Path, name: str) -> None:
         for keg in sorted(p for p in cellar_dir.iterdir() if p.is_dir()):
             unlink_keg(keg, prefix=prefix, name=name)  # realpath no-ops old kegs
 
-        shutil.rmtree(cellar_dir)
+        rmtree(cellar_dir)
 
 
 def _link_opt(prefix: Path, name: str, version: str) -> Path:
