@@ -34,8 +34,12 @@ format:
 type:
     uv run ty check src tests
 
+# Check the one-way layering rule
+layers:
+    uv run lint-imports
+
 # Check code quality
-check: lint format type
+check: lint format type layers
 
 # Run all pre-commit hooks
 pre:

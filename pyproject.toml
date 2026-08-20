@@ -56,6 +56,7 @@ br = "brewery.cli.main:main"
 [project.optional-dependencies]
 dev = [
   "icecream>=2.2.0,<3.0.0",
+  "import-linter>=2.3,<3.0.0",
   "prek>=0.4.14,<1.0.0",
   "pytest>=9.0.3,<10.0.0",
   "pytest-asyncio>=1.4.0,<2.0.0",
@@ -71,6 +72,32 @@ Changelog = "https://github.com/rdawebb/brewery/blob/main/CHANGELOG.md"
 
 [tool.uv.build-backend]
 module-name = "brewery"
+
+[tool.importlinter]
+root_packages = ["brewery"]
+
+# One-way layering rule: a package may import anything below it, never above
+[[tool.importlinter.contracts]]
+name = "Layers"
+type = "layers"
+containers = ["brewery"]
+layers = [
+  "cli",
+  "daemon",
+  "services",
+  "providers",
+  "core",
+]
+exhaustive = true
+exhaustive_ignores = ["scripts"]
+
+# Repository is a data facade for the layers above it; providers build on the
+# core primitives directly
+[[tool.importlinter.contracts]]
+name = "Providers use core primitives, not the Repository facade"
+type = "forbidden"
+source_modules = ["brewery.providers"]
+forbidden_modules = ["brewery.core.repo"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -7,6 +7,10 @@ from datetime import datetime
 from enum import Enum, Flag, auto
 from typing import Any
 
+# (name, reason) pairs -- every service reports its advisories and failures this
+# way, and the CLI's exit-code mapping keys off whether the failure list is empty
+Notes = list[tuple[str, str]]
+
 
 class PackageKind(Enum):
     """Enumeration of package kinds."""

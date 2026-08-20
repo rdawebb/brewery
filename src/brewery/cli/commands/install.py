@@ -16,6 +16,7 @@ from brewery.cli.output import (
 from brewery.cli.progress import make_reporter
 from brewery.core.errors import AlreadyInstalledWarning
 from brewery.core.models import PackageKind
+from brewery.services.install import install_packages
 
 
 @app.command(aliases=["add"])
@@ -48,7 +49,7 @@ def install(
 
     with _repository() as repo:
         installed, failures = run_async(
-            coro=repo.install_packages(names, target, progress=make_reporter(console))
+            coro=install_packages(repo, names, target, progress=make_reporter(console))
         )
 
         print_result(

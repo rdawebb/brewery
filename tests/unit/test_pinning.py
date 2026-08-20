@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from brewery.providers.pin_service import is_pinned, pin, pin_path, unpin
+from brewery.providers.pinning import is_pinned, pin, pin_path, unpin
 
 pytestmark = pytest.mark.unit
 

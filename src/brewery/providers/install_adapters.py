@@ -3,17 +3,57 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Protocol
 
 from brewery.core.errors import AlreadyInstalledWarning, BrewCommandError
-from brewery.core.models import PackageKind
+from brewery.core.models import Package, PackageKind
+from brewery.providers.base import InstallBackend, UpgradeBackend
 from brewery.providers.orchestrator import BrewPort, CatalogPort, FormulaRowP
 
 
-class RepositoryCatalogAdapter:  # Implements orchestrator.CatalogPort
-    """Binds CatalogPort to the existing Repository.
+class CatalogSource(Protocol):
+    """The catalog reads the adapter forwards (satisfied by `core.catalog.Catalog`).
 
-    Catalog lookups delegate to repo.catalog; installed-state (is_satisfied)
-    delegates to repo.cache_mgr, since the catalog has no view of what's
+    Narrower than `Catalog` on purpose: naming only these four keeps the adapter
+    checkable without dragging the whole catalog surface across the boundary.
+    """
+
+    def get_formula(self, name: str) -> FormulaRowP | None:
+        """Get a formula row by canonical name."""
+        ...
+
+    def resolve_alias(self, name: str) -> str:
+        """Resolve an alias to its canonical formula name."""
+        ...
+
+    def runtime_deps(self, name: str) -> list[str]:
+        """Direct runtime dependency names for a formula."""
+        ...
+
+    def aliases_of(self, name: str) -> list[str]:
+        """Aliases that resolve to a formula."""
+        ...
+
+
+class InstalledSource(Protocol):
+    """The installed-state read the adapter needs (satisfied by `CacheManager`)."""
+
+    def find_installed(
+        self, name: str, kind: PackageKind | None = None
+    ) -> Package | None:
+        """Return one installed package by name, or None."""
+        ...
+
+
+class FallbackBackend(InstallBackend, UpgradeBackend, Protocol):
+    """The two verbs `BrewAdapter` delegates to the formula backend."""
+
+
+class CatalogAdapter:  # Implements orchestrator.CatalogPort
+    """Binds CatalogPort to the catalog and the installed-state cache.
+
+    Catalog lookups delegate to the catalog; installed-state (is_satisfied)
+    delegates to the cache manager, since the catalog has no view of what's
     installed.
 
     Every method here must be called on the thread that opened the catalog, i.e.
@@ -21,14 +61,15 @@ class RepositoryCatalogAdapter:  # Implements orchestrator.CatalogPort
     `asyncio.to_thread`, never from inside one. See `Catalog`'s docstring.
     """
 
-    def __init__(self, repo) -> None:
+    def __init__(self, catalog: CatalogSource, cache_mgr: InstalledSource) -> None:
         """Initialise the adapter.
 
         Args:
-            repo: The repository instance providing catalog and cache access.
+            catalog: The catalog backing formula/alias/dependency lookups.
+            cache_mgr: The installed-state cache, for `is_satisfied`.
         """
-        self._repo = repo
-        self._catalog = repo.catalog
+        self._catalog = catalog
+        self._cache_mgr = cache_mgr
 
     def get_formula(self, name: str) -> FormulaRowP | None:
         """Get a formula by name.
@@ -86,7 +127,7 @@ class RepositoryCatalogAdapter:  # Implements orchestrator.CatalogPort
         Returns:
             True if a complete installed keg is found in the cache, False otherwise.
         """
-        pkg = self._repo.cache_mgr.find_installed(name, PackageKind.FORMULA)
+        pkg = self._cache_mgr.find_installed(name, PackageKind.FORMULA)
         if pkg is None or not pkg.path:
             return False
 
@@ -94,7 +135,7 @@ class RepositoryCatalogAdapter:  # Implements orchestrator.CatalogPort
 
 
 # Static assertion that the adapter satisfies the port
-_catalog_port: type[CatalogPort] = RepositoryCatalogAdapter
+_catalog_port: type[CatalogPort] = CatalogAdapter
 
 
 class BrewAdapter:
@@ -107,11 +148,11 @@ class BrewAdapter:
     crossing the port boundary.
     """
 
-    def __init__(self, formula_backend, run_brew) -> None:
+    def __init__(self, formula_backend: FallbackBackend, run_brew) -> None:
         """Initialise the adapter.
 
         Args:
-            formula_backend: e.g. brew_formula.backend (has async install()).
+            formula_backend: e.g. brew.formula_backend (has async install()).
             run_brew: async callable invoking `brew <args>` (your passthrough
                 runner), raising BrewCommandError on a non-zero exit.
         """

@@ -11,7 +11,7 @@ import pytest
 
 from brewery.core.locks import lock_path
 from brewery.core.models import Package, PackageKind, PackageStatus
-from brewery.providers.link_service import run_link, run_unlink
+from brewery.services.link import run_link, run_unlink
 
 pytestmark = pytest.mark.unit
 
@@ -74,7 +74,7 @@ class TestRunLink:
     """Tests for linking formulae."""
 
     def test_links_a_plain_formula(self, prefix, mock_env, make_pkg) -> None:
-        """A normal formula links and reports its symlink count."""
+        """Test a normal formula links and reports its symlink count."""
         pkg = make_pkg("wget")
 
         linked, advisories, failures = run_link([pkg], env=mock_env)
@@ -85,7 +85,7 @@ class TestRunLink:
         assert (prefix / "bin" / "wget").is_symlink()
 
     def test_already_linked_is_an_advisory(self, prefix, mock_env, make_pkg) -> None:
-        """A second link warns and skips rather than relinking."""
+        """Test a second link warns and skips rather than relinking."""
         pkg = make_pkg("wget")
         run_link([pkg], env=mock_env)
 
@@ -96,7 +96,7 @@ class TestRunLink:
         assert "already linked" in advisories[0][1]
 
     def test_keg_only_needs_force(self, prefix, mock_env, make_pkg) -> None:
-        """Keg-only formulae are skipped with an advisory naming --force."""
+        """Test keg-only formulae are skipped with an advisory naming --force."""
         pkg = make_pkg("icu4c", status=PackageStatus.KEG_ONLY)
 
         linked, advisories, failures = run_link([pkg], env=mock_env)
@@ -106,7 +106,7 @@ class TestRunLink:
         assert not (prefix / "bin" / "icu4c").exists()
 
     def test_keg_only_links_with_force(self, prefix, mock_env, make_pkg) -> None:
-        """--force links a keg-only formula and writes its linked record."""
+        """Test --force links a keg-only formula and writes its linked record."""
         pkg = make_pkg("icu4c", status=PackageStatus.KEG_ONLY)
 
         linked, advisories, failures = run_link([pkg], env=mock_env, force=True)
@@ -119,7 +119,7 @@ class TestRunLink:
     def test_keg_only_dry_run_previews_what_force_would_do(
         self, prefix, mock_env, make_pkg
     ) -> None:
-        """A dry run still previews the links, as brew does, and says --force is needed."""
+        """Test a dry run still previews the links, as brew does, and says --force is needed."""
         pkg = make_pkg("icu4c", status=PackageStatus.KEG_ONLY)
 
         linked, advisories, failures = run_link([pkg], env=mock_env, dry_run=True)
@@ -132,7 +132,7 @@ class TestRunLink:
     def test_conflict_becomes_a_failure_and_the_next_formula_still_links(
         self, prefix, mock_env, make_pkg
     ) -> None:
-        """One formula's conflict must not abort the rest of the batch."""
+        """Test one formula's conflict must not abort the rest of the batch."""
         blocked = make_pkg("wget")
         ok = make_pkg("curl")
         (prefix / "bin").mkdir()
@@ -148,7 +148,7 @@ class TestRunLink:
     def test_overwrite_replaces_the_conflicting_file(
         self, prefix, mock_env, make_pkg
     ) -> None:
-        """--overwrite links over a real file instead of failing."""
+        """Test --overwrite links over a real file instead of failing."""
         pkg = make_pkg("wget")
         (prefix / "bin").mkdir()
         (prefix / "bin" / "wget").write_text("a real file in the way")
@@ -164,7 +164,7 @@ class TestRunUnlink:
     """Tests for unlinking formulae."""
 
     def test_unlinks_a_linked_formula(self, prefix, mock_env, make_pkg) -> None:
-        """Unlinking removes the symlinks and reports the count."""
+        """Test unlinking removes the symlinks and reports the count."""
         pkg = make_pkg("wget")
         run_link([pkg], env=mock_env)
 
@@ -177,7 +177,7 @@ class TestRunUnlink:
     def test_keg_only_unlink_is_a_no_op_not_a_failure(
         self, prefix, mock_env, make_pkg
     ) -> None:
-        """Keg-only formulae own no symlinks, so unlinking removes nothing and succeeds.
+        """Test keg-only formulae own no symlinks, so unlinking removes nothing and succeeds.
 
         Matches brew, whose `unlink` never consults keg_only.
         """
@@ -189,7 +189,7 @@ class TestRunUnlink:
         assert not advisories and not failures
 
     def test_dry_run_reports_without_removing(self, prefix, mock_env, make_pkg) -> None:
-        """A dry run names the symlinks and leaves them in place."""
+        """Test a dry run names the symlinks and leaves them in place."""
         pkg = make_pkg("wget")
         run_link([pkg], env=mock_env)
 
@@ -201,10 +201,10 @@ class TestRunUnlink:
 
 
 class TestRackLock:
-    """A rack locked by another process is a per-formula failure."""
+    """Tests for per-rack locking."""
 
     def test_link_refuses_a_locked_rack(self, prefix, mock_env, make_pkg) -> None:
-        """The prefix is left untouched and the reason is reported."""
+        """Test that the prefix is left untouched and the reason is reported."""
         pkg = make_pkg("wget")
         fd = _hold_rack(prefix, "wget")
         try:
@@ -219,7 +219,7 @@ class TestRackLock:
         assert not (prefix / "bin" / "wget").exists()
 
     def test_unlink_refuses_a_locked_rack(self, prefix, mock_env, make_pkg) -> None:
-        """An in-progress operation on the rack keeps the symlinks in place."""
+        """Test that an in-progress operation on the rack keeps the symlinks in place."""
         pkg = make_pkg("wget")
         run_link([pkg], env=mock_env)
 

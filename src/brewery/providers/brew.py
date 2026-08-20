@@ -1,14 +1,6 @@
-"""Homebrew package backends (formula + cask).
-
-Replaces the near-identical brew_formula.py and brew_cask.py: a single factory
-builds both backends, differing only by the kind flag. The install/upgrade
-"already installed" / "pinned" interpretation lives here -- it's package
-semantics, not something the shell primitive should know.
-"""
+"""Homebrew fallback package backends (formula + cask)."""
 
 from __future__ import annotations
-
-from types import SimpleNamespace
 
 from brewery.core.errors import (
     AlreadyInstalledWarning,
@@ -17,6 +9,7 @@ from brewery.core.errors import (
 )
 from brewery.core.logging import BreweryLogger, get_logger
 from brewery.core.shell import BrewOutput, BrewResult, run_brew
+from brewery.providers.base import PackageBackend
 
 log: BreweryLogger = get_logger(name=__name__)
 
@@ -69,11 +62,22 @@ async def _run(subcommand: str, names: list[str], flags: list[str]) -> list[str]
     return names
 
 
-def _make_backend(kind_flag: str) -> SimpleNamespace:
-    """Build a backend for a package kind. install/uninstall carry the kind flag;
-    upgrade takes none (brew infers it), matching the original providers."""
+class BrewBackend:  # Implements base.PackageBackend
+    """A brew-backed package backend for one package kind.
 
-    async def install(names: list[str]) -> list[str]:
+    install/uninstall carry the kind flag; upgrade takes none (brew infers it),
+    matching the original providers.
+    """
+
+    def __init__(self, kind_flag: str) -> None:
+        """Initialise the backend.
+
+        Args:
+            kind_flag: The brew flag selecting the kind, e.g. `"--formula"`.
+        """
+        self._kind_flag = kind_flag
+
+    async def install(self, names: list[str]) -> list[str]:
         """Install packages by name.
 
         Args:
@@ -82,9 +86,9 @@ def _make_backend(kind_flag: str) -> SimpleNamespace:
         Returns:
             The same list of names on success.
         """
-        return await _run("install", names, [kind_flag])
+        return await _run("install", names, [self._kind_flag])
 
-    async def uninstall(names: list[str]) -> list[str]:
+    async def uninstall(self, names: list[str]) -> list[str]:
         """Uninstall packages by name.
 
         Args:
@@ -93,9 +97,9 @@ def _make_backend(kind_flag: str) -> SimpleNamespace:
         Returns:
             The same list of names on success.
         """
-        return await _run("uninstall", names, [kind_flag])
+        return await _run("uninstall", names, [self._kind_flag])
 
-    async def upgrade(names: list[str]) -> list[str]:
+    async def upgrade(self, names: list[str]) -> list[str]:
         """Upgrade packages by name.
 
         Args:
@@ -106,8 +110,9 @@ def _make_backend(kind_flag: str) -> SimpleNamespace:
         """
         return await _run("upgrade", names, [])
 
-    return SimpleNamespace(install=install, uninstall=uninstall, upgrade=upgrade)
 
+# Static assertion that the backend satisfies the protocol
+_package_backend: type[PackageBackend] = BrewBackend
 
-formula_backend = _make_backend("--formula")
-cask_backend = _make_backend("--cask")
+formula_backend = BrewBackend("--formula")
+cask_backend = BrewBackend("--cask")
