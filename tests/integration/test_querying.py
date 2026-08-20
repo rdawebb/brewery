@@ -1,4 +1,4 @@
-"""Integration tests for the Repository data facade over catalog + FS cache."""
+"""Integration tests for the Repository facade's reads over catalog + FS cache."""
 
 from __future__ import annotations
 
