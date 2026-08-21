@@ -1099,6 +1099,108 @@ def _prune_dirs(prefix: Path, rels: set[str]) -> list[str]:
     return pruned
 
 
+def _read_link_manifest(keg: Path) -> tuple[list[str], set[str]] | None:
+    """Read the keg's link manifest, if it has a usable one.
+
+    Args:
+        keg: The keg directory the manifest sits at the root of.
+
+    Returns:
+        The recorded (linked paths, mkpath'd dirs), or None when the manifest is
+        missing or unreadable - a brew-installed keg, which unlinks by scan instead.
+    """
+    try:
+        manifest = orjson.loads((keg / _LINK_MANIFEST).read_bytes())
+
+        return manifest["linked"], set(manifest.get("created_dirs", []))
+
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def _claim(link: Path, keg_real: Path, *, dry_run: bool) -> bool:
+    """Whether a symlink belongs to this keg, removing it unless previewing.
+
+    Args:
+        link: The symlink to test.
+        keg_real: The realpath of the keg being unlinked.
+        dry_run: Identify the symlink without removing it.
+
+    Returns:
+        True if the link resolved into the keg (and so was, or would be, removed).
+    """
+    if not _points_into(link, keg_real):
+        return False
+
+    if not dry_run:
+        link.unlink()
+
+    return True
+
+
+def _unlink_from_manifest(
+    prefix: Path, keg_real: Path, candidates: list[str], *, dry_run: bool
+) -> tuple[list[str], set[str]]:
+    """Remove the manifest's links that still resolve into this keg.
+
+    A recorded path that is now a real directory was exploded by a peer keg, so this
+    keg's files live under it as individual links; those are swept out separately.
+
+    Args:
+        prefix: The prefix the keg was linked into.
+        keg_real: The realpath of the keg being unlinked.
+        candidates: The manifest's recorded relative paths.
+        dry_run: Identify the symlinks without removing them.
+
+    Returns:
+        The relative paths removed, and the exploded dirs worth trying to prune.
+    """
+    removed: list[str] = []
+    exploded: list[Path] = []
+
+    for rel in candidates:
+        dst = prefix / rel
+
+        if dst.is_symlink():
+            if _claim(dst, keg_real, dry_run=dry_run):
+                removed.append(rel)
+
+        elif dst.is_dir():
+            exploded.append(dst)  # Explosion: stragglers live under here
+
+    for d in exploded:
+        for link in _iter_symlinks(d):
+            if _claim(link, keg_real, dry_run=dry_run):
+                removed.append(link.relative_to(prefix).as_posix())
+
+    return removed, {d.relative_to(prefix).as_posix() for d in exploded}
+
+
+def _unlink_by_scan(
+    prefix: Path, keg_real: Path, *, dry_run: bool
+) -> tuple[list[str], set[str]]:
+    """Sweep the eligible roots for every link resolving into this keg.
+
+    The fallback for a keg with no manifest, where there is no candidate set to
+    verify and the prefix itself is the only record of what was linked.
+
+    Args:
+        prefix: The prefix the keg was linked into.
+        keg_real: The realpath of the keg being unlinked.
+        dry_run: Identify the symlinks without removing them.
+
+    Returns:
+        The relative paths removed, and their parent dirs, worth trying to prune.
+    """
+    removed: list[str] = []
+    for root in _ELIGIBLE:
+        for link in _iter_symlinks(prefix / root):
+            if _claim(link, keg_real, dry_run=dry_run):
+                removed.append(link.relative_to(prefix).as_posix())
+
+    return removed, {Path(r).parent.as_posix() for r in removed}
+
+
 def unlink_keg(
     keg_dir: Path, *, prefix: Path, name: str, dry_run: bool = False
 ) -> UnlinkResult:
@@ -1119,66 +1221,31 @@ def unlink_keg(
         An UnlinkResult describing what was (or would be) removed and pruned.
     """
     keg_real = Path(os.path.realpath(keg_dir))
-    result = UnlinkResult()
-
-    try:
-        manifest = orjson.loads((keg_dir / _LINK_MANIFEST).read_bytes())
-        candidates: list[str] = manifest["linked"]
-        prune_targets: set[str] = set(manifest.get("created_dirs", []))
-
-    except (OSError, ValueError, KeyError):
-        manifest = None
-        candidates, prune_targets = [], set()
+    manifest = _read_link_manifest(keg_dir)
+    result = UnlinkResult(scanned=manifest is None)
 
     # Serialised against concurrent linking, in this process and in peers
     with _STRUCTURE_LOCK, structure_lock(prefix):
-        if manifest is not None:
-            exploded: list[Path] = []
-            for rel in candidates:
-                dst = prefix / rel
-                if dst.is_symlink():
-                    if _points_into(dst, keg_real):
-                        if not dry_run:
-                            dst.unlink()
-                        result.removed.append(rel)
-
-                elif dst.is_dir():
-                    exploded.append(dst)  # Explosion: stragglers live under here
-
-            for d in exploded:
-                for link in _iter_symlinks(d):
-                    if _points_into(link, keg_real):
-                        if not dry_run:
-                            link.unlink()
-                        rel = link.relative_to(prefix).as_posix()
-                        result.removed.append(rel)
-
-                prune_targets.add(d.relative_to(prefix).as_posix())
+        if manifest is None:
+            result.removed, prune_targets = _unlink_by_scan(
+                prefix, keg_real, dry_run=dry_run
+            )
 
         else:
-            result.scanned = True
-            for root in _ELIGIBLE:
-                for link in _iter_symlinks(prefix / root):
-                    if _points_into(link, keg_real):
-                        if not dry_run:
-                            link.unlink()
-                        result.removed.append(link.relative_to(prefix).as_posix())
-
-            prune_targets = {Path(r).parent.as_posix() for r in result.removed}
+            candidates, created_dirs = manifest
+            result.removed, exploded = _unlink_from_manifest(
+                prefix, keg_real, candidates, dry_run=dry_run
+            )
+            prune_targets = created_dirs | exploded
 
         if dry_run:
             return result
 
         result.pruned = _prune_dirs(prefix, prune_targets)
 
-        # Drop the opt link if it still points at this keg
-        opt = prefix / "opt" / name
-        if opt.is_symlink() and _points_into(opt, keg_real):
-            opt.unlink()
-
-        # Drop brew's linked-keg pointer if it still points at this keg
-        record = prefix / _LINKED_RECORD_DIR / name
-        if record.is_symlink() and _points_into(record, keg_real):
-            record.unlink()
+        # Drop the opt link and brew's linked-keg pointer if they still point here
+        for pointer in (prefix / "opt" / name, prefix / _LINKED_RECORD_DIR / name):
+            if pointer.is_symlink():
+                _claim(pointer, keg_real, dry_run=False)
 
     return result

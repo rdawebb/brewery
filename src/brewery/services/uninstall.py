@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from dataclasses import dataclass
 from pathlib import Path
 
 from brewery.core.config import BreweryENV, get_brewery_env
@@ -49,78 +50,143 @@ async def uninstall_packages(
         BrewCommandError: Propagated from provider.
     """
     env = env or repo.cache_mgr.env or get_brewery_env()
-    resolved: dict[str, str] = {n: repo.catalog.resolve_alias(n) for n in names}
 
-    all_pkgs: list[Package] | None = None
-
-    if kind is None:
-        # Resolve kinds and split into two lists
-        all_pkgs = repo.get_all_installed()
-        kind_map: dict[str, PackageKind] = {p.name: p.kind for p in all_pkgs}
-        formula_names: list[str] = [
-            resolved[n]
-            for n in names
-            if kind_map.get(resolved[n]) == PackageKind.FORMULA
-        ]
-
-        cask_names: list[str] = [
-            resolved[n] for n in names if kind_map.get(resolved[n]) == PackageKind.CASK
-        ]
-
-        failures: Notes = [
-            (n, "not found") for n in names if resolved[n] not in kind_map
-        ]
-
-    else:
-        formula_names: list[str] = (
-            [resolved[n] for n in names] if kind == PackageKind.FORMULA else []
-        )
-        cask_names: list[str] = (
-            [resolved[n] for n in names] if kind == PackageKind.CASK else []
-        )
-        failures: Notes = []
-
-    blocked: dict[str, list[str]] = {}
-    if formula_names:
-        # Reuse the scan above when there was one; a cask-only batch never scans
-        source = (
-            all_pkgs
-            if all_pkgs is not None
-            else repo.cache_mgr.installed_packages(kind=PackageKind.FORMULA)
-        )
-        blocked = blocking_dependents(source, set(formula_names))
-
-    if blocked:
-        failures.extend(
-            (name, f"required by {', '.join(deps)}") for name, deps in blocked.items()
-        )
-        formula_names = [n for n in formula_names if n not in blocked]
+    batch = _partition(repo, names, kind)
+    formula_names, blocked = _drop_blocked(repo, batch.formulae, batch.installed)
+    failures: Notes = [*batch.failures, *blocked]
 
     if formula_names:
         await run_uninstall(formula_names, formula=formula, env=env)
 
-    if cask_names:
-        await uninstall_casks(cask_names, backend=cask)
+    if batch.casks:
+        await uninstall_casks(batch.casks, backend=cask)
 
     repo.cache_mgr.invalidate()
 
-    removed: list[str] = []
-    failed: list[str] = []
-
-    for pkg_names, k in [
-        (formula_names, PackageKind.FORMULA),
-        (cask_names, PackageKind.CASK),
-    ]:
-        if not pkg_names:
-            continue
-
-        r, f = _verify_removed(pkg_names, k, env=env)
-        removed += r
-        failed += f
-
+    removed, failed = _verify_batch(formula_names, batch.casks, env=env)
     failures.extend((n, "uninstall failed") for n in failed)
 
     return removed, failures
+
+
+@dataclass(frozen=True)
+class _Batch:
+    """One uninstall request, resolved to canonical names and split by kind."""
+
+    formulae: list[str]
+    casks: list[str]
+    failures: Notes  # Names that routed nowhere
+    installed: list[Package] | None  # The scan kind resolution did, if it did one
+
+
+def _partition(repo: Repository, names: list[str], kind: PackageKind | None) -> _Batch:
+    """Resolve aliases and split the request into formulae and casks.
+
+    Args:
+        repo: The data facade, for alias resolution and the installed scan.
+        names: Name(s) of the package(s) to uninstall, as the caller typed them.
+        kind: Kind of the package(s), or None to resolve each from installed state.
+
+    Returns:
+        The batch, split by kind, carrying any scan it had to do for reuse.
+    """
+    resolved: dict[str, str] = {n: repo.catalog.resolve_alias(n) for n in names}
+
+    if kind is not None:
+        targets = [resolved[n] for n in names]
+
+        return _Batch(
+            formulae=targets if kind == PackageKind.FORMULA else [],
+            casks=targets if kind == PackageKind.CASK else [],
+            failures=[],
+            installed=None,
+        )
+
+    installed: list[Package] = repo.get_all_installed()
+    kinds: dict[str, PackageKind] = {p.name: p.kind for p in installed}
+
+    formulae: list[str] = []
+    casks: list[str] = []
+    failures: Notes = []
+
+    for name in names:
+        canonical = resolved[name]
+
+        if kinds.get(canonical) == PackageKind.FORMULA:
+            formulae.append(canonical)
+
+        elif kinds.get(canonical) == PackageKind.CASK:
+            casks.append(canonical)
+
+        else:
+            failures.append((name, "not found"))
+
+    return _Batch(
+        formulae=formulae, casks=casks, failures=failures, installed=installed
+    )
+
+
+def _drop_blocked(
+    repo: Repository, formulae: list[str], installed: list[Package] | None
+) -> tuple[list[str], Notes]:
+    """Hold back the formulae another installed formula still depends on.
+
+    A dependent being uninstalled in the same batch does not block its dependency.
+
+    Args:
+        repo: The data facade, for the installed scan when there is not one already.
+        formulae: Canonical formula names bound for removal.
+        installed: The scan `_partition` did, or None when it did not need one.
+
+    Returns:
+        The formulae free to remove, and a (name, reason) note for each one held back.
+    """
+    if not formulae:
+        return [], []
+
+    # Reuse the scan above when there was one; a cask-only batch never scans
+    source = (
+        installed
+        if installed is not None
+        else repo.cache_mgr.installed_packages(kind=PackageKind.FORMULA)
+    )
+    blocked: dict[str, list[str]] = blocking_dependents(source, set(formulae))
+
+    notes: Notes = [
+        (name, f"required by {', '.join(deps)}") for name, deps in blocked.items()
+    ]
+
+    return [n for n in formulae if n not in blocked], notes
+
+
+def _verify_batch(
+    formulae: list[str], casks: list[str], *, env: BreweryENV
+) -> tuple[list[str], list[str]]:
+    """Verify both kinds against the filesystem, skipping the kind that is empty.
+
+    Args:
+        formulae: Formula names handed to the formula path.
+        casks: Cask tokens handed to the cask backend.
+        env: Brewery environment (paths).
+
+    Returns:
+        Tuple of (removed, failed) package names, across both kinds.
+    """
+    removed: list[str] = []
+    failed: list[str] = []
+
+    for pkg_names, kind in (
+        (formulae, PackageKind.FORMULA),
+        (casks, PackageKind.CASK),
+    ):
+        if not pkg_names:
+            continue  # An empty kind would scan its root for nothing
+
+        r, f = _verify_removed(pkg_names, kind, env=env)
+        removed += r
+        failed += f
+
+    return removed, failed
 
 
 async def run_uninstall(

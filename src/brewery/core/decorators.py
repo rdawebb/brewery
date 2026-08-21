@@ -50,6 +50,41 @@ def _log_context(
     return {k: bound.arguments[k] for k in log_args if k in bound.arguments}
 
 
+def _result_fields(result: Any, log_result: bool) -> dict[str, Any]:
+    """Describe a return value for the completion log line.
+
+    Args:
+        result: The decorated call's return value.
+        log_result: Whether the caller asked for the result to be described.
+
+    Returns:
+        `{"result": ...}` for simple scalars, `{"count": ...}` for anything sized,
+        and an empty mapping otherwise.
+    """
+    if not log_result or result is None:
+        return {}
+
+    if isinstance(result, (str, int)):
+        return {"result": result}
+
+    if isinstance(result, Sized):
+        return {"count": len(result)}
+
+    return {}
+
+
+def _elapsed_ms(start: float) -> int:
+    """Milliseconds since a `time.perf_counter()` reading.
+
+    Args:
+        start: The reading taken when the operation began.
+
+    Returns:
+        The elapsed time in whole milliseconds.
+    """
+    return int((time.perf_counter() - start) * 1000)
+
+
 def log_operation(
     event_prefix: str,
     log_args: list[str] | None = None,
@@ -71,78 +106,59 @@ def log_operation(
         # Resolved once per decoration; skipped entirely when nothing is logged
         sig: inspect.Signature | None = inspect.signature(func) if log_args else None
 
+        def _report_start(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict:
+            context = _log_context(sig, log_args, args, kwargs)
+            log.info(event=f"{event_prefix}_start", **context)
+
+            return context
+
+        def _report_complete(result: Any, start: float, context: dict) -> None:
+            log.info(
+                event=f"{event_prefix}_complete",
+                duration_ms=_elapsed_ms(start),
+                **context,
+                **_result_fields(result, log_result),
+            )
+
+        def _report_failed(exc: Exception, start: float, context: dict) -> None:
+            log.exception(
+                event=f"{event_prefix}_failed",
+                error=str(exc),
+                duration_ms=_elapsed_ms(start),
+                **context,
+            )
+
         @functools.wraps(wrapped=func)
         async def async_wrapper(*args: Any, **kwargs: Any) -> T:
             start: float = time.perf_counter()
-
-            log_context = _log_context(sig, log_args, args, kwargs)
-            log.info(event=f"{event_prefix}_start", **log_context)
+            context = _report_start(args, kwargs)
 
             try:
                 result = await func(*args, **kwargs)
 
-                duration_ms = int((time.perf_counter() - start) * 1000)
-                log_event_data: dict = {
-                    "event": f"{event_prefix}_complete",
-                    "duration_ms": duration_ms,
-                    **log_context,
-                }
-
-                # Optionally log result
-                if log_result and result is not None:
-                    if isinstance(result, (str, int)):
-                        log_event_data["result"] = result
-                    elif isinstance(result, Sized):
-                        log_event_data["count"] = len(result)
-
-                log.info(**log_event_data)
-
-                return result
-
             except Exception as e:
-                duration_ms = int((time.perf_counter() - start) * 1000)
-                log.exception(
-                    event=f"{event_prefix}_failed",
-                    error=str(e),
-                    duration_ms=duration_ms,
-                    **log_context,
-                )
+                _report_failed(e, start, context)
                 raise
+
+            _report_complete(result, start, context)
+
+            return result
 
         @functools.wraps(wrapped=func)
         def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
             start: float = time.perf_counter()
-
-            log_context = _log_context(sig, log_args, args, kwargs)
-            log.info(event=f"{event_prefix}_start", **log_context)
+            context = _report_start(args, kwargs)
 
             try:
                 result = func(*args, **kwargs)  # No await
 
-                duration_ms = int((time.perf_counter() - start) * 1000)
-                log_event_data: dict = {
-                    "event": f"{event_prefix}_complete",
-                    "duration_ms": duration_ms,
-                    **log_context,
-                }
-                if log_result and result is not None:
-                    if isinstance(result, (str, int)):
-                        log_event_data["result"] = result
-                    elif isinstance(result, Sized):
-                        log_event_data["count"] = len(result)
-
-                log.info(**log_event_data)
-                return result
-
             except Exception as e:
-                duration_ms = int((time.perf_counter() - start) * 1000)
-                log.exception(
-                    event=f"{event_prefix}_failed",
-                    error=str(e),
-                    duration_ms=duration_ms,
-                    **log_context,
-                )
+                _report_failed(e, start, context)
                 raise
+
+            _report_complete(result, start, context)
+
+            return result
 
         return async_wrapper if is_async else sync_wrapper
 

@@ -153,6 +153,99 @@ def read_replaced(keg: Path) -> dict | None:
         return None
 
 
+def _aged(stale: list[_StaleKeg], cutoff: int) -> list[Path]:
+    """Stale kegs superseded at or before the cutoff.
+
+    Sidecar-less kegs have no supersession time and are never aged out.
+
+    Args:
+        stale: Every non-active keg found under the Cellar.
+        cutoff: Unix epoch seconds; kegs replaced at or before this are eligible.
+
+    Returns:
+        The eligible keg paths.
+    """
+    return [
+        sk.keg
+        for sk in stale
+        if sk.replaced_at is not None and sk.replaced_at <= cutoff
+    ]
+
+
+def _over_version_limit(
+    stale: list[_StaleKeg], active: set[Path], max_versions: int
+) -> list[Path]:
+    """Stale kegs beyond the per-formula version limit, newest kept.
+
+    The formula's active kegs count against its allowance, so a limit of 2 with
+    one active keg retains a single stale version.
+
+    Args:
+        stale: Every non-active keg found under the Cellar.
+        active: Active keg paths, counted against each formula's allowance.
+        max_versions: Maximum number of versions to retain per formula.
+
+    Returns:
+        The eligible keg paths.
+    """
+    by_name: dict[str, list[_StaleKeg]] = defaultdict(list)
+    for sk in stale:
+        by_name[sk.name].append(sk)
+
+    evicted: list[Path] = []
+    for name, kegs in by_name.items():
+        n_active = sum(1 for a in active if a.parent.name == name)
+        keep = max(max_versions - n_active, 0)
+        newest_first = sorted(kegs, key=lambda s: s.install_time, reverse=True)
+        evicted += [sk.keg for sk in newest_first[keep:]]
+
+    return evicted
+
+
+def _over_size_limit(
+    survivors: list[_StaleKeg],
+    active: set[Path],
+    max_cellar_mb: int,
+    active_sizes: dict[Path, int] | None,
+) -> list[Path]:
+    """Stale kegs to drop, oldest first, until the Cellar fits the budget.
+
+    Only kegs no other predicate already claimed are offered here, and active
+    kegs are charged against the budget without ever being eligible.
+
+    Args:
+        survivors: Stale kegs not already selected by another predicate.
+        active: Active keg paths, which count towards the total.
+        max_cellar_mb: Maximum total Cellar size in MB.
+        active_sizes: Precomputed active keg sizes in KB, keyed by keg path.
+
+    Returns:
+        The eligible keg paths, oldest-installed first.
+    """
+    cached = active_sizes or {}
+    budget = max_cellar_mb * 1024  # KB, matching du -sk
+
+    # Survivors and active kegs missing from the cache fall back to measurement
+    to_measure = [sk.keg for sk in survivors] + [a for a in active if a not in cached]
+    measured = du_many(to_measure)
+
+    def size_of(p: Path) -> int:
+        return cached.get(p) or measured.get(str(p), 0)
+
+    sizes = {sk.keg: size_of(sk.keg) for sk in survivors}
+    remaining = sum(size_of(a) for a in active) + sum(sizes.values())
+
+    evicted: list[Path] = []
+    for sk in sorted(survivors, key=lambda s: s.install_time):  # Oldest first
+        if remaining <= budget:
+            break
+
+        evicted.append(sk.keg)
+        remaining -= sizes[sk.keg]
+
+    return evicted
+
+
 def cleanup_candidates(
     cellar: Path,
     *,
@@ -163,9 +256,11 @@ def cleanup_candidates(
     active_sizes: dict[Path, int] | None = None,
     now: int | None = None,
 ) -> list[CleanupCandidate]:
-    """Stale kegs whose replaced_at is older than max_age_days.
+    """Stale kegs selected by any of the retention predicates.
 
-    Sidecar-less stale kegs are excluded (not auto-eligible).
+    Age, per-formula version count, and total Cellar size are applied in that
+    order; the first predicate to claim a keg owns its reported reason. Sidecar-less
+    stale kegs are excluded from the age predicate (not auto-eligible).
 
     Args:
         cellar: The Cellar directory.
@@ -185,48 +280,17 @@ def cleanup_candidates(
     stale = _scan_stale(cellar, active, need_install_time=need_install_time)
     candidates: dict[Path, str] = {}
 
-    cutoff = at - max_age_days * 86400
-    for sk in stale:
-        if sk.replaced_at is not None and sk.replaced_at <= cutoff:
-            candidates.setdefault(sk.keg, "aged")
+    for keg in _aged(stale, at - max_age_days * 86400):
+        candidates.setdefault(keg, "aged")
 
     if max_versions is not None:
-        by_name: dict[str, list[_StaleKeg]] = defaultdict(list)
-        for sk in stale:
-            by_name[sk.name].append(sk)
-
-        for name, kegs in by_name.items():
-            n_active = sum(1 for a in active if a.parent.name == name)
-            keep = max(max_versions - n_active, 0)
-            newest_first = sorted(kegs, key=lambda s: s.install_time, reverse=True)
-
-            for sk in newest_first[keep:]:
-                candidates.setdefault(sk.keg, "max_versions")
+        for keg in _over_version_limit(stale, active, max_versions):
+            candidates.setdefault(keg, "max_versions")
 
     if max_cellar_mb is not None:
-        cached = active_sizes or {}
-        budget = max_cellar_mb * 1024  # KB, matching du -sk
         survivors = [sk for sk in stale if sk.keg not in candidates]
-
-        # Survivors and active kegs missing from the cache fall back to measurement
-        to_measure = [sk.keg for sk in survivors] + [
-            a for a in active if a not in cached
-        ]
-        measured = du_many(to_measure)
-
-        def size_of(p: Path) -> int:
-            return cached.get(p) or measured.get(str(p), 0)
-
-        sizes = {sk.keg: size_of(sk.keg) for sk in survivors}
-        remaining = sum(size_of(a) for a in active) + sum(sizes.values())
-
-        if remaining > budget:
-            for sk in sorted(survivors, key=lambda s: s.install_time):  # Oldest first
-                if remaining <= budget:
-                    break
-
-                candidates[sk.keg] = "max_cellar_mb"
-                remaining -= sizes[sk.keg]
+        for keg in _over_size_limit(survivors, active, max_cellar_mb, active_sizes):
+            candidates.setdefault(keg, "max_cellar_mb")
 
     index = {sk.keg: sk for sk in stale}
 
