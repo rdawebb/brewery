@@ -21,8 +21,6 @@ from brewery.core.errors import CatalogFetchError
 from brewery.core.host import Platform
 from brewery.daemon.catalog_refresh import _refresh
 
-pytestmark = pytest.mark.integration
-
 # Pinned so the guard tests never depend on the running host's platform
 _PLATFORM = Platform(arch="arm64", os="macos", macos_major=15)
 

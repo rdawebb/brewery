@@ -102,7 +102,25 @@ forbidden_modules = ["brewery.core.repo"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "--strict-markers --strict-config -ra"
+xfail_strict = true
+# Applied by directory in tests/conftest.py, unless an explicit marker on a test
 markers = [
   "unit: fast isolated tests with no subprocess or network",
   "integration: tests that exercise the provider pipeline against fixtures",
+]
+
+[tool.coverage.run]
+source = ["src/brewery"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_lines = [
+  "pragma: no cover",
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "if __name__ == .__main__.:",
+  "@overload",
 ]

@@ -14,8 +14,6 @@ from brewery.core.config import BreweryENV
 from brewery.core.keg_sizes import attach_sizes
 from brewery.core.models import InstalledRecord, PackageKind
 
-pytestmark = pytest.mark.integration
-
 
 class TestCacheTokenRoundTrip:
     """Tests for token-validated get/set on the file cache."""

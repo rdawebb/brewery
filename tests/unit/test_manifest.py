@@ -11,7 +11,7 @@ from brewery.core.errors import ManifestError
 from brewery.core.host import Platform
 from brewery.providers.manifest import BottleTabInfo, fetch_bottle_tab
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
+pytestmark = pytest.mark.asyncio
 
 DIGEST = "ab" * 32  # 64-hex bare sha256 (matches catalog form)
 OTHER_DIGEST = "cd" * 32

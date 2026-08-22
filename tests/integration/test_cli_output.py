@@ -11,8 +11,6 @@ from rich.console import Console
 from brewery.cli.renderers import package_columns, package_details, package_table
 from brewery.core.models import PackageKind
 
-pytestmark = pytest.mark.integration
-
 # Fixed render width so no cell is truncated (short fixture names/versions)
 _RENDER_WIDTH = 200
 

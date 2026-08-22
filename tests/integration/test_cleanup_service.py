@@ -4,14 +4,10 @@ from __future__ import annotations
 
 import time
 
-import pytest
-
 from brewery.core import config
 from brewery.core.repo import Repository
 from brewery.providers.retention import mark_replaced
 from brewery.services.cleanup import cleanup_packages
-
-pytestmark = pytest.mark.integration
 
 
 class TestCleanup:

@@ -4,11 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-import pytest
-
 from brewery.core.models import InstalledRecord, PackageKind
-
-pytestmark = pytest.mark.unit
 
 
 class TestRecordCacheRoundTrip:

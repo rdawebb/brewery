@@ -15,8 +15,6 @@ from brewery.daemon.catalog_refresh import refresh_catalog
 from brewery.providers import retention
 from brewery.services import cleanup as cleanup_service
 
-pytestmark = pytest.mark.integration
-
 
 async def _noop(*args, **kwargs) -> None:
     """Stand in for an awaited daemon stage that should do nothing.

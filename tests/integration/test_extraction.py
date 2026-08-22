@@ -14,8 +14,6 @@ import zstandard
 from brewery.providers import extractor
 from brewery.providers.extractor import ExtractionError, extract_bottle
 
-pytestmark = pytest.mark.integration
-
 COMPRESSORS = {
     "gzip": gzip.compress,
     "zstd": lambda b: zstandard.ZstdCompressor().compress(b),

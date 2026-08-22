@@ -9,8 +9,6 @@ import pytest
 
 from brewery.providers.bottle_config import install_etc_var
 
-pytestmark = pytest.mark.unit
-
 
 def _keg(cellar: Path, version: str = "1.0", *, files: dict[str, str] | None = None):
     """Build a keg with a `.bottle` tree at `cellar/pkg/<version>`.

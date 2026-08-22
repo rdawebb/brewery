@@ -10,8 +10,6 @@ from typer.testing import CliRunner
 import brewery
 from brewery.cli.context import app
 
-pytestmark = pytest.mark.unit
-
 runner = CliRunner()
 
 

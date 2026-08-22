@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
-pytestmark = pytest.mark.unit
-
 # Repository is a data facade; a mutating verb landing here is the regression
 REPOSITORY_METHODS = {
     "close",

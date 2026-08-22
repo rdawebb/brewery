@@ -4,14 +4,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
 from _repo_helpers import _add_alias, _install_formula, _provider_calls
 
 from brewery.core.models import PackageKind
 from brewery.core.repo import Repository
 from brewery.services.uninstall import _verify_removed, uninstall_packages
-
-pytestmark = pytest.mark.integration
 
 
 class TestUninstall:

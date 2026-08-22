@@ -11,8 +11,6 @@ from brewery.core import host
 from brewery.core.host import Platform
 from brewery.providers.relocator import substitutions as subs_mod
 
-pytestmark = pytest.mark.unit
-
 
 class TestSubstitution:
     """Tests for the substitution mapping."""

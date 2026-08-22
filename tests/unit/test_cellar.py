@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import errno
 import os
-import sys
 from pathlib import Path
 
 import pytest
@@ -16,8 +15,6 @@ from brewery.providers.cellar import (
     install_to_cellar,
     remove_rack,
 )
-
-pytestmark = pytest.mark.unit
 
 
 @pytest.fixture
@@ -190,41 +187,6 @@ def test_install_cleans_partial_keg_on_failure(staged_keg, prefix, monkeypatch) 
     with pytest.raises(CellarError):
         _install(staged_keg, prefix)
     assert not (prefix / "Cellar" / "openssl@3" / "3.0").exists()
-
-
-@pytest.mark.integration
-@pytest.mark.skipif(sys.platform != "darwin", reason="clonefile is macOS-only")
-def test_clonefile_matches_copytree(staged_keg, tmp_path) -> None:
-    """Test that clonefile and copytree produce the same result."""
-    via_clone = tmp_path / "clone"
-    via_copy = tmp_path / "copy"
-    clone_tree(staged_keg, via_clone, use_clonefile=True)
-    clone_tree(staged_keg, via_copy, use_clonefile=False)
-
-    def snapshot(root: Path) -> dict:
-        """Snapshot the contents of a directory.
-
-        Args:
-            root: The directory to snapshot.
-
-        Returns:
-            A dictionary mapping relative paths to their type and contents.
-        """
-        out = {}
-        for p in sorted(root.rglob("*")):
-            rel = p.relative_to(root)
-            if p.is_symlink():
-                out[str(rel)] = ("link", os.readlink(p))
-
-            elif p.is_file():
-                out[str(rel)] = ("file", p.stat().st_mode & 0o777, p.read_bytes())
-
-            else:
-                out[str(rel)] = ("dir", p.stat().st_mode & 0o777)
-
-        return out
-
-    assert snapshot(via_clone) == snapshot(via_copy)
 
 
 class TestRemoveRack:

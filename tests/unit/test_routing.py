@@ -6,8 +6,6 @@ import pytest
 
 from brewery.cli import main as main_mod
 
-pytestmark = pytest.mark.unit
-
 
 class _Recorder:
     """Records whether it was called and with what arguments."""

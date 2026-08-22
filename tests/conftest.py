@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -31,12 +31,28 @@ os.environ["BREWERY_CONFIG_HOME"] = str(_TMP_ROOT / "config")
 # Resets module-level state between tests to avoid state leakage (only already-imported modules)
 _RESETTABLE: list[tuple[str, str, object]] = [
     ("brewery.core.config", "_env_cache", None),
-    ("brewery.providers.brew_cask", "_caskroom_path", None),
-    # Lazily-created, event-loop-bound, cleared so it re-binds to each test's own loop
-    ("brewery.providers.package_builder", "_SEMAPHORE", None),
     # Renderer width-cache load flag + dict.
     ("brewery.cli.renderers", "_width_cache_loaded", False),
 ]
+
+
+def pytest_collection_modifyitems(config, items) -> None:
+    """Mark every test by the directory it lives in, unless it says otherwise.
+
+    Args:
+        config: The pytest config (unused).
+        items: The collected test items, marked in place.
+    """
+    for item in items:
+        if item.get_closest_marker("unit") or item.get_closest_marker("integration"):
+            continue
+
+        parts = item.path.parts
+        if "unit" in parts:
+            item.add_marker(pytest.mark.unit)
+
+        elif "integration" in parts:
+            item.add_marker(pytest.mark.integration)
 
 
 @pytest.fixture(autouse=True)
@@ -138,6 +154,56 @@ class MockHTTPClient:
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+def _build_keg(version_dir: Path) -> Path:
+    """Populate a minimal openssl@3-shaped keg at version_dir and return it.
+
+    Args:
+        version_dir: The directory to populate as a keg version root.
+
+    Returns:
+        The populated version directory.
+    """
+    (version_dir / "bin").mkdir(parents=True)
+    (version_dir / "lib").mkdir()
+
+    exe = version_dir / "bin" / "openssl"
+    exe.write_bytes(b"MACHO-binary")
+    os.chmod(exe, 0o555)
+
+    lib = version_dir / "lib" / "libssl.dylib"
+    lib.write_bytes(b"lib")
+    os.chmod(lib, 0o444)
+
+    os.symlink("libssl.dylib", version_dir / "lib" / "libssl.3.dylib")
+    (version_dir / ".brew").mkdir()
+    (version_dir / ".brew" / "openssl@3.rb").write_bytes(b"class Openssl3\nend\n")
+
+    return version_dir
+
+
+@pytest.fixture
+def staged_keg(tmp_path) -> Path:
+    """A staged openssl@3 3.0 keg tree ready for installation or relocation.
+
+    Args:
+        tmp_path: The pytest-provided temporary directory.
+
+    Returns:
+        The path to the populated keg version directory.
+    """
+    return _build_keg(tmp_path / "stage" / "openssl@3" / "3.0")
+
+
+@pytest.fixture
+def build_keg() -> Callable[[Path], Path]:
+    """Return the keg-builder function for tests that need more than one keg.
+
+    Returns:
+        The _build_keg callable, for constructing additional kegs in a test.
+    """
+    return _build_keg
 
 
 @pytest.fixture

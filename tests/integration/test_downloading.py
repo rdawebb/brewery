@@ -15,8 +15,6 @@ import brewery.providers.downloader as d
 from brewery.core.errors import DownloadError
 from brewery.providers.downloader import BottleRef, Downloader
 
-pytestmark = pytest.mark.integration
-
 CDN = "https://pkg-containers.githubusercontent.com/blob/obj"
 
 

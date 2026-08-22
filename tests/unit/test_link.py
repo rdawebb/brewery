@@ -13,8 +13,6 @@ from brewery.core.locks import lock_path
 from brewery.core.models import Package, PackageKind, PackageStatus
 from brewery.services.link import run_link, run_unlink
 
-pytestmark = pytest.mark.unit
-
 
 def _hold_rack(prefix: Path, name: str) -> int:
     """Lock a formula's rack from an unrelated fd, as a peer process would.

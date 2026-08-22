@@ -19,8 +19,6 @@ from brewery.daemon.launchd import (
     patch_plist,
 )
 
-pytestmark = pytest.mark.unit
-
 
 class TestTargets:
     """Tests for the launchd domain/target string builders."""

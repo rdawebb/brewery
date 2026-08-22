@@ -11,8 +11,6 @@ from brewery.core import decorators
 from brewery.core.decorators import log_operation, retry_on_transient
 from brewery.core.errors import TransientError, UserError
 
-pytestmark = pytest.mark.unit
-
 
 @pytest.fixture
 def no_sleep(monkeypatch) -> None:

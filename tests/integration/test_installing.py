@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import pytest
 from _repo_helpers import _add_alias, _provider_calls
 
 from brewery.core.models import PackageKind
 from brewery.services.install import install_packages
-
-pytestmark = pytest.mark.integration
 
 
 class TestInstall:

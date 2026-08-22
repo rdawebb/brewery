@@ -27,8 +27,6 @@ from brewery.providers.relocator import keg as keg_mod
 from brewery.providers.relocator import macho as macho_mod
 from brewery.providers.relocator import substitutions as subs_mod
 
-pytestmark = pytest.mark.integration
-
 _DARWIN = sys.platform == "darwin"
 _LINUX = sys.platform.startswith("linux")
 _HAS_CC = shutil.which("cc") is not None

@@ -9,8 +9,6 @@ import pytest
 
 from brewery.providers.pinning import is_pinned, pin, pin_path, unpin
 
-pytestmark = pytest.mark.unit
-
 
 @pytest.fixture
 def prefix_and_keg(mock_env, make_keg) -> tuple[Path, Path]:

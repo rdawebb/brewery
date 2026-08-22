@@ -17,8 +17,6 @@ from brewery.providers.extractor import (
 )
 from brewery.providers.relocator import StreamRelocator
 
-pytestmark = pytest.mark.unit
-
 
 def _apply_links(dest, deferred: list[tuple[str, str, bool]]) -> None:
     """Drive the link pass alone, over a staging directory built by hand.

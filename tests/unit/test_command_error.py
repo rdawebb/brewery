@@ -26,8 +26,6 @@ from brewery.core.errors import (
 )
 from brewery.core.models import PackageKind
 
-pytestmark = pytest.mark.unit
-
 runner = CliRunner()
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")

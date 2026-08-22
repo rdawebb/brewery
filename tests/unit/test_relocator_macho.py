@@ -24,8 +24,6 @@ from brewery.providers.relocator import reader as reader_mod
 from brewery.providers.relocator import tools as tools_mod
 from brewery.providers.relocator.macho import InstallName, NameKind
 
-pytestmark = pytest.mark.unit
-
 
 class TestMachODetection:
     """Tests for Mach-O file detection."""

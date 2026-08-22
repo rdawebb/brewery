@@ -4,15 +4,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
 from _repo_helpers import _NullSink, _provider_calls
 
 from brewery.core.models import PackageKind
 from brewery.core.repo import Repository
 from brewery.services.pin import pin_packages, unpin_packages
 from brewery.services.upgrade import upgrade_packages
-
-pytestmark = pytest.mark.integration
 
 
 class TestUpgrade:

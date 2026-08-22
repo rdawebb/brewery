@@ -8,8 +8,6 @@ import pytest
 
 from brewery.core.retry import RETRYABLE_STATUS, backoff_delay, retry_async
 
-pytestmark = pytest.mark.unit
-
 
 @pytest.fixture
 def delays(monkeypatch) -> list[float]:

@@ -8,8 +8,6 @@ import pytest
 
 from brewery.core.version import PkgVersion, compare_versions, is_head
 
-pytestmark = pytest.mark.unit
-
 
 class TestCompareVersions:
     """Tests for compare_versions."""

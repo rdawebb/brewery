@@ -7,8 +7,6 @@ import pytest
 from brewery.core import host as _host_module
 from brewery.core.host import Platform, current_platform, preferred_perl_version
 
-pytestmark = pytest.mark.unit
-
 
 class TestCurrentPlatform:
     """Tests for current_platform, with the platform module monkeypatched."""

@@ -14,8 +14,6 @@ from brewery.core.merge import (
 )
 from brewery.core.models import PackageKind, PackageStatus
 
-pytestmark = pytest.mark.unit
-
 
 def make_formula_row(
     name: str = "wget",

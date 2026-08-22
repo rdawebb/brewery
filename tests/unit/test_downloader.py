@@ -8,8 +8,6 @@ import pytest
 
 from brewery.providers.downloader import DEFAULT_GHCR_TOKEN, BottleRef, Downloader
 
-pytestmark = pytest.mark.unit
-
 
 def _dl(token: str = DEFAULT_GHCR_TOKEN) -> Downloader:
     """Create a Downloader instance for testing.

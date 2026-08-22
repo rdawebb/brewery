@@ -5,12 +5,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-import pytest
-
 import brewery.core.logging as logmod
 from brewery.core.logging import BreweryLogger, _default_log_dir
-
-pytestmark = pytest.mark.unit
 
 
 class TestDefaultLogDir:

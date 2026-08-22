@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-import pytest
-
 from brewery.cli.context import _make_console
 from brewery.core import settings as settings_mod
 from brewery.core.settings import DisplaySettings, Settings
-
-pytestmark = pytest.mark.unit
 
 
 def _with_format(monkeypatch, fmt: str) -> None:

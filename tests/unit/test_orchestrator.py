@@ -23,7 +23,7 @@ from brewery.providers.orchestrator import (
     _NativeResult,
 )
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
+pytestmark = pytest.mark.asyncio
 
 CFG = InstallConfig(prefix=Path("/opt/hb"), repository=Path("/opt/hb"), api_path="/api")
 
@@ -690,7 +690,6 @@ class TestRuntimeDeps:
 class TestPartialCleanup:
     """Tests for partial cleanup of installations."""
 
-    @pytest.mark.integration
     async def test_cleanup_partial_removes_keg_and_dangling_opt(self, tmp_path) -> None:
         """Tests that partial cleanup removes the keg and dangling opt."""
         cfg = InstallConfig(prefix=tmp_path, repository=tmp_path, api_path="/api")
@@ -714,7 +713,6 @@ class TestPartialCleanup:
         assert not keg.exists()
         assert not opt.is_symlink()  # Dangling opt removed
 
-    @pytest.mark.integration
     async def test_cleanup_partial_keeps_opt_pointing_at_other_version(
         self, tmp_path
     ) -> None:
@@ -921,7 +919,6 @@ class TestUpgradeOnRequest:
 class TestUpgradeSwap:
     """Test upgrade swap behavior."""
 
-    @pytest.mark.integration
     async def test_unlinks_old_before_linking_new(self, tmp_path, monkeypatch) -> None:
         """Test that old version is unlinked before linking new version."""
         prefix = tmp_path / "prefix"
@@ -1027,7 +1024,6 @@ class TestBottledConfig:
             "pkg", fr, Path("bottle"), _tab("pkg"), True, [], []
         )
 
-    @pytest.mark.integration
     async def test_config_is_copied_into_the_prefix(
         self, tmp_path, monkeypatch
     ) -> None:
@@ -1041,7 +1037,6 @@ class TestBottledConfig:
         assert not conf.is_symlink()
         assert (prefix / "var" / "cache" / "pkg").is_dir()
 
-    @pytest.mark.integration
     async def test_keg_only_formula_still_gets_its_config(
         self, tmp_path, monkeypatch
     ) -> None:
@@ -1057,7 +1052,6 @@ class TestBottledConfig:
         assert (prefix / "etc" / "pkg" / "pkg.conf").read_text() == "default\n"
         assert not (prefix / "bin" / "foo").exists()  # Keg-only: nothing linked
 
-    @pytest.mark.integration
     async def test_config_is_copied_even_when_linking_failed(
         self, tmp_path, monkeypatch
     ) -> None:
@@ -1081,7 +1075,6 @@ class TestBottledConfig:
         assert res.stage == "link"
         assert (prefix / "etc" / "pkg" / "pkg.conf").read_text() == "default\n"
 
-    @pytest.mark.integration
     async def test_a_failed_copy_is_recorded_on_the_result(
         self, tmp_path, monkeypatch
     ) -> None:

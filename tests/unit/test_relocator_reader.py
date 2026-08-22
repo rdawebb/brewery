@@ -10,8 +10,6 @@ import pytest
 
 from brewery.providers.relocator import reader as reader_mod
 
-pytestmark = pytest.mark.unit
-
 
 class TestReader:
     """Tests for the pread-backed file reader that stands in for mmap."""

@@ -18,8 +18,6 @@ from brewery.core.errors import (
     UserError,
 )
 
-pytestmark = pytest.mark.unit
-
 
 class TestBrewError:
     """Test BrewError and its subclasses."""

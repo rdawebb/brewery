@@ -15,8 +15,6 @@ from brewery.core.catalog.api import (
     store_validators,
 )
 
-pytestmark = pytest.mark.unit
-
 
 class MockMetaStore:
     """In-memory get_meta/set_meta backing for validator tests."""

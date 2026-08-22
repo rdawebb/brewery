@@ -24,8 +24,6 @@ from brewery.core.locks import (
     structure_lock,
 )
 
-pytestmark = pytest.mark.unit
-
 # Reports whether an unrelated open file description can take the lock
 _PROBE = """
 import fcntl, os, sys
