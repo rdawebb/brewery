@@ -19,12 +19,14 @@ from rich.progress import (
 from rich.spinner import Spinner
 from rich.text import Text
 
+from brewery.providers.orchestrator import Outcome
+
 if TYPE_CHECKING:
     from rich.console import RenderableType
     from rich.progress import Task
 
-# Outcome values (Outcome.<...>.value) that mean the package did not install
-_FAILED_OUTCOMES = frozenset({"failed", "skipped_dep_failed"})
+# Outcome values that mean the package did not install
+_FAILED_OUTCOMES = frozenset({Outcome.FAILED.value, Outcome.SKIPPED_DEP_FAILED.value})
 
 _REVEAL_DELAY = 0.5  # Seconds before the live display appears
 

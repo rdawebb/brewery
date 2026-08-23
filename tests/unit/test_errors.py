@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
-from brewery.cli.error_formatting import format_error_message, suggest_search
+from brewery.cli.error_formatting import (
+    ERROR_TEMPLATES,
+    format_error_message,
+    suggest_search,
+)
 from brewery.core.errors import (
     AlreadyInstalledWarning,
     BrewCommandError,
     BrewError,
     BrewTimeoutError,
     CacheError,
+    LinkError,
     PackageNotFoundError,
     PinnedPackageWarning,
     SysError,
@@ -147,11 +154,86 @@ class TestFormatErrorMessage:
         msg = format_error_message(WeirdError("strange"))
         assert "strange" in msg
 
-    def test_missing_template_key_falls_back_gracefully(self) -> None:
-        """Test that missing template keys fall back gracefully."""
-        # Should fall back to the bare message
+
+# One representative, fully-populated instance per template, with a fragment of
+# each template's own suggestion text
+_TEMPLATE_CASES = [
+    pytest.param(
+        AlreadyInstalledWarning(package="foo"),
+        "brewery upgrade foo",
+        id="already_installed",
+    ),
+    pytest.param(PinnedPackageWarning(package="foo"), "brewery unpin foo", id="pinned"),
+    pytest.param(
+        PackageNotFoundError(package="foo"), "brewery search foo", id="not_found"
+    ),
+    pytest.param(
+        BrewTimeoutError(command="brew install foo", timeout=30),
+        "took too long",
+        id="timeout",
+    ),
+    pytest.param(
+        BrewCommandError(command="brew install foo", returncode=1, error="boom"),
+        "Exit Code: 1",
+        id="command_failed",
+    ),
+    pytest.param(
+        CacheError(message="cache boom", path="/tmp/cache"),
+        "delete /tmp/cache to rebuild the cache",
+        id="cache",
+    ),
+    pytest.param(
+        LinkError([("bin/foo", "other")]),
+        "brewery link --overwrite",
+        id="link",
+    ),
+    pytest.param(
+        TransientError("network hiccup"), "try again in a moment", id="transient"
+    ),
+    pytest.param(UserError("bad input"), "bad input", id="user"),
+    pytest.param(SysError("disk gone"), "check your system configuration", id="sys"),
+    pytest.param(BrewError("something"), "something", id="base"),
+]
+
+
+class TestEveryTemplateRenders:
+    """Tests every ERROR_TEMPLATES entry, rendered against a fully-populated error."""
+
+    def test_the_table_covers_every_template(self) -> None:
+        """Test that no template was added without a case in this class."""
+        covered = {type(case.values[0]) for case in _TEMPLATE_CASES}
+
+        assert covered == set(ERROR_TEMPLATES)
+
+    @pytest.mark.parametrize(("error", "fragment"), _TEMPLATE_CASES)
+    def test_the_template_survives_rendering(self, error, fragment) -> None:
+        """Test that the template renders in full rather than degrading."""
+        assert fragment in format_error_message(error)
+
+    @pytest.mark.parametrize(("error", "fragment"), _TEMPLATE_CASES)
+    def test_every_placeholder_is_satisfiable(self, error, fragment) -> None:
+        """Test that a template only asks for keys its error type actually carries.
+
+        `format_error_message` always supplies `message`; everything else has to
+        come from the error's own context.
+        """
+        placeholders = set(re.findall(r"\{(\w+)\}", ERROR_TEMPLATES[type(error)]))
+
+        assert placeholders <= {"message", *error.context}
+
+
+class TestTemplateFallbackGuard:
+    """Tests the KeyError guard, tested as a guard rather than as a contract."""
+
+    def test_a_context_missing_a_placeholder_does_not_crash(self) -> None:
+        """Test that an under-populated error still produces a usable message.
+
+        This is a safety net, not an intended outcome, as the suggestion is lost.
+        `TestEveryTemplateRenders` asserts the real behaviour.
+        """
         msg = format_error_message(CacheError(message="cache boom"))
-        assert "cache boom" in msg
+
+        assert msg == "❌ cache boom"
 
 
 def test_suggest_search_mentions_package_and_site() -> None:

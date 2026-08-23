@@ -109,6 +109,7 @@ class Cache:
                 key=key,
                 namespace=self.cache_path.name,
                 operation="read",
+                path=str(f),
             ) from e
 
         try:
