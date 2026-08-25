@@ -11,7 +11,7 @@ import pytest
 import brewery.cli.output as output_mod
 import brewery.daemon.catalog_refresh as refresh_mod
 from brewery.cli import context as context_mod
-from brewery.cli.context import _ensure_catalog_populated, run_async
+from brewery.cli.context import _ensure_catalog_populated, _repository, run_async
 
 if TYPE_CHECKING:
     from brewery.core.repo import Repository
@@ -90,7 +90,7 @@ class TestEnsureCatalogPopulated:
         """Test that a first-run network failure is swallowed, not raised.
 
         The command still runs against an empty catalog. That is deliberate,
-        but it is also why the failure has to be logged.
+        but is also why the failure has to be logged.
         """
         warnings: list[dict] = []
         monkeypatch.setattr(
@@ -107,6 +107,50 @@ class TestEnsureCatalogPopulated:
         assert warnings == [
             {"event": "catalog_bootstrap_failed", "error": "no network"}
         ]
+
+
+class TestRepository:
+    """Tests the context manager every command opens its repository through."""
+
+    @pytest.fixture
+    def opened(self, monkeypatch) -> SimpleNamespace:
+        """Substitute Repository and the bootstrap, and record the lifecycle.
+
+        Args:
+            monkeypatch: The monkeypatch fixture.
+
+        Returns:
+            A namespace with the built `repo` and the `events` it recorded.
+        """
+        events: list[str] = []
+        repo = SimpleNamespace(close=lambda: events.append("close"))
+
+        monkeypatch.setattr(
+            context_mod, "Repository", lambda: events.append("build") or repo
+        )
+        monkeypatch.setattr(
+            context_mod,
+            "_ensure_catalog_populated",
+            lambda r: events.append("bootstrap"),
+        )
+
+        return SimpleNamespace(repo=repo, events=events)
+
+    def test_the_catalog_is_bootstrapped_before_the_body_runs(self, opened) -> None:
+        """Test that a command never sees a repository with an unbuilt catalog."""
+        with _repository() as repo:
+            opened.events.append("body")
+
+            assert repo is opened.repo
+
+        assert opened.events == ["build", "bootstrap", "body", "close"]
+
+    def test_the_repository_is_closed_even_when_the_body_raises(self, opened) -> None:
+        """Test that a failing command still releases its database handle."""
+        with pytest.raises(ValueError, match="boom"), _repository():
+            raise ValueError("boom")
+
+        assert opened.events[-1] == "close"
 
 
 class TestRunAsync:

@@ -109,12 +109,14 @@ xfail_strict = true
 markers = [
   "unit: fast isolated tests with no subprocess or network",
   "integration: tests that exercise the provider pipeline against fixtures",
+  "cli: tests that drive a command body end to end through CliRunner",
 ]
 
 [tool.coverage.run]
 source = ["src/brewery"]
 
 [tool.coverage.report]
+fail_under = 93
 show_missing = true
 skip_covered = true
 exclude_lines = [

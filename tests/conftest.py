@@ -18,8 +18,11 @@ import pytest
 
 if TYPE_CHECKING:
     import httpx
+    from _layout import Brew
 
+    from brewery.core.catalog import Catalog
     from brewery.core.config import BreweryENV
+    from brewery.core.repo import Repository
 
 # Isolates on disk state at import time, before any brewery module is imported
 _TMP_ROOT = Path(tempfile.mkdtemp(prefix="brewery-tests-"))
@@ -43,16 +46,16 @@ def pytest_collection_modifyitems(config, items) -> None:
         config: The pytest config (unused).
         items: The collected test items, marked in place.
     """
+    layers = ("unit", "integration", "cli")
     for item in items:
-        if item.get_closest_marker("unit") or item.get_closest_marker("integration"):
+        if any(item.get_closest_marker(layer) for layer in layers):
             continue
 
         parts = item.path.parts
-        if "unit" in parts:
-            item.add_marker(pytest.mark.unit)
-
-        elif "integration" in parts:
-            item.add_marker(pytest.mark.integration)
+        for layer in layers:
+            if layer in parts:
+                item.add_marker(getattr(pytest.mark, layer))
+                break
 
 
 @pytest.fixture(autouse=True)
@@ -68,12 +71,13 @@ def _reset_module_state() -> Generator[None, None, None]:
     if renderers is not None and hasattr(renderers, "_width_cache"):
         renderers._width_cache.clear()
 
-    # Clear the on-disk file cache so persisted records cannot leak between tests
+    # Clear the on-disk file cache and any written settings
     import shutil
 
-    cache_root = Path(os.environ["BREWERY_CACHE_DIR"])
-    if cache_root.exists():
-        shutil.rmtree(cache_root, ignore_errors=True)
+    for var in ("BREWERY_CACHE_DIR", "BREWERY_CONFIG_HOME"):
+        root = Path(os.environ[var])
+        if root.exists():
+            shutil.rmtree(root, ignore_errors=True)
 
     yield
 
@@ -258,3 +262,179 @@ def http_client():
         return MockHTTPClient(response, raise_on_get=raise_on_get)
 
     return _make
+
+
+FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
+
+
+@pytest.fixture
+def fixture_text() -> dict[str, str]:
+    """Load all fixture files as strings.
+
+    Returns:
+        The fixture text data.
+    """
+    return {
+        name: (FIXTURE_DIR / f"{name}.json").read_text()
+        for name in ("formula", "cask", "outdated")
+    }
+
+
+@pytest.fixture
+def fixture_json(fixture_text) -> dict[str, dict]:
+    """Parse all fixture text as JSON.
+
+    Args:
+        fixture_text: The fixture text fixture.
+
+    Returns:
+        The parsed JSON data.
+    """
+    import orjson
+
+    return {k: orjson.loads(v) for k, v in fixture_text.items()}
+
+
+@pytest.fixture
+def brew(tmp_path) -> Brew:
+    """A fresh hermetic Homebrew layout built by the shared Brew helper.
+
+    Args:
+        tmp_path: The pytest tmp_path fixture.
+
+    Returns:
+        The fresh Brew layout.
+    """
+    from _layout import Brew
+
+    return Brew(tmp_path)
+
+
+@pytest.fixture
+def catalog(fixture_json) -> Catalog:
+    """Populate a Catalog from the formula/cask fixture JSON and return it.
+
+    The DB lives in the test-isolated BREWERY_CACHE_DIR (set above), so it
+    never touches the real cache.
+
+    Args:
+        fixture_json: The fixture JSON fixture.
+
+    Returns:
+        The populated Catalog.
+    """
+    import orjson
+
+    from brewery.core.catalog import Catalog
+
+    formula_data: dict = fixture_json["formula"]
+    cask_data: dict = fixture_json["cask"]
+
+    cat = Catalog()
+
+    formulae = [
+        {
+            "name": f["name"],
+            "desc": f.get("desc"),
+            "homepage": f.get("homepage"),
+            "tap": f.get("tap"),
+            "version": f["versions"]["stable"],
+            "revision": f.get("revision", 0),
+            "version_scheme": f.get("version_scheme", 0),
+            "keg_only": int(f.get("keg_only", False)),
+            "has_service": int(bool(f.get("service"))),
+            "post_install": int(bool(f.get("post_install_caveat"))),
+            "bottle_url": None,
+            "bottle_sha256": None,
+            "bottle_cellar": None,
+            "bottle_rebuild": 0,
+            "deprecated": int(f.get("deprecated", False)),
+            "disabled": int(f.get("disabled", False)),
+        }
+        for f in formula_data["formulae"]
+    ]
+
+    deps = [
+        {"pkg": f["name"], "dep": dep, "kind": "runtime"}
+        for f in formula_data["formulae"]
+        for dep in f.get("dependencies", [])
+    ]
+
+    aliases = [
+        {"alias": a, "name": f["name"]}
+        for f in formula_data["formulae"]
+        for a in f.get("aliases", [])
+    ]
+
+    cat.write_formulae(formulae, deps, aliases)
+
+    casks = [
+        {
+            "token": c["token"],
+            "name": c["name"][0] if c.get("name") else None,
+            "desc": c.get("desc"),
+            "homepage": c.get("homepage"),
+            "tap": c.get("tap"),
+            "version": c.get("version"),
+            "sha256": c.get("sha256"),
+            "url": c.get("url"),
+            "auto_updates": int(c.get("autobump", False)),
+            "artifacts": orjson.dumps(c["artifacts"]).decode()
+            if c.get("artifacts")
+            else None,
+            "depends_on": orjson.dumps(c["depends_on"]).decode()
+            if c.get("depends_on")
+            else None,
+            "deprecated": int(c.get("deprecated", False)),
+            "disabled": int(c.get("disabled", False)),
+        }
+        for c in cask_data["casks"]
+    ]
+
+    cat.write_casks(casks)
+
+    return cat
+
+
+@pytest.fixture
+def mock_brew(monkeypatch, fixture_text, mock_env) -> list[tuple[str, ...]]:
+    """Patch run_brew in the brew provider so subprocess boundaries never reach
+    the real brew binary.  Returns the call log as ("brew", *args) tuples.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+        fixture_text: The fixture text fixture.
+        mock_env: The mock environment fixture.
+
+    Returns:
+        The call log.
+    """
+    calls: list[tuple[str, ...]] = []
+
+    from brewery.core.shell import BrewResult
+
+    async def mock_run_brew(args: list[str], *, output, check):
+        calls.append(("brew", *args))
+        return BrewResult(stdout="", stderr="", returncode=0)
+
+    import brewery.providers.brew as brew_mod
+
+    monkeypatch.setattr(brew_mod, "run_brew", mock_run_brew)
+
+    return calls
+
+
+@pytest.fixture
+def repo(mock_brew, catalog) -> Repository:
+    """Repository wired to mock subprocesses and a pre-populated catalog.
+
+    Args:
+        mock_brew: The mock subprocess call log.
+        catalog: The pre-populated catalog.
+
+    Returns:
+        A Repository instance.
+    """
+    from brewery.core.repo import Repository
+
+    return Repository(catalog=catalog)
