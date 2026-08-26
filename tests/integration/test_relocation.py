@@ -678,6 +678,7 @@ def relocated_real_keg(request, tmp_path_factory, brew_env) -> tuple[Path, Path]
     return keg, installed
 
 
+@pytest.mark.slow
 @skip_no_brew
 class TestRelocationRealKegs:
     """Test the relocation of real kegs."""

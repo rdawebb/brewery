@@ -103,13 +103,15 @@ forbidden_modules = ["brewery.core.repo"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-addopts = "--strict-markers --strict-config -ra"
+addopts = "-m 'not slow' --strict-markers --strict-config -ra"
 xfail_strict = true
-# Applied by directory in tests/conftest.py, unless an explicit marker on a test
+# Applied by directory in tests/conftest.py, unless an explicit marker is
+# already on the test; `slow` is always hand-applied
 markers = [
   "unit: fast isolated tests with no subprocess or network",
   "integration: tests that exercise the provider pipeline against fixtures",
   "cli: tests that drive a command body end to end through CliRunner",
+  "slow: differential tests against the machine's real brew prefix",
 ]
 
 [tool.coverage.run]

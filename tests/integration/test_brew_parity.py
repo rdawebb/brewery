@@ -41,6 +41,7 @@ def _symlinks_into(root: Path, keg_real: str) -> set[str]:
     return found
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(
     sys.platform != "darwin" or shutil.which("brew") is None,
     reason="requires macOS with Homebrew",

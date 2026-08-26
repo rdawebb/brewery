@@ -6,9 +6,13 @@ install:
 install-dev:
     uv sync --all-extras
 
-# Run all tests
+# Run all tests except the slow brew-differential ones (deselected by addopts)
 test:
     uv run pytest -v --no-cov
+
+# Run every test, slow included; a command-line -m replaces the addopts one
+test-all:
+    uv run pytest -m "" -v --no-cov
 
 # Run only unit tests
 test-unit:
@@ -17,6 +21,10 @@ test-unit:
 # Run only integration tests
 test-int:
     uv run pytest tests/integration -v --no-cov
+
+# Run only CLI tests
+test-cli:
+    uv run pytest tests/cli -v --no-cov
 
 # Run all tests with coverage
 test-cov:
