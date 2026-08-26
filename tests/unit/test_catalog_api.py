@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import httpx
 import pytest
+from _mocks import not_modified, ok
 
 import brewery
 from brewery.core.catalog.api import (
@@ -56,11 +57,7 @@ class TestFetchFeed:
     ) -> None:
         """Test that a 200 yields modified=True with body and new validators."""
         client = http_client(
-            httpx.Response(
-                200,
-                content=b"[]",
-                headers={"ETag": '"e1"', "Last-Modified": "Mon, 01 Jan 2024"},
-            )
+            ok(b"[]", ETag='"e1"', **{"Last-Modified": "Mon, 01 Jan 2024"})
         )
         result = await fetch_feed(FORMULA_FEED, client=client)
         assert result.modified is True
@@ -72,7 +69,7 @@ class TestFetchFeed:
         self, http_client
     ) -> None:
         """Test that a 304 yields modified=False, no body, echoed validators."""
-        client = http_client(httpx.Response(304))
+        client = http_client(not_modified())
         result = await fetch_feed(
             FORMULA_FEED, etag='"old"', last_modified="then", client=client
         )
@@ -83,7 +80,7 @@ class TestFetchFeed:
 
     async def test_conditional_headers_sent(self, http_client) -> None:
         """Test that stored validators become If-None-Match/If-Modified-Since."""
-        client = http_client(httpx.Response(304))
+        client = http_client(not_modified())
         await fetch_feed(FORMULA_FEED, etag='"e1"', last_modified="when", client=client)
 
         assert client.last_headers is not None
@@ -92,7 +89,7 @@ class TestFetchFeed:
 
     async def test_no_validators_no_conditional_headers(self, http_client) -> None:
         """Test that absent validators send no conditional headers."""
-        client = http_client(httpx.Response(200, content=b"[]"))
+        client = http_client(ok(b"[]"))
         await fetch_feed(FORMULA_FEED, client=client)
 
         assert client.last_headers is not None
@@ -113,7 +110,7 @@ class TestFetchFeed:
 
     async def test_missing_response_etag_is_none(self, http_client) -> None:
         """Test that a 200 without an ETag header yields etag=None."""
-        client = http_client(httpx.Response(200, content=b"[]"))
+        client = http_client(ok(b"[]"))
         result = await fetch_feed(FORMULA_FEED, client=client)
         assert result.etag is None
         assert result.last_modified is None
@@ -124,7 +121,7 @@ class TestFetchSingleFormula:
 
     async def test_200_returns_body(self, http_client) -> None:
         """Test that a 200 returns the response bytes."""
-        client = http_client(httpx.Response(200, content=b'{"name":"wget"}'))
+        client = http_client(ok(b'{"name":"wget"}'))
         body = await fetch_single_formula("wget", client=client)
         assert body == b'{"name":"wget"}'
 
@@ -150,7 +147,7 @@ class TestFetchSingleFormula:
 
         '@' and '+' are kept safe; a space must be encoded.
         """
-        client = http_client(httpx.Response(200, content=b"{}"))
+        client = http_client(ok(b"{}"))
         await fetch_single_formula("foo bar@2", client=client)
 
         assert client.last_url is not None
@@ -162,7 +159,7 @@ class TestUserAgent:
 
     async def test_feed_fetch_sends_versioned_user_agent(self, http_client) -> None:
         """Test that fetch_feed identifies itself as brewery/<installed version>."""
-        client = http_client(httpx.Response(200, content=b"[]"))
+        client = http_client(ok(b"[]"))
         await fetch_feed(FORMULA_FEED, client=client)
 
         assert client.last_headers is not None
@@ -172,7 +169,7 @@ class TestUserAgent:
         self, http_client
     ) -> None:
         """Test that fetch_single_formula sends the same header as the feed fetch."""
-        client = http_client(httpx.Response(200, content=b"{}"))
+        client = http_client(ok(b"{}"))
         await fetch_single_formula("wget", client=client)
 
         assert client.last_headers is not None

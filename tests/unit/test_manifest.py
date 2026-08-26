@@ -257,19 +257,8 @@ async def test_http_error_raises_manifest_error() -> None:
         await _fetch(_handler(b"", status=404))
 
 
-@pytest.fixture
-def no_backoff(monkeypatch) -> None:
-    """Collapse the retry sleeps so the retry tests run instantly."""
-
-    async def instant(_delay: float) -> None:
-        """No-op sleep function that returns instantly."""
-        return
-
-    monkeypatch.setattr("brewery.core.retry.asyncio.sleep", instant)
-
-
-async def test_index_retries_transient_status(no_backoff) -> None:
-    """A 503 is retried, and a later success is returned."""
+async def test_index_retries_transient_status(delays) -> None:
+    """Test that a 503 is retried, and a later success is returned."""
     body = _index([{"digest": DIGEST, "tab": TAB_PLATFORM}])
     calls = {"n": 0}
 
@@ -285,8 +274,8 @@ async def test_index_retries_transient_status(no_backoff) -> None:
     assert calls["n"] == 3
 
 
-async def test_index_gives_up_after_three_attempts(no_backoff) -> None:
-    """Retryable statuses are not retried forever."""
+async def test_index_gives_up_after_three_attempts(delays) -> None:
+    """Test that retryable statuses are not retried forever."""
     reqs: list = []
 
     with pytest.raises(ManifestError, match="manifest fetch failed"):
@@ -295,8 +284,8 @@ async def test_index_gives_up_after_three_attempts(no_backoff) -> None:
     assert len(reqs) == 3
 
 
-async def test_index_does_not_retry_a_404(no_backoff) -> None:
-    """A 404 is genuine, not transient."""
+async def test_index_does_not_retry_a_404(delays) -> None:
+    """Test that a 404 is genuine, not transient."""
     reqs: list = []
 
     with pytest.raises(ManifestError, match="manifest fetch failed"):

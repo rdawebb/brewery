@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
-import os
 from pathlib import Path
 
 import pytest
+from _locks import held_rack
+from _mocks import _NullSink
 
 import brewery.providers.orchestrator as orch_mod
 from brewery.core.errors import DownloadError, LinkError, ManifestError
-from brewery.core.locks import lock_path
 from brewery.providers.downloader import BottleRef
 from brewery.providers.linker import link_keg
 from brewery.providers.manifest import BottleTabInfo
@@ -26,17 +25,6 @@ from brewery.providers.orchestrator import (
 pytestmark = pytest.mark.asyncio
 
 CFG = InstallConfig(prefix=Path("/opt/hb"), repository=Path("/opt/hb"), api_path="/api")
-
-
-class _NullSink:
-    """Stands in for StreamRelocator where the keg is already staged."""
-
-    def finish(self, keg: Path) -> None:
-        """Do nothing, as there is nothing staged to relocate.
-
-        Args:
-            keg: The keg directory, ignored.
-        """
 
 
 def _tab(name: str = "x") -> BottleTabInfo:
@@ -1136,17 +1124,10 @@ class TestRackLock:
             config=cfg,
         )
 
-        path = lock_path(prefix, "wget")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        try:
+        with held_rack(prefix, "wget"):
             res = o._native_install(
                 "wget", MockFormula("wget"), Path("bottle"), _tab("wget"), True, [], []
             )
-
-        finally:
-            os.close(fd)
 
         assert res.stage == "lock"
         assert not (prefix / "Cellar").exists()  # Nothing was poured

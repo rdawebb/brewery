@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
+from _rows import cask_row, formula_row
 
 from brewery.core.catalog import CaskRow, Catalog, FormulaRow
 from brewery.core.fs_state import InstalledRecord
@@ -13,89 +16,6 @@ from brewery.core.merge import (
     search_packages,
 )
 from brewery.core.models import PackageKind, PackageStatus
-
-
-def make_formula_row(
-    name: str = "wget",
-    *,
-    desc: str | None = "retrieves files",
-    tap: str | None = "homebrew/core",
-    version: str = "1.21.4",
-    revision: int = 0,
-    version_scheme: int = 0,
-    keg_only: bool = False,
-    has_service: bool = False,
-) -> FormulaRow:
-    """Build a FormulaRow with sensible defaults for the fields merge reads.
-
-    Args:
-        name: The name of the formula.
-        desc: A description of the formula.
-        tap: The tap the formula belongs to.
-        version: The version of the formula.
-        revision: The revision of the formula.
-        version_scheme: The version scheme of the formula.
-        keg_only: Whether the formula is keg-only.
-        has_service: Whether the formula has a service.
-
-    Returns:
-        A FormulaRow with the specified fields.
-    """
-    return FormulaRow(
-        name=name,
-        desc=desc,
-        homepage=None,
-        tap=tap,
-        version=version,
-        revision=revision,
-        version_scheme=version_scheme,
-        keg_only=keg_only,
-        has_service=has_service,
-        post_install=False,
-        bottle_url=None,
-        bottle_sha256=None,
-        bottle_cellar=None,
-        bottle_rebuild=0,
-        deprecated=False,
-        disabled=False,
-    )
-
-
-def make_cask_row(
-    token: str = "firefox",
-    *,
-    name: str | None = "Firefox",
-    desc: str | None = "web browser",
-    tap: str | None = "homebrew/cask",
-    version: str | None = "120.0",
-) -> CaskRow:
-    """Build a CaskRow with sensible defaults for the fields merge reads.
-
-    Args:
-        token: The token for the cask.
-        name: The name of the cask.
-        desc: A description of the cask.
-        tap: The tap the cask belongs to.
-        version: The version of the cask.
-
-    Returns:
-        A CaskRow with the specified fields.
-    """
-    return CaskRow(
-        token=token,
-        name=name,
-        desc=desc,
-        homepage=None,
-        tap=tap,
-        version=version,
-        sha256=None,
-        url=None,
-        auto_updates=False,
-        artifacts=None,
-        depends_on=None,
-        deprecated=False,
-        disabled=False,
-    )
 
 
 def make_record(
@@ -142,8 +62,12 @@ def make_record(
     )
 
 
-class MockRepoCatalog(Catalog):
-    """Minimal stand-in exposing only the read methods merge.py calls."""
+class MockRepoCatalog:
+    """Minimal stand-in exposing only the read methods merge.py calls.
+
+    Deliberately not a `Catalog` subclass, to avoid inheriting methods that
+    reach for `self._conn` this object never opens.
+    """
 
     def __init__(
         self,
@@ -248,13 +172,25 @@ class MockRepoCatalog(Catalog):
         return self._search_results
 
 
+def mock_catalog(**kwargs) -> Catalog:
+    """Build the read-only catalog stand-in, typed as the Catalog it stands in for.
+
+    Args:
+        **kwargs: Passed to MockRepoCatalog.
+
+    Returns:
+        The stand-in, cast to Catalog for the merge functions' signatures.
+    """
+    return cast("Catalog", MockRepoCatalog(**kwargs))
+
+
 class TestMergeDispatch:
     """Tests for kind dispatch and ordering in merge / merge_one."""
 
     def test_merge_one_dispatches_formula(self) -> None:
         """Test that a formula record is joined against the formula table."""
         record = make_record("wget", kind=PackageKind.FORMULA)
-        catalog = MockRepoCatalog(formulae={"wget": make_formula_row("wget")})
+        catalog = mock_catalog(formulae={"wget": formula_row("wget")})
         pkg = merge_one(record, catalog)
         assert pkg.name == "wget"
         assert pkg.kind == PackageKind.FORMULA
@@ -263,7 +199,7 @@ class TestMergeDispatch:
     def test_merge_one_dispatches_cask(self) -> None:
         """Test that a cask record is joined against the cask table."""
         record = make_record("firefox", kind=PackageKind.CASK, version="120.0")
-        catalog = MockRepoCatalog(casks={"firefox": make_cask_row("firefox")})
+        catalog = mock_catalog(casks={"firefox": cask_row("firefox")})
         pkg = merge_one(record, catalog)
         assert pkg.kind == PackageKind.CASK
         assert pkg.desc == "web browser"
@@ -275,16 +211,16 @@ class TestMergeDispatch:
             make_record("wget", kind=PackageKind.FORMULA),
             make_record("jq", kind=PackageKind.FORMULA, version="1.7"),
         ]
-        catalog = MockRepoCatalog(
-            formulae={"wget": make_formula_row("wget"), "jq": make_formula_row("jq")},
-            casks={"firefox": make_cask_row("firefox")},
+        catalog = mock_catalog(
+            formulae={"wget": formula_row("wget"), "jq": formula_row("jq")},
+            casks={"firefox": cask_row("firefox")},
         )
         names = [p.name for p in merge(records, catalog)]
         assert names == ["firefox", "wget", "jq"]
 
     def test_merge_empty_records_yields_empty(self) -> None:
         """Test that merging no records yields an empty list."""
-        assert merge([], MockRepoCatalog()) == []
+        assert merge([], mock_catalog()) == []
 
 
 class TestMergeFormula:
@@ -297,7 +233,7 @@ class TestMergeFormula:
         installed version still populates the Package.
         """
         record = make_record("tapped", version="9.9")
-        pkg = merge_one(record, MockRepoCatalog())
+        pkg = merge_one(record, mock_catalog())
         assert pkg.name == "tapped"
         assert pkg.desc is None
         assert pkg.metadata["latest_version"] is None
@@ -306,9 +242,7 @@ class TestMergeFormula:
     def test_row_supplies_desc_and_latest(self) -> None:
         """Test that the catalog row supplies desc and the latest version."""
         record = make_record("wget", version="1.21.4")
-        catalog = MockRepoCatalog(
-            formulae={"wget": make_formula_row("wget", version="1.21.5")}
-        )
+        catalog = mock_catalog(formulae={"wget": formula_row("wget", version="1.21.5")})
         pkg = merge_one(record, catalog)
         assert pkg.desc == "retrieves files"
         assert pkg.metadata["latest_version"] == "1.21.5"
@@ -316,8 +250,8 @@ class TestMergeFormula:
     def test_latest_includes_revision(self) -> None:
         """Test that a non-zero catalog revision is rendered into latest_version."""
         record = make_record("wget", version="1.21.4")
-        catalog = MockRepoCatalog(
-            formulae={"wget": make_formula_row("wget", version="1.21.4", revision=2)}
+        catalog = mock_catalog(
+            formulae={"wget": formula_row("wget", version="1.21.4", revision=2)}
         )
         pkg = merge_one(record, catalog)
         assert pkg.metadata["latest_version"] == "1.21.4_2"
@@ -329,8 +263,8 @@ class TestMergeFormula:
         not be reported as a problem.
         """
         record = make_record("openssl", linked=False)
-        catalog = MockRepoCatalog(
-            formulae={"openssl": make_formula_row("openssl", keg_only=True)}
+        catalog = mock_catalog(
+            formulae={"openssl": formula_row("openssl", keg_only=True)}
         )
         pkg = merge_one(record, catalog)
         assert PackageStatus.KEG_ONLY in pkg.status
@@ -343,15 +277,15 @@ class TestMergeFormula:
         not the merge in general.
         """
         record = make_record("wget", linked=False)
-        catalog = MockRepoCatalog(formulae={"wget": make_formula_row("wget")})
+        catalog = mock_catalog(formulae={"wget": formula_row("wget")})
         pkg = merge_one(record, catalog)
         assert PackageStatus.NOT_LINKED in pkg.status
 
     def test_has_service_sets_flag(self) -> None:
         """Test that a row with has_service sets HAS_SERVICE."""
         record = make_record("syncthing")
-        catalog = MockRepoCatalog(
-            formulae={"syncthing": make_formula_row("syncthing", has_service=True)}
+        catalog = mock_catalog(
+            formulae={"syncthing": formula_row("syncthing", has_service=True)}
         )
         pkg = merge_one(record, catalog)
         assert PackageStatus.HAS_SERVICE in pkg.status
@@ -359,26 +293,22 @@ class TestMergeFormula:
     def test_outdated_set_when_versions_differ(self) -> None:
         """Test that a version mismatch against the catalog sets OUTDATED."""
         record = make_record("wget", version="1.21.4")
-        catalog = MockRepoCatalog(
-            formulae={"wget": make_formula_row("wget", version="1.21.5")}
-        )
+        catalog = mock_catalog(formulae={"wget": formula_row("wget", version="1.21.5")})
         pkg = merge_one(record, catalog)
         assert PackageStatus.OUTDATED in pkg.status
 
     def test_not_outdated_when_versions_match(self) -> None:
         """Test that a matching version does not set OUTDATED."""
         record = make_record("wget", version="1.21.4")
-        catalog = MockRepoCatalog(
-            formulae={"wget": make_formula_row("wget", version="1.21.4")}
-        )
+        catalog = mock_catalog(formulae={"wget": formula_row("wget", version="1.21.4")})
         pkg = merge_one(record, catalog)
         assert PackageStatus.OUTDATED not in pkg.status
 
     def test_tap_prefers_record_over_row(self) -> None:
         """Test that an installed record's tap overrides the catalog row's tap."""
         record = make_record("wget", tap="me/mytap")
-        catalog = MockRepoCatalog(
-            formulae={"wget": make_formula_row("wget", tap="homebrew/core")}
+        catalog = mock_catalog(
+            formulae={"wget": formula_row("wget", tap="homebrew/core")}
         )
         pkg = merge_one(record, catalog)
         assert pkg.tap == "me/mytap"
@@ -386,8 +316,8 @@ class TestMergeFormula:
     def test_tap_falls_back_to_row(self) -> None:
         """Test that the row's tap is used when the record has none."""
         record = make_record("wget", tap=None)
-        catalog = MockRepoCatalog(
-            formulae={"wget": make_formula_row("wget", tap="homebrew/core")}
+        catalog = mock_catalog(
+            formulae={"wget": formula_row("wget", tap="homebrew/core")}
         )
         pkg = merge_one(record, catalog)
         assert pkg.tap == "homebrew/core"
@@ -401,93 +331,93 @@ class TestFormulaOutdated:
         [
             pytest.param(
                 make_record("wget", version="1.21.4", head=True),
-                make_formula_row("wget", version="9.9.9"),
+                formula_row("wget", version="9.9.9"),
                 False,
                 id="head_install_never_outdated",
             ),
             pytest.param(
                 make_record("wget", version="1.21.4", version_scheme=0),
-                make_formula_row("wget", version="1.21.5", version_scheme=1),
+                formula_row("wget", version="1.21.5", version_scheme=1),
                 True,
                 id="higher_version_scheme_forces_outdated",
             ),
             pytest.param(
                 make_record("wget", version="1.21.4", revision=0),
-                make_formula_row("wget", version="1.21.4", revision=1),
+                formula_row("wget", version="1.21.4", revision=1),
                 True,
                 id="revision_bump_is_outdated",
             ),
             pytest.param(
                 make_record("wget", version="1.21.4", revision=1),
-                make_formula_row("wget", version="1.21.4", revision=1),
+                formula_row("wget", version="1.21.4", revision=1),
                 False,
                 id="equal_effective_versions_not_outdated",
             ),
             pytest.param(
                 make_record("wget", version="1.21.4", version_scheme=2),
-                make_formula_row("wget", version="1.21.4", version_scheme=1),
+                formula_row("wget", version="1.21.4", version_scheme=1),
                 False,
                 id="lower_catalog_scheme_not_outdated",
             ),
             pytest.param(
                 make_record("turso", version="1.0.26"),
-                make_formula_row("turso", version="0.6.1"),
+                formula_row("turso", version="0.6.1"),
                 False,
                 id="locally_newer_version_not_outdated",
             ),
             pytest.param(
                 make_record("wget", version="1.21.4", revision=2),
-                make_formula_row("wget", version="1.21.4", revision=1),
+                formula_row("wget", version="1.21.4", revision=1),
                 False,
                 id="locally_newer_revision_not_outdated",
             ),
             pytest.param(
                 make_record("wget", version="1.21.10"),
-                make_formula_row("wget", version="1.21.9"),
+                formula_row("wget", version="1.21.9"),
                 False,
                 id="numeric_ordering_not_lexical",
             ),
             pytest.param(
                 make_record("wget", version="1.22.0"),
-                make_formula_row("wget", version="1.22.0rc1"),
+                formula_row("wget", version="1.22.0rc1"),
                 False,
                 id="catalog_prerelease_does_not_supersede_release",
             ),
             pytest.param(
                 make_record("wget", version="1.21.4", revision=4),
-                make_formula_row("wget", version="1.21.4.4"),
+                formula_row("wget", version="1.21.4.4"),
                 True,
                 id="revision_is_not_the_same_as_a_version_component",
             ),
             # A scheme bump only counts when the package version also moved
             pytest.param(
                 make_record("wget", version="1.21.4", version_scheme=0),
-                make_formula_row("wget", version="1.21.4", version_scheme=1),
+                formula_row("wget", version="1.21.4", version_scheme=1),
                 False,
                 id="higher_scheme_same_version_not_outdated",
             ),
             pytest.param(
                 make_record("wget", version="1.21.4", version_scheme=1),
-                make_formula_row("wget", version="0.1.0", version_scheme=2),
+                formula_row("wget", version="0.1.0", version_scheme=2),
                 True,
                 id="higher_scheme_older_version_still_outdated",
             ),
             # A missing receipt leaves the scheme unset; brew's tab defaults it to zero
             pytest.param(
                 make_record("wget", version="1.21.4", version_scheme=None),
-                make_formula_row("wget", version="1.21.4", version_scheme=1),
+                formula_row("wget", version="1.21.4", version_scheme=1),
                 False,
                 id="unset_scheme_reads_as_zero_same_version",
             ),
             pytest.param(
                 make_record("wget", version="1.21.4", version_scheme=None),
-                make_formula_row("wget", version="1.21.5", version_scheme=0),
+                formula_row("wget", version="1.21.5", version_scheme=0),
                 True,
                 id="unset_scheme_still_compares_versions",
             ),
             pytest.param(
                 make_record("wget", version="1.21.4"),
-                make_formula_row("wget", version=""),
+                formula_row("wget", version=""),
                 False,
                 id="empty_catalog_version_not_outdated",
             ),
@@ -495,7 +425,7 @@ class TestFormulaOutdated:
     )
     def test_outdated_decision(self, record, row, expected) -> None:
         """Test the outdated decision logic."""
-        catalog = MockRepoCatalog(formulae={record.name: row})
+        catalog = mock_catalog(formulae={record.name: row})
         assert (PackageStatus.OUTDATED in merge_one(record, catalog).status) is expected
 
 
@@ -505,7 +435,7 @@ class TestMergeCask:
     def test_no_row_falls_back_to_installed_only(self) -> None:
         """Test that a cask absent from the catalog still yields a Package."""
         record = make_record("custom", kind=PackageKind.CASK, version="2.0")
-        pkg = merge_one(record, MockRepoCatalog())
+        pkg = merge_one(record, mock_catalog())
         assert pkg.kind == PackageKind.CASK
         assert pkg.desc is None
         assert pkg.metadata["latest_version"] is None
@@ -514,9 +444,7 @@ class TestMergeCask:
     def test_row_supplies_desc_and_latest(self) -> None:
         """Test that the cask row supplies desc and latest version."""
         record = make_record("firefox", kind=PackageKind.CASK, version="119.0")
-        catalog = MockRepoCatalog(
-            casks={"firefox": make_cask_row("firefox", version="120.0")}
-        )
+        catalog = mock_catalog(casks={"firefox": cask_row("firefox", version="120.0")})
         pkg = merge_one(record, catalog)
         assert pkg.desc == "web browser"
         assert pkg.metadata["latest_version"] == "120.0"
@@ -526,8 +454,8 @@ class TestMergeCask:
         record = make_record(
             "firefox", kind=PackageKind.CASK, version="120.0", tap="me/mytap"
         )
-        catalog = MockRepoCatalog(
-            casks={"firefox": make_cask_row("firefox", tap="homebrew/cask")}
+        catalog = mock_catalog(
+            casks={"firefox": cask_row("firefox", tap="homebrew/cask")}
         )
         pkg = merge_one(record, catalog)
         assert pkg.tap == "me/mytap"
@@ -538,8 +466,8 @@ class TestCatalogInfo:
 
     def test_resolves_alias_then_formula(self) -> None:
         """Test that the name is resolved through the alias table first."""
-        catalog = MockRepoCatalog(
-            formulae={"wget": make_formula_row("wget")},
+        catalog = mock_catalog(
+            formulae={"wget": formula_row("wget")},
             aliases={"wngt": "wget"},
         )
         pkg = catalog_info(catalog, "wngt")
@@ -549,19 +477,19 @@ class TestCatalogInfo:
 
     def test_falls_through_to_cask(self) -> None:
         """Test that a name absent from formulae resolves against casks."""
-        catalog = MockRepoCatalog(casks={"firefox": make_cask_row("firefox")})
+        catalog = mock_catalog(casks={"firefox": cask_row("firefox")})
         pkg = catalog_info(catalog, "firefox")
         assert pkg is not None
         assert pkg.kind == PackageKind.CASK
 
     def test_unknown_name_returns_none(self) -> None:
         """Test that a name unknown to the catalog returns None."""
-        assert catalog_info(MockRepoCatalog(), "nope") is None
+        assert catalog_info(mock_catalog(), "nope") is None
 
     def test_formula_package_carries_catalog_deps(self) -> None:
         """Test that a catalog-only formula Package carries its catalog deps."""
-        catalog = MockRepoCatalog(
-            formulae={"wget": make_formula_row("wget")},
+        catalog = mock_catalog(
+            formulae={"wget": formula_row("wget")},
             deps={"wget": ["openssl", "libidn2"]},
         )
         pkg = catalog_info(catalog, "wget")
@@ -574,8 +502,8 @@ class TestSearchPackages:
 
     def test_uninstalled_hit_is_catalog_only(self) -> None:
         """Test that a hit with no installed match is a catalog-only Package."""
-        row = make_formula_row("wget")
-        catalog = MockRepoCatalog(search_results=[row])
+        row = formula_row("wget")
+        catalog = mock_catalog(search_results=[row])
         results = search_packages(catalog, "wget")
         assert len(results) == 1
         assert results[0].status == PackageStatus.NONE
@@ -585,29 +513,29 @@ class TestSearchPackages:
 
         The merged Package is returned by identity, not a fresh catalog-only one.
         """
-        row = make_formula_row("wget")
+        row = formula_row("wget")
         installed_pkg = merge_one(
-            make_record("wget"), MockRepoCatalog(formulae={"wget": row})
+            make_record("wget"), mock_catalog(formulae={"wget": row})
         )
-        catalog = MockRepoCatalog(search_results=[row])
+        catalog = mock_catalog(search_results=[row])
         results = search_packages(catalog, "wget", installed={"wget": installed_pkg})
         assert results[0] is installed_pkg
 
     def test_installed_cask_hit_is_enriched_by_token(self) -> None:
         """Test that a cask hit is matched against installed by its token."""
-        row = make_cask_row("firefox")
+        row = cask_row("firefox")
         installed_pkg = merge_one(
             make_record("firefox", kind=PackageKind.CASK, version="120.0"),
-            MockRepoCatalog(casks={"firefox": row}),
+            mock_catalog(casks={"firefox": row}),
         )
-        catalog = MockRepoCatalog(search_results=[row])
+        catalog = mock_catalog(search_results=[row])
         results = search_packages(catalog, "fire", installed={"firefox": installed_pkg})
         assert results[0] is installed_pkg
 
     def test_none_installed_treats_all_hits_as_uninstalled(self) -> None:
         """Test that None for installed treats every hit as uninstalled."""
-        catalog = MockRepoCatalog(
-            search_results=[make_formula_row("wget"), make_cask_row("firefox")]
+        catalog = mock_catalog(
+            search_results=[formula_row("wget"), cask_row("firefox")]
         )
         results = search_packages(catalog, "x", installed=None)
         assert all(p.status == PackageStatus.NONE for p in results)

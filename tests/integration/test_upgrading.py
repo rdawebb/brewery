@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from _repo_helpers import _NullSink, _provider_calls
+from _mocks import _NullSink
+from _repo_helpers import _provider_calls
 
 from brewery.core.models import PackageKind
 from brewery.core.repo import Repository

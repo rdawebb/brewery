@@ -5,10 +5,56 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import orjson
 
 from brewery.core.config import BreweryENV
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+
+def write_keg(
+    cellar: Path,
+    name: str,
+    version: str = "1.0",
+    *,
+    receipt: dict | None = None,
+    executables: Sequence[str] = (),
+    stale: Sequence[str] = (),
+) -> Path:
+    """Create a Cellar keg at `cellar/name/version`, with optional contents.
+
+    Cellar-rooted rather than prefix-rooted, so the unit tests that only have a
+    Cellar directory build their kegs the same way `Brew.formula` does.
+
+    Args:
+        cellar: The Cellar directory to build under.
+        name: The formula name.
+        version: The keg version.
+        receipt: An INSTALL_RECEIPT.json payload to write, if any.
+        executables: Names to populate `bin/` with, as trivial shell scripts.
+        stale: Older version directories to leave beside the keg.
+
+    Returns:
+        The path to the created keg.
+    """
+    keg = cellar / name / version
+    keg.mkdir(parents=True)
+
+    for sv in stale:
+        (cellar / name / sv).mkdir(parents=True)
+
+    if receipt is not None:
+        (keg / "INSTALL_RECEIPT.json").write_bytes(orjson.dumps(receipt))
+
+    if executables:
+        (keg / "bin").mkdir()
+        for exe in executables:
+            (keg / "bin" / exe).write_text("#!/bin/sh\n")
+
+    return keg
 
 
 class Brew:
@@ -51,7 +97,8 @@ class Brew:
         *,
         receipt: dict | None = None,
         link_opt: bool = True,
-        stale: list[str] | None = None,
+        stale: Sequence[str] = (),
+        executables: Sequence[str] = (),
     ) -> Path:
         """Create a Cellar keg, optional receipt, optional stale versions, opt link.
 
@@ -61,17 +108,19 @@ class Brew:
             receipt: The installation receipt (if any).
             link_opt: Whether to create an optional symlink.
             stale: A list of stale versions (if any).
+            executables: Names to populate the keg's `bin/` with.
 
         Returns:
             The path to the created keg.
         """
-        keg = self.cellar / name / version
-        keg.mkdir(parents=True)
-        for sv in stale or []:
-            (self.cellar / name / sv).mkdir(parents=True)
-
-        if receipt is not None:
-            (keg / "INSTALL_RECEIPT.json").write_bytes(orjson.dumps(receipt))
+        keg = write_keg(
+            self.cellar,
+            name,
+            version,
+            receipt=receipt,
+            executables=executables,
+            stale=stale,
+        )
 
         if link_opt:
             opt_dir = self.prefix / "opt"

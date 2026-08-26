@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 import pytest
+from _locks import held_rack
 
 import brewery.providers.cellar as _cellar
 from brewery.providers.cellar import (
@@ -18,7 +19,7 @@ from brewery.providers.cellar import (
 
 
 @pytest.fixture
-def prefix(tmp_path) -> Path:
+def prefix_path(tmp_path) -> Path:
     """Create a prefix directory structure for testing.
 
     Args:
@@ -30,12 +31,12 @@ def prefix(tmp_path) -> Path:
     return tmp_path / "prefix"
 
 
-def _install(staged, prefix, name="openssl@3", version="3.0", **kw):
+def _install(staged, prefix_path, name="openssl@3", version="3.0", **kw):
     """Install a keg into the Cellar.
 
     Args:
         staged: The path to the staged keg.
-        prefix: The prefix path.
+        prefix_path: The prefix path.
         name: The name of the formula.
         version: The version of the formula.
         **kw: Additional keyword arguments.
@@ -45,7 +46,9 @@ def _install(staged, prefix, name="openssl@3", version="3.0", **kw):
     """
     kw.setdefault("use_clonefile", False)
 
-    return install_to_cellar(staged, prefix=prefix, name=name, version=version, **kw)
+    return install_to_cellar(
+        staged, prefix=prefix_path, name=name, version=version, **kw
+    )
 
 
 def test_clone_tree_preserves_modes_and_symlinks(staged_keg, tmp_path) -> None:
@@ -113,59 +116,61 @@ def test_clone_tree_reraises_real_clonefile_error(
     assert exc.value.errno == errno.EACCES  # Not swallowed as a fallback
 
 
-def test_install_places_keg_and_opt_link(staged_keg, prefix) -> None:
+def test_install_places_keg_and_opt_link(staged_keg, prefix_path) -> None:
     """Test that installing a keg places it in the correct location and creates a symlink in opt."""
-    dest = _install(staged_keg, prefix)
-    assert dest == prefix / "Cellar" / "openssl@3" / "3.0"
+    dest = _install(staged_keg, prefix_path)
+    assert dest == prefix_path / "Cellar" / "openssl@3" / "3.0"
     assert (dest / "bin" / "openssl").read_bytes() == b"MACHO-binary"
 
-    opt = prefix / "opt" / "openssl@3"
+    opt = prefix_path / "opt" / "openssl@3"
     assert opt.is_symlink()
     assert os.readlink(opt) == "../Cellar/openssl@3/3.0"  # Relative
     assert opt.resolve() == dest.resolve()
 
 
-def test_reinstall_replaces_readonly_keg(staged_keg, prefix) -> None:
+def test_reinstall_replaces_readonly_keg(staged_keg, prefix_path) -> None:
     """Test that reinstalling a keg replaces a readonly keg."""
-    _install(staged_keg, prefix)
+    _install(staged_keg, prefix_path)
 
     # Mutate the staged source, reinstall the same version, expect replacement
     (staged_keg / "bin" / "openssl").chmod(0o755)
     (staged_keg / "bin" / "openssl").write_bytes(b"REBUILT")
     (staged_keg / "bin" / "openssl").chmod(0o555)
-    dest = _install(staged_keg, prefix)
+    dest = _install(staged_keg, prefix_path)
     assert (dest / "bin" / "openssl").read_bytes() == b"REBUILT"
 
 
 def test_upgrade_repoints_opt_and_keeps_old_keg(
-    staged_keg, prefix, tmp_path, build_keg
+    staged_keg, prefix_path, tmp_path, build_keg
 ) -> None:
     """Test that upgrading a keg repoints the opt symlink and keeps the old keg."""
-    _install(staged_keg, prefix, version="3.0")
+    _install(staged_keg, prefix_path, version="3.0")
     new = build_keg(tmp_path / "stage2" / "openssl@3" / "3.1")
     (new / "bin" / "openssl").chmod(0o755)
     (new / "bin" / "openssl").write_bytes(b"v3.1")
     (new / "bin" / "openssl").chmod(0o555)
 
-    _install(new, prefix, version="3.1")
-    opt = prefix / "opt" / "openssl@3"
+    _install(new, prefix_path, version="3.1")
+    opt = prefix_path / "opt" / "openssl@3"
     assert os.readlink(opt) == "../Cellar/openssl@3/3.1"
-    assert (prefix / "Cellar" / "openssl@3" / "3.0").exists()  # Old keg retained
+    assert (prefix_path / "Cellar" / "openssl@3" / "3.0").exists()  # Old keg retained
     assert (
-        prefix / "Cellar" / "openssl@3" / "3.1" / "bin" / "openssl"
+        prefix_path / "Cellar" / "openssl@3" / "3.1" / "bin" / "openssl"
     ).read_bytes() == b"v3.1"
 
 
-def test_opt_refreshed_when_previously_dangling(staged_keg, prefix) -> None:
+def test_opt_refreshed_when_previously_dangling(staged_keg, prefix_path) -> None:
     """Test that the opt symlink is refreshed when it was previously dangling."""
-    opt = prefix / "opt" / "openssl@3"
+    opt = prefix_path / "opt" / "openssl@3"
     opt.parent.mkdir(parents=True)
     opt.symlink_to(Path("..") / "Cellar" / "openssl@3" / "9.9")  # Points at nothing
-    _install(staged_keg, prefix)
+    _install(staged_keg, prefix_path)
     assert os.readlink(opt) == "../Cellar/openssl@3/3.0"
 
 
-def test_install_cleans_partial_keg_on_failure(staged_keg, prefix, monkeypatch) -> None:
+def test_install_cleans_partial_keg_on_failure(
+    staged_keg, prefix_path, monkeypatch
+) -> None:
     """Test that installing a keg cleans up partial installations on failure."""
 
     def half_then_fail(src, dst, *, use_clonefile=None) -> None:
@@ -185,43 +190,32 @@ def test_install_cleans_partial_keg_on_failure(staged_keg, prefix, monkeypatch) 
 
     monkeypatch.setattr(_cellar, "clone_tree", half_then_fail)
     with pytest.raises(CellarError):
-        _install(staged_keg, prefix)
-    assert not (prefix / "Cellar" / "openssl@3" / "3.0").exists()
+        _install(staged_keg, prefix_path)
+    assert not (prefix_path / "Cellar" / "openssl@3" / "3.0").exists()
 
 
 class TestRemoveRack:
     """Tests for remove_rack, the native removal of one formula's kegs."""
 
     def test_refuses_a_locked_rack(self, tmp_path) -> None:
-        """The rack lock is really taken: a peer's hold keeps the kegs in place."""
-        import fcntl
-
+        """Test that the rack lock is really taken: a peer's hold keeps the kegs in place."""
         from brewery.core.errors import OperationInProgressError
-        from brewery.core.locks import lock_path
 
         cellar = tmp_path / "Cellar" / "tool"
         (cellar / "1.0" / "bin").mkdir(parents=True)
         prefix = tmp_path / "prefix"
 
-        path = lock_path(prefix, "tool")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        try:
-            with pytest.raises(OperationInProgressError):
-                remove_rack(cellar, prefix, "tool")
-
-        finally:
-            os.close(fd)
+        with held_rack(prefix, "tool"), pytest.raises(OperationInProgressError):
+            remove_rack(cellar, prefix, "tool")
 
         assert cellar.exists()
 
     def test_missing_dir_is_noop(self, tmp_path) -> None:
-        """A missing cellar dir is a clean no-op (already-removed success path)."""
+        """Test that a missing cellar dir is a clean no-op (already-removed success path)."""
         remove_rack(tmp_path / "Cellar" / "ghost", tmp_path / "prefix", "ghost")
 
     def test_unlinks_all_versions_then_removes(self, tmp_path, monkeypatch) -> None:
-        """Every version keg is unlinked before the formula's cellar dir is removed."""
+        """Test that every version keg is unlinked before the formula's cellar dir is removed."""
         cellar = tmp_path / "Cellar" / "tool"
         (cellar / "1.0" / "bin").mkdir(parents=True)
         (cellar / "2.0" / "bin").mkdir(parents=True)
@@ -234,7 +228,7 @@ class TestRemoveRack:
         assert not cellar.exists()
 
     def test_removes_a_read_only_keg(self, tmp_path, monkeypatch) -> None:
-        """Bottles ship read-only files, so removal must go through cellar.rmtree."""
+        """Test that bottles ship read-only files, so removal must go through cellar.rmtree."""
         cellar = tmp_path / "Cellar" / "tool"
         share = cellar / "1.0" / "share"
         share.mkdir(parents=True)

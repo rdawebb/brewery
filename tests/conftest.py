@@ -7,6 +7,7 @@ between tests so that test order cannot leak state.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import tempfile
@@ -17,14 +18,19 @@ from typing import TYPE_CHECKING
 import pytest
 
 if TYPE_CHECKING:
-    import httpx
     from _layout import Brew
+    from _mocks import MockHTTPClient
 
     from brewery.core.catalog import Catalog
     from brewery.core.config import BreweryENV
     from brewery.core.repo import Repository
 
 # Isolates on disk state at import time, before any brewery module is imported
+assert not [m for m in sys.modules if m.startswith("brewery")], (
+    "a brewery module was imported before the test directories were redirected; "
+    "move the import that pulled it in inside the fixture that needs it"
+)
+
 _TMP_ROOT = Path(tempfile.mkdtemp(prefix="brewery-tests-"))
 os.environ["BREWERY_CACHE_DIR"] = str(_TMP_ROOT / "cache")
 os.environ["BREWERY_LOG_DIR"] = str(_TMP_ROOT / "logs")
@@ -82,82 +88,36 @@ def _reset_module_state() -> Generator[None, None, None]:
     yield
 
 
-class MockHTTPClient:
-    """Async httpx-like stub shared by the catalog fetch/refresh tests.
+@pytest.fixture
+def delays(monkeypatch) -> list[float]:
+    """Record every retry backoff instead of sleeping through it.
 
-    Construct with either a single canned response/exception, or a mapping of
-    `url -> response`. Every GET is recorded (url + request headers) so tests
-    can assert that conditional validators were sent, and `aclose()` flips
-    `closed` so client-ownership tests can check the caller did not close an
-    injected client.
+    `core.retry`, `core.decorators` and the downloader all reach their backoff
+    through the one `asyncio` module object, so patching it here covers every
+    retry path at once, and the recorded delays let a test assert the policy
+    rather than only that it ran quickly.
 
     Args:
-        response: One of an `httpx.Response`, an `Exception` to raise, a
-            `dict[str, httpx.Response]` keyed by URL, or `None`.
-        raise_on_get: If set, every GET raises this exception (used for
-            transport-error paths), regardless of `response`.
+        monkeypatch: The pytest monkeypatch fixture.
+
+    Returns:
+        The delays that were asked for, in order.
     """
+    recorded: list[float] = []
 
-    def __init__(self, response=None, *, raise_on_get=None) -> None:
-        """Initialise a MockHTTPClient.
-
-        Args:
-            response: One of an `httpx.Response`, an `Exception` to raise, a
-                `dict[str, httpx.Response]` keyed by URL, or `None`.
-            raise_on_get: If set, every GET raises this exception (used for
-                transport-error paths), regardless of `response`.
-        """
-        self._map = response if isinstance(response, dict) else None
-        self._single = None if isinstance(response, dict) else response
-        self._raise_on_get = raise_on_get
-        self.last_url: str | None = None
-        self.last_headers: dict[str, str] | None = None
-        self.requests: list[tuple[str, dict[str, str]]] = []
-        self.closed = False
-
-    async def get(
-        self,
-        url: str,
-        *,
-        headers: dict[str, str] | None = None,
-        timeout: float = 30.0,
-        follow_redirects: bool = False,
-    ) -> httpx.Response | None:
-        """
-        Simulate an HTTP GET request.
+    async def _record(delay: float = 0.0, *_args, **_kwargs) -> None:
+        """Record the requested delay and return immediately.
 
         Args:
-            url: The URL to fetch.
-            headers: Headers to include in the request.
-            timeout: Request timeout.
-            follow_redirects: Whether to follow redirects.
-
-        Returns:
-            The canned response for `url`, or None if none was configured.
-
-        Raises:
-            AssertionError: If a mapping was given and `url` is not in it.
+            delay: The delay that would have been slept.
+            *_args: Anything else asyncio.sleep accepts, ignored.
+            **_kwargs: Anything else asyncio.sleep accepts, ignored.
         """
-        self.last_url = url
-        self.last_headers = dict(headers or {})
-        self.requests.append((url, dict(headers or {})))
+        recorded.append(delay)
 
-        if self._raise_on_get is not None:
-            raise self._raise_on_get
+    monkeypatch.setattr(asyncio, "sleep", _record)
 
-        if self._map is not None:
-            if url not in self._map:
-                raise AssertionError(f"unexpected URL fetched: {url}")
-
-            return self._map[url]
-
-        if isinstance(self._single, Exception):
-            raise self._single
-
-        return self._single
-
-    async def aclose(self) -> None:
-        self.closed = True
+    return recorded
 
 
 def _build_keg(version_dir: Path) -> Path:
@@ -247,7 +207,11 @@ def http_client():
 
     Returns a callable so each test builds its own client with the response
     shape it needs.
+
+    Returns:
+        A callable taking the same arguments as MockHTTPClient.
     """
+    from _mocks import MockHTTPClient
 
     def _make(response=None, *, raise_on_get=None) -> MockHTTPClient:
         """Create a MockHTTPClient with the given response and raise_on_get.

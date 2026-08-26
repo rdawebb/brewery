@@ -8,6 +8,7 @@ from typing import Self
 import httpx
 import orjson
 import pytest
+from _mocks import both_feeds, not_modified, ok
 
 from brewery.core.catalog import api
 from brewery.daemon import catalog_refresh as cr
@@ -52,46 +53,6 @@ def _cask_body(fixture_text) -> bytes:
     return orjson.dumps(orjson.loads(fixture_text["cask"])["casks"])
 
 
-def _ok(body: bytes, **headers: str) -> httpx.Response:
-    """Create a 200 OK response with the given body and headers.
-
-    Args:
-        body: The response body.
-        headers: Additional headers to include in the response.
-
-    Returns:
-        An httpx.Response object representing the 200 OK response.
-    """
-    return httpx.Response(200, content=body, headers=headers)
-
-
-def _not_modified() -> httpx.Response:
-    """Create a 304 Not Modified response.
-
-    Returns:
-        An httpx.Response object representing the 304 Not Modified response.
-    """
-    return httpx.Response(304)
-
-
-def _both_feeds(
-    formula_resp: httpx.Response, cask_resp: httpx.Response
-) -> dict[str, httpx.Response]:
-    """Create a mapping of feed URLs to their responses.
-
-    Args:
-        formula_resp: The response for the formula feed.
-        cask_resp: The response for the cask feed.
-
-    Returns:
-        A dictionary mapping feed URLs to their responses.
-    """
-    return {
-        api.FORMULA_FEED.url: formula_resp,
-        api.CASK_FEED.url: cask_resp,
-    }
-
-
 class TestRefreshLoads:
     """Tests for the changed-feed load path."""
 
@@ -100,9 +61,9 @@ class TestRefreshLoads:
     ) -> None:
         """Test that 200 responses load both feeds into the catalog."""
         client = http_client(
-            _both_feeds(
-                _ok(_formula_body(fixture_text), ETag='"f1"'),
-                _ok(_cask_body(fixture_text), ETag='"c1"'),
+            both_feeds(
+                ok(_formula_body(fixture_text), ETag='"f1"'),
+                ok(_cask_body(fixture_text), ETag='"c1"'),
             )
         )
         await refresh_catalog(empty_catalog, client=client)
@@ -115,13 +76,13 @@ class TestRefreshLoads:
     ) -> None:
         """Test that ETag/Last-Modified are stored after a changed feed loads."""
         client = http_client(
-            _both_feeds(
-                _ok(
+            both_feeds(
+                ok(
                     _formula_body(fixture_text),
                     ETag='"f-etag"',
                     **{"Last-Modified": "Mon, 01 Jan 2024 00:00:00 GMT"},
                 ),
-                _ok(_cask_body(fixture_text), ETag='"c-etag"'),
+                ok(_cask_body(fixture_text), ETag='"c-etag"'),
             )
         )
         await refresh_catalog(empty_catalog, client=client)
@@ -137,9 +98,9 @@ class TestRefreshLoads:
     ) -> None:
         """Test that a fetch time is stamped for each feed."""
         client = http_client(
-            _both_feeds(
-                _ok(_formula_body(fixture_text)),
-                _ok(_cask_body(fixture_text)),
+            both_feeds(
+                ok(_formula_body(fixture_text)),
+                ok(_cask_body(fixture_text)),
             )
         )
         await refresh_catalog(empty_catalog, client=client)
@@ -159,14 +120,14 @@ class TestConditionalRequests:
         If-None-Match so the server can answer 304.
         """
         first = http_client(
-            _both_feeds(
-                _ok(_formula_body(fixture_text), ETag='"f1"'),
-                _ok(_cask_body(fixture_text), ETag='"c1"'),
+            both_feeds(
+                ok(_formula_body(fixture_text), ETag='"f1"'),
+                ok(_cask_body(fixture_text), ETag='"c1"'),
             )
         )
         await refresh_catalog(empty_catalog, client=first)
 
-        second = http_client(_both_feeds(_not_modified(), _not_modified()))
+        second = http_client(both_feeds(not_modified(), not_modified()))
         await refresh_catalog(empty_catalog, client=second)
 
         formula_req = next(
@@ -183,13 +144,13 @@ class TestConditionalRequests:
         loaded by the prior refresh.
         """
         first = http_client(
-            _both_feeds(
-                _ok(_formula_body(fixture_text), ETag='"f1"'),
-                _ok(_cask_body(fixture_text), ETag='"c1"'),
+            both_feeds(
+                ok(_formula_body(fixture_text), ETag='"f1"'),
+                ok(_cask_body(fixture_text), ETag='"c1"'),
             )
         )
         await refresh_catalog(empty_catalog, client=first)
-        second = http_client(_both_feeds(_not_modified(), _not_modified()))
+        second = http_client(both_feeds(not_modified(), not_modified()))
         await refresh_catalog(empty_catalog, client=second)
         assert empty_catalog.get_formula("yazi") is not None
         assert empty_catalog.get_cask("iina") is not None
@@ -203,13 +164,13 @@ class TestConditionalRequests:
         fetched_at stamp advances even when nothing was downloaded.
         """
         first = http_client(
-            _both_feeds(
-                _ok(_formula_body(fixture_text), ETag='"f1"'),
-                _ok(_cask_body(fixture_text), ETag='"c1"'),
+            both_feeds(
+                ok(_formula_body(fixture_text), ETag='"f1"'),
+                ok(_cask_body(fixture_text), ETag='"c1"'),
             )
         )
         await refresh_catalog(empty_catalog, client=first)
-        second = http_client(_both_feeds(_not_modified(), _not_modified()))
+        second = http_client(both_feeds(not_modified(), not_modified()))
         await refresh_catalog(empty_catalog, client=second)
         after = empty_catalog.get_meta("formula_fetched_at")
         assert after is not None
@@ -227,7 +188,7 @@ class TestErrorHandling:
         """Test that an unexpected HTTP status raises CatalogFetchError."""
         from brewery.core.catalog.api import CatalogFetchError
 
-        client = http_client(_both_feeds(httpx.Response(500), httpx.Response(500)))
+        client = http_client(both_feeds(httpx.Response(500), httpx.Response(500)))
         with pytest.raises(CatalogFetchError):
             await refresh_catalog(empty_catalog, client=client)
 
@@ -251,7 +212,7 @@ class TestErrorHandling:
         """
         from brewery.core.catalog.api import CatalogFetchError
 
-        client = http_client(_both_feeds(httpx.Response(503), httpx.Response(200)))
+        client = http_client(both_feeds(httpx.Response(503), httpx.Response(200)))
         with pytest.raises(CatalogFetchError):
             await refresh_catalog(empty_catalog, client=client)
         assert empty_catalog.get_meta("formula_etag") is None
@@ -265,9 +226,9 @@ class TestClientLifecycle:
     ) -> None:
         """Test that a caller-supplied client is not closed by refresh_catalog."""
         client = http_client(
-            _both_feeds(
-                _ok(_formula_body(fixture_text)),
-                _ok(_cask_body(fixture_text)),
+            both_feeds(
+                ok(_formula_body(fixture_text)),
+                ok(_cask_body(fixture_text)),
             )
         )
         await refresh_catalog(empty_catalog, client=client)

@@ -4,16 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
-class _NullSink:
-    """Stands in for StreamRelocator where the keg is already staged."""
-
-    def finish(self, keg: Path) -> None:
-        """Do nothing, as there is nothing staged to relocate.
-
-        Args:
-            keg: The keg directory, ignored.
-        """
+from _layout import full_receipt, write_keg
 
 
 def _provider_calls(mock_brew, subcommand: str) -> list[tuple[str, ...]]:
@@ -46,7 +37,7 @@ def _add_alias(catalog, alias: str, name: str) -> None:
 
 
 def _install_formula(cellar, name, version="1.0", deps=()) -> Path:
-    """Write a minimal installed keg + receipt so the scan derives used_by.
+    """Write an installed keg + receipt so the scan derives used_by.
 
     Args:
         cellar: The cellar directory to write to
@@ -57,17 +48,11 @@ def _install_formula(cellar, name, version="1.0", deps=()) -> Path:
     Returns:
         The path to the installed keg
     """
-    import orjson
-
-    keg = cellar / name / version
-    keg.mkdir(parents=True)
-    (keg / "INSTALL_RECEIPT.json").write_bytes(
-        orjson.dumps(
-            {
-                "source": {"tap": "homebrew/core"},
-                "runtime_dependencies": [{"full_name": d} for d in deps],
-            }
-        )
+    return write_keg(
+        cellar,
+        name,
+        version,
+        receipt=full_receipt(
+            runtime_dependencies=[{"full_name": d} for d in deps],
+        ),
     )
-
-    return keg

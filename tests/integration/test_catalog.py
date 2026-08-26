@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import threading
-from typing import Any
 
 import httpx
 import pytest
+from _rows import cask_dict, formula_dict
 
 from brewery.core.catalog import (
     SCHEMA_VERSION,
@@ -23,69 +23,6 @@ from brewery.daemon.catalog_refresh import _refresh
 
 # Pinned so the guard tests never depend on the running host's platform
 _PLATFORM = Platform(arch="arm64", os="macos", macos_major=15)
-
-
-def formula_dict(name: str, **overrides: Any) -> dict[str, Any]:
-    """Build a full-column formula row dict, overridable per field.
-
-    Args:
-        name: The name of the formula.
-        **overrides: Additional fields to override in the formula row.
-
-    Returns:
-        A dictionary representing the full formula row.
-    """
-    base = {
-        "name": name,
-        "desc": f"{name} description",
-        "homepage": f"https://example/{name}",
-        "tap": "homebrew/core",
-        "version": "1.0.0",
-        "revision": 0,
-        "version_scheme": 0,
-        "keg_only": 0,
-        "has_service": 0,
-        "post_install": 0,
-        "bottle_url": None,
-        "bottle_sha256": None,
-        "bottle_cellar": None,
-        "bottle_rebuild": 0,
-        "deprecated": 0,
-        "disabled": 0,
-    }
-    base.update(overrides)
-
-    return base
-
-
-def cask_dict(token: str, **overrides: Any) -> dict[str, Any]:
-    """Build a full-column cask row dict, overridable per field.
-
-    Args:
-        token: The token of the cask.
-        **overrides: Additional fields to override in the cask row.
-
-    Returns:
-        A dictionary representing the full cask row.
-    """
-    base = {
-        "token": token,
-        "name": token.title(),
-        "desc": f"{token} description",
-        "homepage": f"https://example/{token}",
-        "tap": "homebrew/cask",
-        "version": "1.0.0",
-        "sha256": None,
-        "url": None,
-        "auto_updates": 0,
-        "artifacts": None,
-        "depends_on": None,
-        "deprecated": 0,
-        "disabled": 0,
-    }
-    base.update(overrides)
-
-    return base
 
 
 class TestSchema:
