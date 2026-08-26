@@ -8,7 +8,7 @@ install-dev:
 
 # Run all tests except the slow brew-differential ones (deselected by addopts)
 test:
-    uv run pytest -v --no-cov
+    uv run pytest -n auto --dist loadfile --no-cov
 
 # Run every test, slow included; a command-line -m replaces the addopts one
 test-all:
