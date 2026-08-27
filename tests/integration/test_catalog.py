@@ -348,15 +348,19 @@ class TestSearch:
         tokens = [r.token for r in empty_catalog.search("browser")]
         assert "firefox" in tokens
 
-    def test_empty_query_returns_empty(self, empty_catalog) -> None:
-        """Test that a query with no usable tokens returns nothing."""
+    @pytest.mark.parametrize(
+        "query",
+        [
+            pytest.param("   ", id="whitespace_only"),
+            pytest.param('"""', id="quotes_only"),
+            pytest.param("zzzznomatch", id="matches_nothing"),
+        ],
+    )
+    def test_a_query_with_no_matches_returns_empty(self, empty_catalog, query) -> None:
+        """Test that an unusable or unmatched query is empty, never an error."""
         self._populate(empty_catalog)
-        assert empty_catalog.search("   ") == []
 
-    def test_quote_only_query_returns_empty(self, empty_catalog) -> None:
-        """Test that a query of only quote characters yields no tokens."""
-        self._populate(empty_catalog)
-        assert empty_catalog.search('"""') == []
+        assert empty_catalog.search(query) == []
 
     def test_limit_caps_each_kind(self, empty_catalog) -> None:
         """Test that the limit applies per kind, so casks are never starved."""
@@ -374,11 +378,6 @@ class TestSearch:
 
         assert kinds.count("FormulaRow") == 3
         assert kinds.count("CaskRow") == 3
-
-    def test_no_match_returns_empty(self, empty_catalog) -> None:
-        """Test that a query matching nothing returns an empty list."""
-        self._populate(empty_catalog)
-        assert empty_catalog.search("zzzznomatch") == []
 
     def test_new_write_is_searchable(self, empty_catalog) -> None:
         """Test that a formula added in a later write becomes searchable.

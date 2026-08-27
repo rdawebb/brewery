@@ -109,26 +109,30 @@ def app() -> ExtendedTyper:
 
 
 class TestErrorMapping:
-    """A raised BrewError still reaches handle_error through the wrapper."""
+    """Test that a raised BrewError still reaches handle_error through the wrapper."""
 
     def test_package_not_found_exits_user_error(self, app) -> None:
+        """Test that a raised BrewError is rendered by handle_error, not a traceback."""
         result = runner.invoke(app, ["bare"])
 
         assert result.exit_code == EXIT_USER_ERROR
         assert "Package Not Found" in result.output
 
     def test_package_not_found_prints_search_suggestion(self, app) -> None:
+        """Test that the error template's next step survives the wrapper."""
         result = runner.invoke(app, ["bare"])
 
         assert "brewery search" in result.output
 
     def test_unexpected_exception_exits_system_error(self, app) -> None:
+        """Test that a non-BrewError is still caught and mapped to an exit code."""
         result = runner.invoke(app, ["exploding"])
 
         assert result.exit_code == EXIT_SYSTEM_ERROR
         assert "Unexpected error" in result.output
 
     def test_clean_command_is_untouched(self, app) -> None:
+        """Test that the wrapper is transparent when nothing is raised."""
         result = runner.invoke(app, ["clean"])
 
         assert result.exit_code == 0
@@ -136,9 +140,10 @@ class TestErrorMapping:
 
 
 class TestKeyboardInterrupt:
-    """Ctrl-C exits 130, and names the resume command when one is configured."""
+    """Test that Ctrl-C exits 130, and names the resume command when one is configured."""
 
     def test_hinted_exits_130_and_names_the_command(self, app) -> None:
+        """Test that Ctrl-C tells the user how to resume the work it abandoned."""
         result = runner.invoke(app, ["hinted"])
 
         assert result.exit_code == EXIT_INTERRUPTED
@@ -146,6 +151,7 @@ class TestKeyboardInterrupt:
         assert "brewery hinted" in result.output
 
     def test_unhinted_exits_130_silently(self, app) -> None:
+        """Test that a command with no resume hint offers none."""
         result = runner.invoke(app, ["unhinted"])
 
         assert result.exit_code == EXIT_INTERRUPTED
@@ -153,9 +159,10 @@ class TestKeyboardInterrupt:
 
 
 class TestWarnings:
-    """Declared warning types print and exit 0; undeclared ones stay failures."""
+    """Test that declared warning types print and exit 0; undeclared ones stay failures."""
 
     def test_declared_warning_exits_zero(self, app) -> None:
+        """Test that a declared warning is an advisory, not a failed command."""
         result = runner.invoke(app, ["warned"])
 
         assert result.exit_code == 0
@@ -163,27 +170,24 @@ class TestWarnings:
         assert "wget" in result.output
 
     def test_undeclared_warning_falls_through_to_handle_error(self, app) -> None:
+        """Test that only the warnings a command declares are downgraded."""
         result = runner.invoke(app, ["unwarned"])
 
         # AlreadyInstalledWarning subclasses UserError.
         assert result.exit_code == EXIT_USER_ERROR
 
 
-# `Annotated` metadata is evaluated as a string under `from __future__ import
-# annotations`, so it must resolve against module globals — a test-local app
-# would not be visible. One app per command: a single-command Typer app is
-# invoked directly, which is the surface these tests assert on.
+# Module-level so the deferred `Annotated` metadata resolves against globals, and
+# one app per command so each is invoked at the root, without a subcommand name.
 _sig_app = ExtendedTyper()
 _enum_app = ExtendedTyper()
 
 
 class TestSignatureTransparency:
-    """Typer must see the wrapped function's signature, not `*args, **kwargs`.
+    """Test that Typer sees the wrapped function's signature, not `*args, **kwargs`.
 
     Typer resolves parameters via `inspect.signature(fn, eval_str=True)` and
-    `get_type_hints(fn)`; both follow `__wrapped__`. If that ever stops holding,
-    options vanish from --help while the default invocation still works, so
-    assert on the introspected surface directly.
+    `get_type_hints(fn)`; both follow `__wrapped__`.
     """
 
     def test_options_and_arguments_survive_the_wrapper(self) -> None:
@@ -255,10 +259,10 @@ class TestCommandFailed:
         assert "did the thing" in result.output
 
     def test_typer_exit_would_be_swallowed_by_the_boundary(self) -> None:
-        """Guards why partial failures use CommandFailed, not ExtendedTyper.Exit.
+        """Test that guards why partial failures use CommandFailed.
 
         `click.exceptions.Exit` subclasses RuntimeError, so `command_error`'s
-        catch-all treats it as an unexpected error and remaps it to exit 2. A
+        catch-all treats it as an unexpected error and remaps it to exit 2; a
         dedicated sentinel caught before the catch-all avoids that.
         """
         app = ExtendedTyper()

@@ -51,147 +51,145 @@ def _install(staged, prefix_path, name="openssl@3", version="3.0", **kw):
     )
 
 
-def test_clone_tree_preserves_modes_and_symlinks(staged_keg, tmp_path) -> None:
-    """Test that cloning a directory preserves file modes and symlinks."""
-    dst = tmp_path / "out"
-    clone_tree(staged_keg, dst, use_clonefile=False)
-    assert (dst / "bin" / "openssl").read_bytes() == b"MACHO-binary"
-    assert oct((dst / "bin" / "openssl").stat().st_mode & 0o777) == "0o555"
-    assert oct((dst / "lib" / "libssl.dylib").stat().st_mode & 0o777) == "0o444"
-    assert os.readlink(dst / "lib" / "libssl.3.dylib") == "libssl.dylib"
-    assert (dst / ".brew" / "openssl@3.rb").exists()
+@pytest.fixture
+def clonefile_fails(monkeypatch):
+    """Make the clonefile syscall fail with a given errno.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+
+    Returns:
+        A callable taking the errno the syscall should raise.
+    """
+
+    def _fail(code: int) -> None:
+        def _raise(src, dst) -> None:
+            raise OSError(code, os.strerror(code))
+
+        monkeypatch.setattr(_cellar, "_clonefile", _raise)
+
+    return _fail
 
 
-def test_clone_tree_refuses_existing_dest(staged_keg, tmp_path) -> None:
-    """Test that cloning a directory refuses to overwrite an existing destination."""
-    dst = tmp_path / "out"
-    dst.mkdir()
-    with pytest.raises(FileExistsError):
+class TestCloneTree:
+    """Tests the tree copier, including the clonefile fast path and its fallback."""
+
+    def test_modes_and_symlinks_are_preserved(self, staged_keg, tmp_path) -> None:
+        """Test that a copied keg keeps its permissions and relative symlinks."""
+        dst = tmp_path / "out"
         clone_tree(staged_keg, dst, use_clonefile=False)
+        assert (dst / "bin" / "openssl").read_bytes() == b"MACHO-binary"
+        assert oct((dst / "bin" / "openssl").stat().st_mode & 0o777) == "0o555"
+        assert oct((dst / "lib" / "libssl.dylib").stat().st_mode & 0o777) == "0o444"
+        assert os.readlink(dst / "lib" / "libssl.3.dylib") == "libssl.dylib"
+        assert (dst / ".brew" / "openssl@3.rb").exists()
+
+    def test_an_existing_destination_is_refused(self, staged_keg, tmp_path) -> None:
+        """Test that cloning never writes into a directory that is already there."""
+        dst = tmp_path / "out"
+        dst.mkdir()
+
+        with pytest.raises(FileExistsError):
+            clone_tree(staged_keg, dst, use_clonefile=False)
+
+    def test_an_unsupported_filesystem_falls_back(
+        self, staged_keg, tmp_path, clonefile_fails
+    ) -> None:
+        """Test that a filesystem without clonefile still gets its copy."""
+        clonefile_fails(errno.ENOTSUP)
+        dst = tmp_path / "out"
+
+        clone_tree(staged_keg, dst, use_clonefile=True)  # Forced -> falls back
+
+        assert (dst / "bin" / "openssl").read_bytes() == b"MACHO-binary"
+
+    def test_a_real_error_is_not_swallowed_as_a_fallback(
+        self, staged_keg, tmp_path, clonefile_fails
+    ) -> None:
+        """Test that only ENOTSUP means "try the slow path"; the rest are failures."""
+        clonefile_fails(errno.EACCES)
+
+        with pytest.raises(OSError) as exc:
+            clone_tree(staged_keg, tmp_path / "out", use_clonefile=True)
+
+        assert exc.value.errno == errno.EACCES
 
 
-def test_clone_tree_falls_back_when_clonefile_unsupported(
-    staged_keg, tmp_path, monkeypatch
-) -> None:
-    """Test that cloning a directory falls back when clonefile is unsupported."""
+class TestInstallToCellar:
+    """Tests pouring a staged keg into the Cellar and repointing its opt link."""
 
-    def enotsup(src, dst) -> None:
-        """Simulate ENOTSUP error.
+    def test_the_keg_lands_with_a_relative_opt_link(
+        self, staged_keg, prefix_path
+    ) -> None:
+        """Test that a keg is placed in the Cellar and opt points at it relatively."""
+        dest = _install(staged_keg, prefix_path)
+        assert dest == prefix_path / "Cellar" / "openssl@3" / "3.0"
+        assert (dest / "bin" / "openssl").read_bytes() == b"MACHO-binary"
 
-        Args:
-            src: The source path.
-            dst: The destination path.
+        opt = prefix_path / "opt" / "openssl@3"
+        assert opt.is_symlink()
+        assert os.readlink(opt) == "../Cellar/openssl@3/3.0"  # Relative
+        assert opt.resolve() == dest.resolve()
 
-        Raises:
-            OSError: With `errno.ENOTSUP`.
-        """
-        raise OSError(errno.ENOTSUP, "not supported")
-
-    monkeypatch.setattr(_cellar, "_clonefile", enotsup)
-    dst = tmp_path / "out"
-    clone_tree(staged_keg, dst, use_clonefile=True)  # Forced clonefile -> falls back
-    assert (dst / "bin" / "openssl").read_bytes() == b"MACHO-binary"
-
-
-def test_clone_tree_reraises_real_clonefile_error(
-    staged_keg, tmp_path, monkeypatch
-) -> None:
-    """Test that cloning a directory reraises real clonefile errors."""
-
-    def eacces(src, dst) -> None:
-        """Simulate EACCES error.
-
-        Args:
-            src: The source path.
-            dst: The destination path.
-
-        Raises:
-            OSError: With `errno.EACCES`.
-        """
-        raise OSError(errno.EACCES, "permission denied")
-
-    monkeypatch.setattr(_cellar, "_clonefile", eacces)
-    with pytest.raises(OSError) as exc:
-        clone_tree(staged_keg, tmp_path / "out", use_clonefile=True)
-    assert exc.value.errno == errno.EACCES  # Not swallowed as a fallback
-
-
-def test_install_places_keg_and_opt_link(staged_keg, prefix_path) -> None:
-    """Test that installing a keg places it in the correct location and creates a symlink in opt."""
-    dest = _install(staged_keg, prefix_path)
-    assert dest == prefix_path / "Cellar" / "openssl@3" / "3.0"
-    assert (dest / "bin" / "openssl").read_bytes() == b"MACHO-binary"
-
-    opt = prefix_path / "opt" / "openssl@3"
-    assert opt.is_symlink()
-    assert os.readlink(opt) == "../Cellar/openssl@3/3.0"  # Relative
-    assert opt.resolve() == dest.resolve()
-
-
-def test_reinstall_replaces_readonly_keg(staged_keg, prefix_path) -> None:
-    """Test that reinstalling a keg replaces a readonly keg."""
-    _install(staged_keg, prefix_path)
-
-    # Mutate the staged source, reinstall the same version, expect replacement
-    (staged_keg / "bin" / "openssl").chmod(0o755)
-    (staged_keg / "bin" / "openssl").write_bytes(b"REBUILT")
-    (staged_keg / "bin" / "openssl").chmod(0o555)
-    dest = _install(staged_keg, prefix_path)
-    assert (dest / "bin" / "openssl").read_bytes() == b"REBUILT"
-
-
-def test_upgrade_repoints_opt_and_keeps_old_keg(
-    staged_keg, prefix_path, tmp_path, build_keg
-) -> None:
-    """Test that upgrading a keg repoints the opt symlink and keeps the old keg."""
-    _install(staged_keg, prefix_path, version="3.0")
-    new = build_keg(tmp_path / "stage2" / "openssl@3" / "3.1")
-    (new / "bin" / "openssl").chmod(0o755)
-    (new / "bin" / "openssl").write_bytes(b"v3.1")
-    (new / "bin" / "openssl").chmod(0o555)
-
-    _install(new, prefix_path, version="3.1")
-    opt = prefix_path / "opt" / "openssl@3"
-    assert os.readlink(opt) == "../Cellar/openssl@3/3.1"
-    assert (prefix_path / "Cellar" / "openssl@3" / "3.0").exists()  # Old keg retained
-    assert (
-        prefix_path / "Cellar" / "openssl@3" / "3.1" / "bin" / "openssl"
-    ).read_bytes() == b"v3.1"
-
-
-def test_opt_refreshed_when_previously_dangling(staged_keg, prefix_path) -> None:
-    """Test that the opt symlink is refreshed when it was previously dangling."""
-    opt = prefix_path / "opt" / "openssl@3"
-    opt.parent.mkdir(parents=True)
-    opt.symlink_to(Path("..") / "Cellar" / "openssl@3" / "9.9")  # Points at nothing
-    _install(staged_keg, prefix_path)
-    assert os.readlink(opt) == "../Cellar/openssl@3/3.0"
-
-
-def test_install_cleans_partial_keg_on_failure(
-    staged_keg, prefix_path, monkeypatch
-) -> None:
-    """Test that installing a keg cleans up partial installations on failure."""
-
-    def half_then_fail(src, dst, *, use_clonefile=None) -> None:
-        """Simulate a partial installation failure.
-
-        Args:
-            src: The source path.
-            dst: The destination path.
-            use_clonefile: Whether to use clonefile.
-
-        Raises:
-            OSError: With `errno.EIO`.
-        """
-        dst.mkdir(parents=True)
-        (dst / "partial").write_bytes(b"x")
-        raise OSError(errno.EIO, "disk error")
-
-    monkeypatch.setattr(_cellar, "clone_tree", half_then_fail)
-    with pytest.raises(CellarError):
+    def test_reinstalling_replaces_a_read_only_keg(
+        self, staged_keg, prefix_path
+    ) -> None:
+        """Test that the same version reinstalls over itself, read-only files and all."""
         _install(staged_keg, prefix_path)
-    assert not (prefix_path / "Cellar" / "openssl@3" / "3.0").exists()
+
+        # Mutate the staged source, reinstall the same version, expect replacement
+        (staged_keg / "bin" / "openssl").chmod(0o755)
+        (staged_keg / "bin" / "openssl").write_bytes(b"REBUILT")
+        (staged_keg / "bin" / "openssl").chmod(0o555)
+        dest = _install(staged_keg, prefix_path)
+
+        assert (dest / "bin" / "openssl").read_bytes() == b"REBUILT"
+
+    def test_an_upgrade_repoints_opt_and_keeps_the_old_keg(
+        self, staged_keg, prefix_path, tmp_path, build_keg
+    ) -> None:
+        """Test that upgrading moves the opt link without removing the old version."""
+        _install(staged_keg, prefix_path, version="3.0")
+        new = build_keg(tmp_path / "stage2" / "openssl@3" / "3.1")
+        (new / "bin" / "openssl").chmod(0o755)
+        (new / "bin" / "openssl").write_bytes(b"v3.1")
+        (new / "bin" / "openssl").chmod(0o555)
+
+        _install(new, prefix_path, version="3.1")
+
+        opt = prefix_path / "opt" / "openssl@3"
+        assert os.readlink(opt) == "../Cellar/openssl@3/3.1"
+        assert (prefix_path / "Cellar" / "openssl@3" / "3.0").exists()  # Retained
+        assert (
+            prefix_path / "Cellar" / "openssl@3" / "3.1" / "bin" / "openssl"
+        ).read_bytes() == b"v3.1"
+
+    def test_a_dangling_opt_link_is_refreshed(self, staged_keg, prefix_path) -> None:
+        """Test that opt left pointing at a removed keg is repaired, not tripped over."""
+        opt = prefix_path / "opt" / "openssl@3"
+        opt.parent.mkdir(parents=True)
+        opt.symlink_to(Path("..") / "Cellar" / "openssl@3" / "9.9")  # Points at nothing
+
+        _install(staged_keg, prefix_path)
+
+        assert os.readlink(opt) == "../Cellar/openssl@3/3.0"
+
+    def test_a_partial_keg_is_cleaned_up_on_failure(
+        self, staged_keg, prefix_path, monkeypatch
+    ) -> None:
+        """Test that a copy failing halfway leaves no half-poured keg behind."""
+
+        def half_then_fail(src, dst, *, use_clonefile=None) -> None:
+            dst.mkdir(parents=True)
+            (dst / "partial").write_bytes(b"x")
+            raise OSError(errno.EIO, "disk error")
+
+        monkeypatch.setattr(_cellar, "clone_tree", half_then_fail)
+
+        with pytest.raises(CellarError):
+            _install(staged_keg, prefix_path)
+
+        assert not (prefix_path / "Cellar" / "openssl@3" / "3.0").exists()
 
 
 class TestRemoveRack:

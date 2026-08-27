@@ -69,8 +69,13 @@ class TestCacheTokenRoundTrip:
         assert c.get("k") is None
 
     def test_delete_missing_is_silent(self, mock_env) -> None:
-        """Test that deleting an absent key does not raise."""
-        Cache(namespace="t6").delete("absent")  # No exception
+        """Test that deleting an absent key leaves it absent, rather than raising."""
+        c = Cache(namespace="t6")
+
+        c.delete("absent")
+
+        assert c.get("absent") is None
+        assert not c._file("absent").exists()
 
     @pytest.mark.parametrize(
         "bookkeeping_dir",

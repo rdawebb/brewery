@@ -101,29 +101,11 @@ def mock_run(monkeypatch):
     def install(
         stdout: str = "", stderr: str = "", returncode: int = 0
     ) -> list[list[str]]:
-        """Install the stub and return the call-log list.
-
-        Args:
-            stdout: stdout text the stub returns in CompletedProcess.
-            stderr: stderr text the stub returns in CompletedProcess.
-            returncode: The return code the stub reports.
-
-        Returns:
-            A list that accumulates one argv list per subprocess.run call.
-        """
+        """Install the stub and return the list it appends each argv to."""
         runs: list[list[str]] = []
 
         def stub(cmd, *args, **kwargs) -> subprocess.CompletedProcess:
-            """Record the command and return a CompletedProcess stub.
-
-            Args:
-                cmd: The command to record and return.
-                *args: Additional args to pass to subprocess.run.
-                **kwargs: Additional kwargs to pass to subprocess.run.
-
-            Returns:
-                A CompletedProcess stub with the given return code and stdout/stderr.
-            """
+            """Stub for subprocess.run that records each argv and returns a mock result."""
             runs.append(list(cmd))
 
             return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)

@@ -138,6 +138,11 @@ class TestAdmit:
         extractor._directory(_member("foo", kind=tarfile.DIRTYPE), "foo")
         extractor.apply_dir_modes()
 
+        # The member's recorded uid/gid are ignored: the extracted directory
+        # belongs to whoever ran the extraction
+        stat = (tmp_path / "foo").stat()
+        assert (stat.st_uid, stat.st_gid) == (os.getuid(), os.getgid())
+
     @pytest.mark.parametrize(
         ("mode", "expected"),
         [(0o4555, 0o555), (0o2755, 0o755), (0o1777, 0o777), (0o444, 0o444)],

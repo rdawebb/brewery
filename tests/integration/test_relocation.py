@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from test_extraction import make_tar
+from _tar import make_tar
 
 from brewery.core.config import get_brewery_env
 from brewery.core.errors import RelocationError

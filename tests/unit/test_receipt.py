@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from unittest import mock
-
 import orjson
 import pytest
 
@@ -14,6 +12,17 @@ from brewery.providers.receipt import RuntimeDependency, Source, build_receipt, 
 # Fixtures derive source.path from the live env so the byte-exact comparisons
 # hold on any host
 _API_PATH = str(get_brewery_env().api_path)
+
+
+@pytest.fixture
+def intel_host(monkeypatch) -> None:
+    """Report an Intel host, so the arch token matches the recorded receipts.
+
+    Args:
+        monkeypatch: The monkeypatch fixture.
+    """
+    monkeypatch.setattr(r.platform, "machine", lambda: "x86_64")
+
 
 SQLITE = """\
 {
@@ -217,27 +226,29 @@ def _rebuild(o: dict, tab_deps: list[dict]) -> dict:
     )
 
 
-@pytest.mark.parametrize(
-    "original,tab_deps",
-    [
-        (SQLITE, SQLITE_TAB_DEPS),
-        (OPENSSL, OPENSSL_TAB_DEPS),
-        (CA_CERTIFICATES, []),
-    ],
-    ids=["sqlite", "openssl", "ca-certificates"],
-)
-def test_round_trip_is_byte_exact(original, tab_deps) -> None:
-    """Test that round-tripping a receipt preserves byte-for-byte equality."""
-    with mock.patch.object(r.platform, "machine", lambda: "x86_64"):
+class TestReceiptBuilding:
+    """Tests that a rebuilt receipt matches what brew wrote."""
+
+    @pytest.mark.parametrize(
+        "original,tab_deps",
+        [
+            (SQLITE, SQLITE_TAB_DEPS),
+            (OPENSSL, OPENSSL_TAB_DEPS),
+            (CA_CERTIFICATES, []),
+        ],
+        ids=["sqlite", "openssl", "ca-certificates"],
+    )
+    def test_round_trip_is_byte_exact(self, original, tab_deps, intel_host) -> None:
+        """Test that round-tripping a receipt preserves byte-for-byte equality."""
         assert dumps(_rebuild(orjson.loads(original), tab_deps)) == original
 
-
-def test_all_bottle_fills_arch_from_host_and_nulls_built_on() -> None:
-    """Test that an all-bottle tab fills arch from host and nulls built_on."""
-    # Simulate an all-bottle tab: arch=None, built_on=None
-    env = get_brewery_env()
-    parsed = orjson.loads(CA_CERTIFICATES)
-    with mock.patch.object(r.platform, "machine", lambda: "x86_64"):
+    def test_all_bottle_fills_arch_from_host_and_nulls_built_on(
+        self, intel_host
+    ) -> None:
+        """Test that an all-bottle tab fills arch from host and nulls built_on."""
+        # Simulate an all-bottle tab: arch=None, built_on=None
+        env = get_brewery_env()
+        parsed = orjson.loads(CA_CERTIFICATES)
         built = build_receipt(
             homebrew_version=parsed["homebrew_version"],
             changed_files=[],
@@ -250,109 +261,108 @@ def test_all_bottle_fills_arch_from_host_and_nulls_built_on() -> None:
             source=Source(stable_version="2026-05-14", api_path=str(env.api_path)),
             aliases=[],
         )
-    assert built["arch"] == "x86_64"  # Filled from host
-    assert built["built_on"] is None  # Written as null
-    assert dumps(built) == CA_CERTIFICATES
+        assert built["arch"] == "x86_64"  # Filled from host
+        assert built["built_on"] is None  # Written as null
+        assert dumps(built) == CA_CERTIFICATES
 
+    def test_from_tab_drops_compatibility_version(self) -> None:
+        """Test that from_tab drops compatibility_version."""
+        d = RuntimeDependency.from_tab(OPENSSL_TAB_DEPS[0]).to_dict()
+        assert "compatibility_version" not in d
+        assert list(d) == [
+            "full_name",
+            "version",
+            "revision",
+            "bottle_rebuild",
+            "pkg_version",
+            "declared_directly",
+        ]
+        assert d["full_name"] == "ca-certificates" and d["declared_directly"] is True
 
-def test_from_tab_drops_compatibility_version() -> None:
-    """Test that from_tab drops compatibility_version."""
-    d = RuntimeDependency.from_tab(OPENSSL_TAB_DEPS[0]).to_dict()
-    assert "compatibility_version" not in d
-    assert list(d) == [
-        "full_name",
-        "version",
-        "revision",
-        "bottle_rebuild",
-        "pkg_version",
-        "declared_directly",
-    ]
-    assert d["full_name"] == "ca-certificates" and d["declared_directly"] is True
+    def test_pkg_version_defaults_to_version(self) -> None:
+        """Test that pkg_version defaults to version."""
+        assert (
+            RuntimeDependency("readline", "8.3.3").to_dict()["pkg_version"] == "8.3.3"
+        )
 
+    def test_compiler_is_tab_sourced_not_constant(self) -> None:
+        """Test that the compiler is sourced from the tab, not a constant."""
+        receipt = _rebuild(orjson.loads(CA_CERTIFICATES), [])
+        assert receipt["compiler"] == "gcc-12"
 
-def test_pkg_version_defaults_to_version() -> None:
-    """Test that pkg_version defaults to version."""
-    assert RuntimeDependency("readline", "8.3.3").to_dict()["pkg_version"] == "8.3.3"
-
-
-def test_top_level_field_order() -> None:
-    """Test that the top-level fields are in the expected order."""
-    receipt = _rebuild(orjson.loads(SQLITE), SQLITE_TAB_DEPS)
-    assert list(receipt) == [
-        "homebrew_version",
-        "used_options",
-        "unused_options",
-        "built_as_bottle",
-        "poured_from_bottle",
-        "loaded_from_api",
-        "loaded_from_internal_api",
-        "installed_on_request",
-        "changed_files",
-        "time",
-        "source_modified_time",
-        "compiler",
-        "aliases",
-        "runtime_dependencies",
-        "source",
-        "arch",
-        "built_on",
-    ]
-
-
-def test_compiler_is_tab_sourced_not_constant() -> None:
-    """Test that the compiler is sourced from the tab, not a constant."""
-    receipt = _rebuild(orjson.loads(CA_CERTIFICATES), [])
-    assert receipt["compiler"] == "gcc-12"
-
-
-def test_changed_files_sorted_in_output() -> None:
-    """Test that changed_files are sorted in the output."""
-    receipt = build_receipt(
-        homebrew_version="x",
-        changed_files=["lib/z.pc", "bin/a", "lib/a.pc"],
-        source_modified_time=1,
-        compiler="clang",
-        runtime_dependencies=[],
-        built_on=None,
-        installed_on_request=True,
-        time=1,
-        source=Source(stable_version="1.0", api_path="/p"),
-        aliases=[],
+    @pytest.mark.parametrize(
+        ("machine", "expected"),
+        [
+            ("arm64", "arm64"),
+            # Linux reports aarch64, but brew's tab token is arm64 on both
+            ("aarch64", "arm64"),
+            # Intel keeps the raw name: the tab says x86_64 where a tag says amd64
+            ("x86_64", "x86_64"),
+        ],
     )
-    assert receipt["changed_files"] == ["bin/a", "lib/a.pc", "lib/z.pc"]
+    def test_current_arch_maps_machine(
+        self, monkeypatch, machine: str, expected: str
+    ) -> None:
+        """Test that current_arch maps to the machine architecture."""
+        monkeypatch.setattr(r.platform, "machine", lambda: machine)
+        assert r.current_arch() == expected
 
 
-def test_dumps_no_trailing_newline_and_null_built_on() -> None:
-    """Test that dumps does not add a trailing newline and sets built_on to null."""
-    text = dumps(_rebuild(orjson.loads(CA_CERTIFICATES), []))
-    assert not text.endswith("\n")
-    assert text.endswith('"built_on": null\n}')
+class TestSerialisation:
+    """Tests the byte-level output format brew's readers expect."""
 
-
-def test_write_receipt_atomic_mode_and_content(tmp_path) -> None:
-    """Test that write_receipt uses atomic mode and writes the correct content."""
-    keg = tmp_path / "keg"
-    keg.mkdir()
-    with mock.patch.object(r.platform, "machine", lambda: "x86_64"):
+    def test_top_level_field_order(self) -> None:
+        """Test that the top-level fields are in the expected order."""
         receipt = _rebuild(orjson.loads(SQLITE), SQLITE_TAB_DEPS)
-    path = r.write_receipt(keg, receipt)
-    assert path == keg / "INSTALL_RECEIPT.json"
-    assert path.read_text() == SQLITE
-    assert oct(path.stat().st_mode & 0o777) == "0o644"
-    assert list(keg.glob("*.tmp")) == []
+        assert list(receipt) == [
+            "homebrew_version",
+            "used_options",
+            "unused_options",
+            "built_as_bottle",
+            "poured_from_bottle",
+            "loaded_from_api",
+            "loaded_from_internal_api",
+            "installed_on_request",
+            "changed_files",
+            "time",
+            "source_modified_time",
+            "compiler",
+            "aliases",
+            "runtime_dependencies",
+            "source",
+            "arch",
+            "built_on",
+        ]
 
+    def test_changed_files_sorted_in_output(self) -> None:
+        """Test that changed_files are sorted in the output."""
+        receipt = build_receipt(
+            homebrew_version="x",
+            changed_files=["lib/z.pc", "bin/a", "lib/a.pc"],
+            source_modified_time=1,
+            compiler="clang",
+            runtime_dependencies=[],
+            built_on=None,
+            installed_on_request=True,
+            time=1,
+            source=Source(stable_version="1.0", api_path="/p"),
+            aliases=[],
+        )
+        assert receipt["changed_files"] == ["bin/a", "lib/a.pc", "lib/z.pc"]
 
-@pytest.mark.parametrize(
-    ("machine", "expected"),
-    [
-        ("arm64", "arm64"),
-        # Linux reports aarch64, but brew's tab token is arm64 on both
-        ("aarch64", "arm64"),
-        # Intel keeps the raw name: the tab says x86_64 where a tag says amd64
-        ("x86_64", "x86_64"),
-    ],
-)
-def test_current_arch_maps_machine(monkeypatch, machine: str, expected: str) -> None:
-    """Test that current_arch maps to the machine architecture."""
-    monkeypatch.setattr(r.platform, "machine", lambda: machine)
-    assert r.current_arch() == expected
+    def test_dumps_no_trailing_newline_and_null_built_on(self) -> None:
+        """Test that dumps does not add a trailing newline and sets built_on to null."""
+        text = dumps(_rebuild(orjson.loads(CA_CERTIFICATES), []))
+        assert not text.endswith("\n")
+        assert text.endswith('"built_on": null\n}')
+
+    def test_write_receipt_atomic_mode_and_content(self, tmp_path, intel_host) -> None:
+        """Test that write_receipt uses atomic mode and writes the correct content."""
+        keg = tmp_path / "keg"
+        keg.mkdir()
+        receipt = _rebuild(orjson.loads(SQLITE), SQLITE_TAB_DEPS)
+        path = r.write_receipt(keg, receipt)
+        assert path == keg / "INSTALL_RECEIPT.json"
+        assert path.read_text() == SQLITE
+        assert oct(path.stat().st_mode & 0o777) == "0o644"
+        assert list(keg.glob("*.tmp")) == []
