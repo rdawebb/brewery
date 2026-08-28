@@ -11,24 +11,6 @@ from brewery.core import decorators
 from brewery.core.decorators import log_operation, retry_on_transient
 from brewery.core.errors import TransientError, UserError
 
-pytestmark = pytest.mark.unit
-
-
-@pytest.fixture
-def no_sleep(monkeypatch) -> None:
-    """Make asyncio.sleep a no-op so backoff delays don't slow the suite."""
-
-    async def _instant(*_args, **_kwargs) -> None:
-        """A no-op function that returns None.
-
-        Args:
-            *_args: Variable length argument list.
-            **_kwargs: Arbitrary keyword arguments.
-        """
-        return
-
-    monkeypatch.setattr(asyncio, "sleep", _instant)
-
 
 class TestRetryOnTransient:
     """Test the retry_on_transient decorator."""
@@ -51,7 +33,7 @@ class TestRetryOnTransient:
         assert await op() == "ok"
         assert len(calls) == 1
 
-    async def test_retries_then_succeeds(self, no_sleep) -> None:
+    async def test_retries_then_succeeds(self, delays) -> None:
         """Test that retry_on_transient retries and succeeds after transient errors."""
         attempts = {"n": 0}
 
@@ -74,7 +56,7 @@ class TestRetryOnTransient:
         assert await op() == "recovered"
         assert attempts["n"] == 3
 
-    async def test_exhausts_and_reraises(self, no_sleep) -> None:
+    async def test_exhausts_and_reraises(self, delays) -> None:
         """Test that retry_on_transient exhausts retries and reraises on non-transient errors."""
         attempts = {"n": 0}
 
@@ -92,7 +74,7 @@ class TestRetryOnTransient:
             await op()
         assert attempts["n"] == 3  # Should be exactly max_retries attempts
 
-    async def test_does_not_retry_non_transient(self, no_sleep) -> None:
+    async def test_does_not_retry_non_transient(self, delays) -> None:
         """Test that retry_on_transient does not retry on non-transient errors."""
         attempts = {"n": 0}
 

@@ -6,7 +6,8 @@ import functools
 from pathlib import Path
 
 import pytest
-from _stubs import MockClient, MockPorts, _run_brew, patch_httpx
+from _mocks import MockHTTPClient, patch_httpx
+from _stubs import MockPorts, _run_brew
 
 import brewery.providers.pipeline as svc
 from brewery.providers.install_adapters import BrewAdapter, CatalogAdapter
@@ -80,14 +81,14 @@ class MockOrchestrator:
 
 
 @pytest.fixture
-def patched(monkeypatch) -> MockClient:
+def patched(monkeypatch) -> MockHTTPClient:
     """Patch httpx.AsyncClient, Downloader, and Orchestrator with stubs.
 
     Args:
         monkeypatch: The pytest monkeypatch fixture.
 
     Returns:
-        The MockClient instance that the patched AsyncClient constructor returns.
+        The MockHTTPClient the patched AsyncClient constructor returns.
     """
     client = patch_httpx(monkeypatch)
 

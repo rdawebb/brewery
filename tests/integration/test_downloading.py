@@ -15,8 +15,6 @@ import brewery.providers.downloader as d
 from brewery.core.errors import DownloadError
 from brewery.providers.downloader import BottleRef, Downloader
 
-pytestmark = pytest.mark.integration
-
 CDN = "https://pkg-containers.githubusercontent.com/blob/obj"
 
 
@@ -193,21 +191,6 @@ class _PlainStream(httpx.AsyncByteStream):
         """Close the stream."""
 
 
-@pytest.fixture
-def no_backoff(monkeypatch):
-    """Make retry backoff instantaneous so retry tests don't actually sleep."""
-
-    async def _instant(_seconds) -> None:
-        """Instantly return without sleeping.
-
-        Args:
-            _seconds: The number of seconds to sleep (ignored).
-        """
-        return
-
-    monkeypatch.setattr(d.asyncio, "sleep", _instant)
-
-
 async def test_fetch_downloads_and_verifies(tmp_path) -> None:
     """Test fetching, downloading, and verifying a blob."""
     blob = _blob(1)
@@ -379,7 +362,7 @@ async def test_http_404_raises_without_retry(tmp_path) -> None:
     assert len(calls) == 1  # 4xx is not retried
 
 
-async def test_retries_then_succeeds_on_transient_5xx(tmp_path, no_backoff) -> None:
+async def test_retries_then_succeeds_on_transient_5xx(tmp_path, delays) -> None:
     """Test that retries succeed on transient 5xx errors."""
     blob = _blob(8)
     state = {"n": 0}
@@ -405,7 +388,7 @@ async def test_retries_then_succeeds_on_transient_5xx(tmp_path, no_backoff) -> N
     assert path.read_bytes() == blob
 
 
-async def test_exhausts_retries_then_raises(tmp_path, no_backoff) -> None:
+async def test_exhausts_retries_then_raises(tmp_path, delays) -> None:
     """Test that exhausting all retries raises an error."""
     calls: list = []
 
@@ -429,7 +412,7 @@ async def test_exhausts_retries_then_raises(tmp_path, no_backoff) -> None:
     assert list(tmp_path.glob("*.part")) == []
 
 
-async def test_resumes_cleanly_after_midstream_drop(tmp_path, no_backoff) -> None:
+async def test_resumes_cleanly_after_midstream_drop(tmp_path, delays) -> None:
     """Test that a download can resume cleanly after a mid-stream drop."""
     blob = _blob(10)
     ref = _ref(blob, host="example.org")

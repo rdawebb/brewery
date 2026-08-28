@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-import fcntl
 import os
-import shutil
-import subprocess
-import sys
 import threading
 import time
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from pathlib import Path
 
 import orjson
 import pytest
+from _layout import write_keg
+from _locks import held_structure
 
 from brewery.core import locks as core_locks
 from brewery.core.errors import OperationInProgressError
@@ -27,37 +26,33 @@ from brewery.providers.linker import (
 )
 
 
-def _make_keg(prefix: Path, name: str = "openssl@3", version: str = "3.0") -> Path:
+def _make_keg(
+    empty_prefix: Path, name: str = "openssl@3", version: str = "3.0"
+) -> Path:
     """Create a synthetic Cellar keg with a representative layout.
 
     Args:
-        prefix: The Homebrew prefix directory under which the keg is placed.
+        empty_prefix: The Homebrew prefix directory under which the keg is placed.
         name: The formula name (becomes the Cellar subdirectory name).
         version: The version string (becomes the keg version directory name).
 
     Returns:
         The path to the populated keg version directory.
     """
-    keg = prefix / "Cellar" / name / version
-    for d in [
-        "bin",
-        "lib/pkgconfig",
-        "lib/engines-3",
-        "include/openssl",
-        "share/man/man1",
-        "share/doc/openssl",
-        ".brew",
+    keg = write_keg(
+        empty_prefix / "Cellar", name, version, receipt={}, executables=["openssl"]
+    )
+    # One entry per link strategy the planner has to choose between
+    for rel, content in [
+        ("lib/libssl.3.dylib", "dylib"),
+        ("lib/pkgconfig/openssl.pc", "pc"),
+        ("lib/engines-3/capi.dylib", "engine"),
+        ("include/openssl/ssl.h", "h"),
+        ("share/man/man1/openssl.1", "man"),
+        ("share/doc/openssl/README", "doc"),
+        (f".brew/{name}.rb", "class"),
     ]:
-        (keg / d).mkdir(parents=True)
-    (keg / "bin" / "openssl").write_text("#!/bin/sh\n")
-    (keg / "lib" / "libssl.3.dylib").write_text("dylib")
-    (keg / "lib" / "pkgconfig" / "openssl.pc").write_text("pc")
-    (keg / "lib" / "engines-3" / "capi.dylib").write_text("engine")
-    (keg / "include" / "openssl" / "ssl.h").write_text("h")
-    (keg / "share" / "man" / "man1" / "openssl.1").write_text("man")
-    (keg / "share" / "doc" / "openssl" / "README").write_text("doc")
-    (keg / "INSTALL_RECEIPT.json").write_text("{}")
-    (keg / ".brew" / f"{name}.rb").write_text("class")
+        _mk(keg, rel, content)
 
     return keg
 
@@ -122,7 +117,7 @@ def _points_to(link: Path, target: Path) -> bool:
 
 
 @pytest.fixture
-def prefix(tmp_path: Path) -> Path:
+def empty_prefix(tmp_path: Path) -> Path:
     """A fresh, empty prefix directory.
 
     Args:
@@ -351,7 +346,9 @@ class TestLinking:
 class TestLinkExplosion:
     """Tests for symlink-explosion handling"""
 
-    def test_second_keg_explodes_whole_dir_symlink(self, tmp_path, prefix) -> None:
+    def test_second_keg_explodes_whole_dir_symlink(
+        self, tmp_path, empty_prefix
+    ) -> None:
         """Test that linking a second keg into a whole-dir symlink explodes it into a real directory."""
         cellar = tmp_path / "Cellar"
         a = cellar / "xorgproto/2025.1"
@@ -359,11 +356,11 @@ class TestLinkExplosion:
         b = cellar / "libx11/1.8.13"
         _mk(b, "include/X11/Xlib.h")
 
-        link_keg(a, prefix=prefix, name="xorgproto")
-        x11 = prefix / "include/X11"
+        link_keg(a, prefix=empty_prefix, name="xorgproto")
+        x11 = empty_prefix / "include/X11"
         assert x11.is_symlink()  # First keg: whole-dir symlink
 
-        res = link_keg(b, prefix=prefix, name="libx11")
+        res = link_keg(b, prefix=empty_prefix, name="libx11")
 
         assert x11.is_dir() and not x11.is_symlink()  # Exploded into a real dir
         assert _points_to(
@@ -397,7 +394,7 @@ class TestLinkExplosion:
         assert (x11 / "Xfuncproto.h").read_text() == "AAA"  # Displaced keg
         assert (x11 / "Xlib.h").read_text() == "BBB"  # New keg
 
-    def test_third_keg_descends_real_dir(self, tmp_path, prefix) -> None:
+    def test_third_keg_descends_real_dir(self, tmp_path, empty_prefix) -> None:
         """Test that a third keg correctly descends an already-exploded real directory."""
         cellar = tmp_path / "Cellar"
         a = cellar / "xorgproto/2025.1"
@@ -407,16 +404,16 @@ class TestLinkExplosion:
         c = cellar / "libxau/1.0.12"
         _mk(c, "include/X11/Xauth.h")
 
-        link_keg(a, prefix=prefix, name="xorgproto")
-        link_keg(b, prefix=prefix, name="libx11")  # Explodes
-        link_keg(c, prefix=prefix, name="libxau")  # Descends the real dir
+        link_keg(a, prefix=empty_prefix, name="xorgproto")
+        link_keg(b, prefix=empty_prefix, name="libx11")  # Explodes
+        link_keg(c, prefix=empty_prefix, name="libxau")  # Descends the real dir
 
-        x11 = prefix / "include/X11"
+        x11 = empty_prefix / "include/X11"
         assert _points_to(x11 / "Xfuncproto.h", a / "include/X11/Xfuncproto.h")
         assert _points_to(x11 / "Xlib.h", b / "include/X11/Xlib.h")
         assert _points_to(x11 / "Xauth.h", c / "include/X11/Xauth.h")
 
-    def test_shared_subdir_recurses(self, tmp_path, prefix) -> None:
+    def test_shared_subdir_recurses(self, tmp_path, empty_prefix) -> None:
         """Test that a shared subdirectory within an exploded dir is itself realised and merged."""
         cellar = tmp_path / "Cellar"
         a = cellar / "xorgproto/2025.1"
@@ -424,15 +421,17 @@ class TestLinkExplosion:
         b = cellar / "libx11/1.8.13"
         _mk(b, "include/X11/extensions/shape.h")
 
-        link_keg(a, prefix=prefix, name="xorgproto")
-        link_keg(b, prefix=prefix, name="libx11")
+        link_keg(a, prefix=empty_prefix, name="xorgproto")
+        link_keg(b, prefix=empty_prefix, name="libx11")
 
-        ext = prefix / "include/X11/extensions"
+        ext = empty_prefix / "include/X11/extensions"
         assert ext.is_dir() and not ext.is_symlink()  # Shared subdir realised too
         assert _points_to(ext / "Xext.h", a / "include/X11/extensions/Xext.h")
         assert _points_to(ext / "shape.h", b / "include/X11/extensions/shape.h")
 
-    def test_file_collision_aborts_without_mutating(self, tmp_path, prefix) -> None:
+    def test_file_collision_aborts_without_mutating(
+        self, tmp_path, empty_prefix
+    ) -> None:
         """Test that a same-named file across two kegs aborts explosion without mutating the prefix."""
         cellar = tmp_path / "Cellar"
         a = cellar / "xorgproto/2025.1"
@@ -441,17 +440,17 @@ class TestLinkExplosion:
         _mk(b, "include/X11/Xfuncproto.h")  # Same file -> genuine conflict
         _mk(b, "include/X11/Xlib.h")
 
-        link_keg(a, prefix=prefix, name="xorgproto")
-        x11 = prefix / "include/X11"
+        link_keg(a, prefix=empty_prefix, name="xorgproto")
+        x11 = empty_prefix / "include/X11"
 
         with pytest.raises(LinkError):
-            link_keg(b, prefix=prefix, name="libx11")
+            link_keg(b, prefix=empty_prefix, name="libx11")
 
         # Nothing mutated: still A's whole-dir symlink, B's files not linked
         assert x11.is_symlink()
         assert _points_to(x11, a / "include/X11")
 
-    def test_explosion_is_idempotent(self, tmp_path, prefix) -> None:
+    def test_explosion_is_idempotent(self, tmp_path, empty_prefix) -> None:
         """Test that re-linking an already-exploded keg reports already_linked without re-exploding."""
         cellar = tmp_path / "Cellar"
         a = cellar / "xorgproto/2025.1"
@@ -459,25 +458,27 @@ class TestLinkExplosion:
         b = cellar / "libx11/1.8.13"
         _mk(b, "include/X11/Xlib.h")
 
-        link_keg(a, prefix=prefix, name="xorgproto")
-        link_keg(b, prefix=prefix, name="libx11")
-        res2 = link_keg(b, prefix=prefix, name="libx11")  # Re-link: no second explosion
+        link_keg(a, prefix=empty_prefix, name="xorgproto")
+        link_keg(b, prefix=empty_prefix, name="libx11")
+        res2 = link_keg(
+            b, prefix=empty_prefix, name="libx11"
+        )  # Re-link: no second explosion
 
-        x11 = prefix / "include/X11"
+        x11 = empty_prefix / "include/X11"
         assert x11.is_dir() and not x11.is_symlink()
         assert "include/X11/Xlib.h" in res2.already_linked
         assert _points_to(x11 / "Xlib.h", b / "include/X11/Xlib.h")
 
     def test_metapackage_symlink_to_whole_dir_link_is_skipped(
-        self, tmp_path, prefix
+        self, tmp_path, empty_prefix
     ) -> None:
         """Test that an umbrella keg's symlink pointing at an existing whole-dir prefix link
         is treated as already-linked."""
         cellar = tmp_path / "Cellar"
         qtbase = cellar / "qtbase/6.11.1"
         _mk(qtbase, "lib/cmake/Qt6Gui/Qt6GuiConfig.cmake")
-        link_keg(qtbase, prefix=prefix, name="qtbase")
-        gui = prefix / "lib/cmake/Qt6Gui"
+        link_keg(qtbase, prefix=empty_prefix, name="qtbase")
+        gui = empty_prefix / "lib/cmake/Qt6Gui"
         assert gui.is_symlink()  # Only qtbase provides it -> whole-dir symlink
 
         # Umbrella ships lib/cmake/Qt6Gui as a symlink pointing at the prefix
@@ -486,12 +487,12 @@ class TestLinkExplosion:
         (qt / "lib/cmake").mkdir(parents=True)
         os.symlink(os.path.relpath(gui, qt / "lib/cmake"), qt / "lib/cmake/Qt6Gui")
 
-        res = link_keg(qt, prefix=prefix, name="qt")  # Should not conflict
+        res = link_keg(qt, prefix=empty_prefix, name="qt")  # Should not conflict
         assert "lib/cmake/Qt6Gui" in res.already_linked
         assert _points_to(gui, qtbase / "lib/cmake/Qt6Gui")  # Unchanged
 
     def test_metapackage_symlink_over_exploded_dir_is_skipped(
-        self, tmp_path, prefix
+        self, tmp_path, empty_prefix
     ) -> None:
         """Test that an umbrella keg's symlink pointing at an already-exploded real directory
         is treated as already-linked."""
@@ -500,9 +501,11 @@ class TestLinkExplosion:
         _mk(qtbase, "lib/cmake/Qt6BuildInternals/a.cmake")
         qttools = cellar / "qttools/6.11.1"
         _mk(qttools, "lib/cmake/Qt6BuildInternals/b.cmake")
-        link_keg(qtbase, prefix=prefix, name="qtbase")
-        link_keg(qttools, prefix=prefix, name="qttools")  # Explodes Qt6BuildInternals
-        bi = prefix / "lib/cmake/Qt6BuildInternals"
+        link_keg(qtbase, prefix=empty_prefix, name="qtbase")
+        link_keg(
+            qttools, prefix=empty_prefix, name="qttools"
+        )  # Explodes Qt6BuildInternals
+        bi = empty_prefix / "lib/cmake/Qt6BuildInternals"
         assert bi.is_dir() and not bi.is_symlink()  # Exploded real dir
 
         # Umbrella's entry is a symlink at the prefix location & it resolves to the
@@ -513,7 +516,7 @@ class TestLinkExplosion:
             os.path.relpath(bi, qt / "lib/cmake"), qt / "lib/cmake/Qt6BuildInternals"
         )
 
-        res = link_keg(qt, prefix=prefix, name="qt")  # Should not conflict
+        res = link_keg(qt, prefix=empty_prefix, name="qt")  # Should not conflict
         assert "lib/cmake/Qt6BuildInternals" in res.already_linked
         assert _points_to(
             bi / "a.cmake", qtbase / "lib/cmake/Qt6BuildInternals/a.cmake"
@@ -542,14 +545,14 @@ class TestLinkConcurrency:
     """Tests for concurrent link concurrency and shared directory handling."""
 
     def test_plan_routes_whole_dir_and_leaf_links_separately(
-        self, tmp_path, prefix
+        self, tmp_path, empty_prefix
     ) -> None:
         """Test that a whole-dir link lands in dir_links (serialised); leaf files in links."""
         keg = tmp_path / "Cellar" / "libx11" / "1.8"
         _mk(keg, "include/X11/Xlib.h")  # include/X11 -> whole-dir symlink
         _mk(keg, "bin/xtool")  # Leaf file -> lock-free
 
-        plan = linker._build_plan(keg, prefix)
+        plan = linker._build_plan(keg, empty_prefix)
         dir_rels = {rel for rel, _ in plan.dir_links}
         leaf_rels = {rel for rel, _ in plan.links}
 
@@ -558,7 +561,7 @@ class TestLinkConcurrency:
         assert dir_rels.isdisjoint(leaf_rels)
 
     def test_concurrent_links_sharing_a_dir_dont_clobber(
-        self, tmp_path, prefix
+        self, tmp_path, empty_prefix
     ) -> None:
         """Test that concurrent links sharing a whole-dir directory do not clobber."""
         cellar = tmp_path / "Cellar"
@@ -575,7 +578,7 @@ class TestLinkConcurrency:
             """Worker function for concurrent link operations."""
             barrier.wait()  # Maximise overlap of the apply phase
             try:
-                link_keg(keg, prefix=prefix, name=name)
+                link_keg(keg, prefix=empty_prefix, name=name)
 
             except Exception as exc:  # noqa: BLE001
                 errors.append(exc)
@@ -589,14 +592,16 @@ class TestLinkConcurrency:
 
         assert not errors, errors
 
-        x11 = prefix / "include/X11"
+        x11 = empty_prefix / "include/X11"
         assert x11.is_dir() and not x11.is_symlink()  # Merged into a real dir
         for i, (keg, _) in enumerate(kegs):
             assert _points_to(x11 / f"h{i}.h", keg / f"include/X11/h{i}.h")
-            assert _points_to(prefix / "bin" / f"tool{i}", keg / "bin" / f"tool{i}")
+            assert _points_to(
+                empty_prefix / "bin" / f"tool{i}", keg / "bin" / f"tool{i}"
+            )
 
     def test_plan_is_built_under_the_structure_lock(
-        self, tmp_path, prefix, monkeypatch
+        self, tmp_path, empty_prefix, monkeypatch
     ) -> None:
         """Test that the structure lock is held while building the link plan."""
         keg = tmp_path / "Cellar" / "libx11" / "1.8"
@@ -623,11 +628,13 @@ class TestLinkConcurrency:
             return orig(keg_dir, prefix_dir)
 
         monkeypatch.setattr(linker, "_build_plan", spy)
-        link_keg(keg, prefix=prefix, name="libx11")
+        link_keg(keg, prefix=empty_prefix, name="libx11")
 
         assert held == [True]
 
-    def test_concurrent_links_into_a_nested_shared_tree(self, tmp_path, prefix) -> None:
+    def test_concurrent_links_into_a_nested_shared_tree(
+        self, tmp_path, empty_prefix
+    ) -> None:
         """Test that concurrent links into a nested shared tree do not clobber.
 
         qt's `share/qt/mkspecs` is an example of a nested shared tree.
@@ -657,7 +664,7 @@ class TestLinkConcurrency:
             """Link one keg, once every thread is ready."""
             barrier.wait()
             try:
-                link_keg(keg, prefix=prefix, name=name)
+                link_keg(keg, prefix=empty_prefix, name=name)
 
             except Exception as exc:  # noqa: BLE001
                 errors.append(exc)
@@ -671,14 +678,14 @@ class TestLinkConcurrency:
 
         assert not errors, errors
 
-        modules = prefix / "share/qt/mkspecs/modules"
+        modules = empty_prefix / "share/qt/mkspecs/modules"
         assert modules.is_dir() and not modules.is_symlink()
         assert _points_to(
             modules / "qt_lib_core.pri",
             base / "share/qt/mkspecs/modules/qt_lib_core.pri",
         )
         assert _points_to(
-            prefix / "share/qt/mkspecs/features/qt.prf",
+            empty_prefix / "share/qt/mkspecs/features/qt.prf",
             base / "share/qt/mkspecs/features/qt.prf",
         )
         for i, (keg, _) in enumerate(kegs[1:]):
@@ -687,7 +694,7 @@ class TestLinkConcurrency:
                 keg / f"share/qt/mkspecs/modules/qt_lib_mod{i}.pri",
             )
             assert _points_to(
-                prefix / "share/qt/modules" / f"Mod{i}.json",
+                empty_prefix / "share/qt/modules" / f"Mod{i}.json",
                 keg / f"share/qt/modules/Mod{i}.json",
             )
 
@@ -709,8 +716,8 @@ class TestLeafLinkRaces:
         def _arm(act: Callable[[], None]) -> None:
             build = linker._build_plan
 
-            def planted(keg: Path, prefix: Path):
-                plan = build(keg, prefix)
+            def planted(keg: Path, empty_prefix: Path):
+                plan = build(keg, empty_prefix)
                 act()
 
                 return plan
@@ -736,83 +743,87 @@ class TestLeafLinkRaces:
 
         return mine, peer
 
-    def test_a_leaf_taken_after_the_plan_conflicts(self, prefix, kegs, race) -> None:
+    def test_a_leaf_taken_after_the_plan_conflicts(
+        self, empty_prefix, kegs, race
+    ) -> None:
         """Test that a peer's file at a planned-free path is detected, not silently clobbered."""
         mine, peer = kegs
         race(
-            lambda: linker.make_relative_symlink(prefix / "bin/tool", peer / "bin/tool")
+            lambda: linker.make_relative_symlink(
+                empty_prefix / "bin/tool", peer / "bin/tool"
+            )
         )
 
         with pytest.raises(LinkError):
-            link_keg(mine, prefix=prefix, name="mine")
+            link_keg(mine, prefix=empty_prefix, name="mine")
 
-        assert _points_to(prefix / "bin/tool", peer / "bin/tool")  # Peer keeps it
+        assert _points_to(empty_prefix / "bin/tool", peer / "bin/tool")  # Peer keeps it
 
-    def test_a_late_conflict_rolls_back(self, prefix, kegs, race) -> None:
+    def test_a_late_conflict_rolls_back(self, empty_prefix, kegs, race) -> None:
         """Test that the loser leaves nothing behind, so `brew link` still sees a clean prefix."""
         mine, peer = kegs
         race(
-            lambda: linker.make_relative_symlink(prefix / "bin/tool", peer / "bin/tool")
+            lambda: linker.make_relative_symlink(
+                empty_prefix / "bin/tool", peer / "bin/tool"
+            )
         )
 
         with pytest.raises(LinkError):
-            link_keg(mine, prefix=prefix, name="mine")
+            link_keg(mine, prefix=empty_prefix, name="mine")
 
-        assert not (prefix / "bin/aaa").exists()  # Linked before the conflict
-        assert not (prefix / "share" / "man").exists()  # mkpath'd, then pruned
+        assert not (empty_prefix / "bin/aaa").exists()  # Linked before the conflict
+        assert not (empty_prefix / "share" / "man").exists()  # mkpath'd, then pruned
         assert not (mine / _LINK_MANIFEST).exists()
 
     def test_overwrite_takes_a_leaf_taken_after_the_plan(
-        self, prefix, kegs, race
+        self, empty_prefix, kegs, race
     ) -> None:
         """Test that --overwrite claims the path from the peer rather than failing."""
         mine, peer = kegs
         race(
-            lambda: linker.make_relative_symlink(prefix / "bin/tool", peer / "bin/tool")
+            lambda: linker.make_relative_symlink(
+                empty_prefix / "bin/tool", peer / "bin/tool"
+            )
         )
 
-        result = link_keg(mine, prefix=prefix, name="mine", overwrite=True)
+        result = link_keg(mine, prefix=empty_prefix, name="mine", overwrite=True)
 
         assert "bin/tool" in result.linked
-        assert _points_to(prefix / "bin/tool", mine / "bin/tool")
+        assert _points_to(empty_prefix / "bin/tool", mine / "bin/tool")
 
     def test_a_leaf_already_pointing_here_is_already_linked(
-        self, prefix, kegs, race
+        self, empty_prefix, kegs, race
     ) -> None:
         """Test that a peer that linked the same real file is agreement, not conflict."""
         mine, _ = kegs
         race(
-            lambda: linker.make_relative_symlink(prefix / "bin/tool", mine / "bin/tool")
+            lambda: linker.make_relative_symlink(
+                empty_prefix / "bin/tool", mine / "bin/tool"
+            )
         )
 
-        result = link_keg(mine, prefix=prefix, name="mine")
+        result = link_keg(mine, prefix=empty_prefix, name="mine")
 
         assert "bin/tool" in result.already_linked
         assert "bin/tool" not in result.linked
 
     def test_an_etc_file_created_after_the_plan_is_preserved(
-        self, tmp_path, prefix, race
+        self, tmp_path, empty_prefix, race
     ) -> None:
         """Test that etc keeps the user's file, whenever it appeared."""
         keg = tmp_path / "Cellar" / "mine" / "1.0"
         _mk(keg, "etc/my.conf", "packaged")
-        race(lambda: _mk(prefix, "etc/my.conf", "user"))
+        race(lambda: _mk(empty_prefix, "etc/my.conf", "user"))
 
-        result = link_keg(keg, prefix=prefix, name="mine")
+        result = link_keg(keg, prefix=empty_prefix, name="mine")
 
         assert "etc/my.conf" in result.already_linked
-        assert (prefix / "etc" / "my.conf").read_text() == "user"
+        assert (empty_prefix / "etc" / "my.conf").read_text() == "user"
 
     def test_only_one_of_many_kegs_wins_a_contested_leaf(
-        self, tmp_path, prefix
+        self, tmp_path, empty_prefix
     ) -> None:
-        """Test threads racing for one path: exactly one links it, the rest are told.
-
-        Every keg ships the same `bin/tool` and plans against the empty prefix, so
-        all of them believe they own it. Replacing rather than creating would let
-        each overwrite the last and report success, leaving one winner by accident
-        and no way for the callers to know they had been displaced.
-        """
+        """Test threads racing for one path: exactly one links it, the rest are told."""
         n = 8
         kegs = [(tmp_path / "Cellar" / f"k{i}" / "1.0", f"k{i}") for i in range(n)]
         for i, (keg, _) in enumerate(kegs):
@@ -827,7 +838,7 @@ class TestLeafLinkRaces:
         def worker(keg: Path, name: str) -> None:
             barrier.wait()  # Maximise overlap of the apply phase
             try:
-                result = link_keg(keg, prefix=prefix, name=name)
+                result = link_keg(keg, prefix=empty_prefix, name=name)
 
             except LinkError:
                 lost.append(name)
@@ -850,12 +861,12 @@ class TestLeafLinkRaces:
 
         winner = won[0]
         assert _points_to(
-            prefix / "bin/tool", tmp_path / "Cellar" / winner / "1.0" / "bin/tool"
+            empty_prefix / "bin/tool", tmp_path / "Cellar" / winner / "1.0" / "bin/tool"
         )
 
         # Every loser rolled back; only the winner's own link remains
         for i, (keg, name) in enumerate(kegs):
-            assert (prefix / f"bin/own{i}").exists() == (name == winner)
+            assert (empty_prefix / f"bin/own{i}").exists() == (name == winner)
 
 
 class TestAtomicReplace:
@@ -891,38 +902,27 @@ class TestCrossProcessStructureLock:
     """Tests for cross-process structure lock behavior and lock file cleanup."""
 
     @pytest.fixture
-    def peer(self, monkeypatch) -> Callable[[Path], int]:
-        """Return a factory that holds the prefix's structure lock from another fd.
+    def peer(self, monkeypatch) -> Callable[[Path], AbstractContextManager[int]]:
+        """Return a context manager holding the prefix's structure lock elsewhere.
 
         Also shortens the wait, so a contended test fails fast instead of
         blocking for the production timeout.
 
+        Args:
+            monkeypatch: The monkeypatch fixture.
+
         Returns:
-            A callable `peer(prefix)` returning the locked descriptor.
+            A callable `peer(prefix)` to wrap the body that should meet contention.
         """
         monkeypatch.setattr(core_locks, "_STRUCTURE_TIMEOUT", 0.05)
 
-        def _hold(prefix: Path) -> int:
-            """Lock the structure lock file for `prefix`."""
-            path = core_locks.lock_path(prefix, "brewery", kind="structure")
-            path.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
-            fcntl.flock(fd, fcntl.LOCK_EX)
-
-            return fd
-
-        return _hold
+        return held_structure
 
     def test_link_refuses_while_a_peer_holds_it(self, keg_and_prefix, peer) -> None:
         """Test that a keg touching shared dirs cannot be linked behind a peer's back."""
         keg, prefix = keg_and_prefix
-        fd = peer(prefix)
-        try:
-            with pytest.raises(OperationInProgressError):
-                link_keg(keg, prefix=prefix, name="openssl@3")
-
-        finally:
-            os.close(fd)
+        with peer(prefix), pytest.raises(OperationInProgressError):
+            link_keg(keg, prefix=prefix, name="openssl@3")
 
         assert not (prefix / "lib" / "pkgconfig").exists()
 
@@ -939,11 +939,6 @@ class TestCrossProcessStructureLock:
         workers = 6
         monkeypatch.setattr(core_locks, "_STRUCTURE_TIMEOUT", timeout)
 
-        path = core_locks.lock_path(prefix, "brewery", kind="structure")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
-        fcntl.flock(fd, fcntl.LOCK_EX)
-
         errors: list[Exception] = []
         guard = threading.Lock()
         start_together = threading.Barrier(workers)
@@ -958,16 +953,16 @@ class TestCrossProcessStructureLock:
                 with guard:
                     errors.append(exc)
 
-        threads = [threading.Thread(target=attempt) for _ in range(workers)]
-        start = time.monotonic()
-        for t in threads:
-            t.start()
+        with held_structure(prefix):
+            threads = [threading.Thread(target=attempt) for _ in range(workers)]
+            start = time.monotonic()
+            for t in threads:
+                t.start()
 
-        for t in threads:
-            t.join()
+            for t in threads:
+                t.join()
 
-        elapsed = time.monotonic() - start
-        os.close(fd)
+            elapsed = time.monotonic() - start
 
         assert len(errors) == workers
         assert all(isinstance(e, OperationInProgressError) for e in errors)
@@ -978,18 +973,14 @@ class TestCrossProcessStructureLock:
     def test_unlink_refuses_while_a_peer_holds_it(self, keg_and_prefix, peer) -> None:
         """Test that unlinking waits on the same lock, so removals cannot interleave either."""
         keg, prefix = keg_and_prefix
-        fd = peer(prefix)
-        try:
-            with pytest.raises(OperationInProgressError):
-                unlink_keg(keg, prefix=prefix, name="openssl@3")
-
-        finally:
-            os.close(fd)
+        with peer(prefix), pytest.raises(OperationInProgressError):
+            unlink_keg(keg, prefix=prefix, name="openssl@3")
 
     def test_link_proceeds_once_released(self, keg_and_prefix, peer) -> None:
         """Test that the lock is advisory only: released, linking behaves normally."""
         keg, prefix = keg_and_prefix
-        os.close(peer(prefix))
+        with peer(prefix):
+            pass
 
         result = link_keg(keg, prefix=prefix, name="openssl@3")
 
@@ -999,119 +990,123 @@ class TestCrossProcessStructureLock:
 class TestUnlink:
     """Tests for unlink_keg's manifest fast-path, realpath filter, and fallback."""
 
-    def test_manifest_written_on_link(self, tmp_path, prefix) -> None:
+    def test_manifest_written_on_link(self, tmp_path, empty_prefix) -> None:
         """Test that link_keg records the candidate set in the keg."""
         cellar = tmp_path / "Cellar"
         keg = cellar / "tool/1.0"
         _mk(keg, "bin/tool", "x")
         _mk(keg, "lib/libfoo.dylib", "y")
-        link_keg(keg, prefix=prefix, name="tool")
+        link_keg(keg, prefix=empty_prefix, name="tool")
         data = orjson.loads((keg / _LINK_MANIFEST).read_bytes())
         assert set(data["linked"]) == {"bin/tool", "lib/libfoo.dylib"}
 
-    def test_unlink_removes_recorded_links(self, tmp_path, prefix) -> None:
+    def test_unlink_removes_recorded_links(self, tmp_path, empty_prefix) -> None:
         """Test that the fast path removes every recorded link without scanning."""
         cellar = tmp_path / "Cellar"
         keg = cellar / "tool/1.0"
         _mk(keg, "bin/tool", "x")
         _mk(keg, "lib/libfoo.dylib", "y")
-        link_keg(keg, prefix=prefix, name="tool")
-        res = unlink_keg(keg, prefix=prefix, name="tool")
+        link_keg(keg, prefix=empty_prefix, name="tool")
+        res = unlink_keg(keg, prefix=empty_prefix, name="tool")
         assert res.scanned is False
         assert set(res.removed) == {"bin/tool", "lib/libfoo.dylib"}
-        assert not (prefix / "bin" / "tool").exists()
-        assert not (prefix / "lib" / "libfoo.dylib").exists()
+        assert not (empty_prefix / "bin" / "tool").exists()
+        assert not (empty_prefix / "lib" / "libfoo.dylib").exists()
 
-    def test_unlink_skips_foreign_owned_path(self, tmp_path, prefix) -> None:
+    def test_unlink_skips_foreign_owned_path(self, tmp_path, empty_prefix) -> None:
         """Test that a recorded link now resolving into another keg is left alone."""
         cellar = tmp_path / "Cellar"
         a = cellar / "a/1.0"
         _mk(a, "bin/shared", "a")
         b = cellar / "b/1.0"
         _mk(b, "bin/shared", "b")
-        link_keg(a, prefix=prefix, name="a")
-        link_keg(b, prefix=prefix, name="b", overwrite=True)  # b takes the path
-        res = unlink_keg(a, prefix=prefix, name="a")
+        link_keg(a, prefix=empty_prefix, name="a")
+        link_keg(b, prefix=empty_prefix, name="b", overwrite=True)  # b takes the path
+        res = unlink_keg(a, prefix=empty_prefix, name="a")
         assert "bin/shared" not in res.removed
-        link = prefix / "bin" / "shared"
+        link = empty_prefix / "bin" / "shared"
         assert link.is_symlink()
         assert os.path.realpath(link) == os.path.realpath(b / "bin" / "shared")
 
-    def test_unlink_explosion_stragglers(self, tmp_path, prefix) -> None:
+    def test_unlink_explosion_stragglers(self, tmp_path, empty_prefix) -> None:
         """Test that when a whole-dir link was exploded by a later keg, only our files go."""
         cellar = tmp_path / "Cellar"
         a = cellar / "a/1.0"
         _mk(a, "lib/shared/a.txt", "a")
         b = cellar / "b/1.0"
         _mk(b, "lib/shared/b.txt", "b")
-        link_keg(a, prefix=prefix, name="a")
-        assert (prefix / "lib" / "shared").is_symlink()  # Whole-dir link
-        link_keg(b, prefix=prefix, name="b")
-        shared = prefix / "lib" / "shared"
+        link_keg(a, prefix=empty_prefix, name="a")
+        assert (empty_prefix / "lib" / "shared").is_symlink()  # Whole-dir link
+        link_keg(b, prefix=empty_prefix, name="b")
+        shared = empty_prefix / "lib" / "shared"
         assert shared.is_dir() and not shared.is_symlink()  # Exploded
-        res = unlink_keg(a, prefix=prefix, name="a")
+        res = unlink_keg(a, prefix=empty_prefix, name="a")
         assert "lib/shared/a.txt" in res.removed
         assert not (shared / "a.txt").exists()
         assert (shared / "b.txt").is_symlink()  # b's straggler survives
         assert shared.is_dir()
 
-    def test_unlink_no_manifest_falls_back_to_scan(self, tmp_path, prefix) -> None:
+    def test_unlink_no_manifest_falls_back_to_scan(
+        self, tmp_path, empty_prefix
+    ) -> None:
         """Test that a keg with no manifest is unlinked by scanning the eligible roots."""
         cellar = tmp_path / "Cellar"
         keg = cellar / "tool/1.0"
         _mk(keg, "bin/tool", "x")
-        link_keg(keg, prefix=prefix, name="tool")
+        link_keg(keg, prefix=empty_prefix, name="tool")
         (keg / _LINK_MANIFEST).unlink()  # Simulate a brew-installed keg
-        res = unlink_keg(keg, prefix=prefix, name="tool")
+        res = unlink_keg(keg, prefix=empty_prefix, name="tool")
         assert res.scanned is True
         assert "bin/tool" in res.removed
-        assert not (prefix / "bin" / "tool").exists()
+        assert not (empty_prefix / "bin" / "tool").exists()
 
-    def test_unlink_prunes_emptied_dirs(self, tmp_path, prefix) -> None:
+    def test_unlink_prunes_emptied_dirs(self, tmp_path, empty_prefix) -> None:
         """Test that emptied mkpath dirs are pruned; the eligible root is kept."""
         cellar = tmp_path / "Cellar"
         keg = cellar / "tool/1.0"
         _mk(keg, "share/man/man1/tool.1", "x")
-        link_keg(keg, prefix=prefix, name="tool")
-        res = unlink_keg(keg, prefix=prefix, name="tool")
-        assert (prefix / "share").is_dir()  # Eligible root kept
-        assert not (prefix / "share" / "man").exists()  # Emptied dirs pruned
+        link_keg(keg, prefix=empty_prefix, name="tool")
+        res = unlink_keg(keg, prefix=empty_prefix, name="tool")
+        assert (empty_prefix / "share").is_dir()  # Eligible root kept
+        assert not (empty_prefix / "share" / "man").exists()  # Emptied dirs pruned
         assert "share/man/man1" in res.pruned
 
-    def test_unlink_clears_linked_record_when_ours(self, tmp_path, prefix) -> None:
+    def test_unlink_clears_linked_record_when_ours(
+        self, tmp_path, empty_prefix
+    ) -> None:
         """Test that the linked-keg pointer is removed when it points at this keg."""
         cellar = tmp_path / "Cellar"
         keg = cellar / "tool/1.0"
         _mk(keg, "bin/tool", "x")
-        link_keg(keg, prefix=prefix, name="tool")
-        record = prefix / "var" / "homebrew" / "linked" / "tool"
+        link_keg(keg, prefix=empty_prefix, name="tool")
+        record = empty_prefix / "var" / "homebrew" / "linked" / "tool"
         assert record.is_symlink()
-        unlink_keg(keg, prefix=prefix, name="tool")
+        unlink_keg(keg, prefix=empty_prefix, name="tool")
         assert not record.is_symlink()
 
-    def test_unlink_keeps_foreign_linked_record(self, tmp_path, prefix) -> None:
+    def test_unlink_keeps_foreign_linked_record(self, tmp_path, empty_prefix) -> None:
         """Test that the pointer is left alone when it points at a different keg."""
         cellar = tmp_path / "Cellar"
         v1 = cellar / "a/1.0"
         _mk(v1, "bin/a", "x")
         v2 = cellar / "a/2.0"
         _mk(v2, "bin/a", "x")
-        link_keg(v1, prefix=prefix, name="a")
-        record = prefix / "var" / "homebrew" / "linked" / "a"
+        link_keg(v1, prefix=empty_prefix, name="a")
+        record = empty_prefix / "var" / "homebrew" / "linked" / "a"
         record.unlink()
         record.symlink_to(os.path.relpath(v2, record.parent))  # Repoint to 2.0
-        unlink_keg(v1, prefix=prefix, name="a")
+        unlink_keg(v1, prefix=empty_prefix, name="a")
         assert record.is_symlink()
 
-    def test_unlink_keg_only_is_noop(self, tmp_path, prefix) -> None:
+    def test_unlink_keg_only_is_noop(self, tmp_path, empty_prefix) -> None:
         """Test that a keg-only keg has nothing linked and unlinks to an empty result."""
         cellar = tmp_path / "Cellar"
         keg = cellar / "tool/1.0"
         _mk(keg, "lib/libtool.dylib", "x")
         link_keg(
-            keg, prefix=prefix, name="tool", keg_only=True
+            keg, prefix=empty_prefix, name="tool", keg_only=True
         )  # No links, no manifest
-        res = unlink_keg(keg, prefix=prefix, name="tool")
+        res = unlink_keg(keg, prefix=empty_prefix, name="tool")
         assert res.removed == []
         assert res.scanned is True  # No manifest -> scan finds nothing
 
@@ -1128,28 +1123,30 @@ class TestUnlink:
         assert _points_into(inside, keg.resolve()) is True
         assert _points_into(outside, keg.resolve()) is False
 
-    def test_unlink_removes_opt_link(self, tmp_path, prefix) -> None:
+    def test_unlink_removes_opt_link(self, tmp_path, empty_prefix) -> None:
         """Test that the opt link is removed so no broken symlink survives the keg."""
         cellar = tmp_path / "Cellar"
         keg = cellar / "openssl@3" / "3.0"
         _mk(keg, "bin/openssl", "x")
-        (prefix / "opt").mkdir(parents=True, exist_ok=True)
-        (prefix / "opt" / "openssl@3").symlink_to(keg)
-        link_keg(keg, prefix=prefix, name="openssl@3")
-        unlink_keg(keg, prefix=prefix, name="openssl@3")
-        assert not (prefix / "opt" / "openssl@3").exists()
+        (empty_prefix / "opt").mkdir(parents=True, exist_ok=True)
+        (empty_prefix / "opt" / "openssl@3").symlink_to(keg)
+        link_keg(keg, prefix=empty_prefix, name="openssl@3")
+        unlink_keg(keg, prefix=empty_prefix, name="openssl@3")
+        assert not (empty_prefix / "opt" / "openssl@3").exists()
 
-    def test_unlink_keeps_opt_link_for_other_version(self, tmp_path, prefix) -> None:
+    def test_unlink_keeps_opt_link_for_other_version(
+        self, tmp_path, empty_prefix
+    ) -> None:
         """Test that unlinking a stale keg leaves opt pointing at the active one."""
         cellar = tmp_path / "Cellar"
         old = cellar / "openssl@3" / "3.0"
         new = cellar / "openssl@3" / "3.1"
         _mk(old, "bin/openssl", "x")
         _mk(new, "bin/openssl", "x")
-        (prefix / "opt").mkdir(parents=True, exist_ok=True)
-        (prefix / "opt" / "openssl@3").symlink_to(new)  # opt -> active (3.1)
-        unlink_keg(old, prefix=prefix, name="openssl@3")
-        assert (prefix / "opt" / "openssl@3").is_symlink()  # Untouched
+        (empty_prefix / "opt").mkdir(parents=True, exist_ok=True)
+        (empty_prefix / "opt" / "openssl@3").symlink_to(new)  # opt -> active (3.1)
+        unlink_keg(old, prefix=empty_prefix, name="openssl@3")
+        assert (empty_prefix / "opt" / "openssl@3").is_symlink()  # Untouched
 
 
 def _tree(root: Path) -> set[tuple[str, str]]:
@@ -1302,89 +1299,3 @@ class TestOptLink:
         link_keg(keg, prefix=prefix, name="openssl@3")
 
         assert _points_to(prefix / "opt" / "openssl@3", keg)
-
-
-_CANDIDATES = ["gettext", "python@3.13", "python@3.14", "node", "openssl@3"]
-
-
-@pytest.mark.integration
-@pytest.mark.skipif(
-    sys.platform != "darwin" or shutil.which("brew") is None,
-    reason="requires macOS with Homebrew",
-)
-def test_plan_matches_brew_links() -> None:
-    """Test that the linker plan matches the actual brew links."""
-    prefix = Path(
-        subprocess.run(
-            ["brew", "--prefix"], capture_output=True, text=True, check=True
-        ).stdout.strip()
-    )
-
-    formula = keg = None
-    for cand in _CANDIDATES:
-        cellar = prefix / "Cellar" / cand
-        if not cellar.is_dir():
-            continue
-        versions = [p for p in cellar.iterdir() if p.is_dir()]
-
-        # Only useful if it's actually linked (not keg-only / unlinked)
-        record = prefix / "var" / "homebrew" / "linked" / cand
-        if versions and record.is_symlink():
-            formula, keg = cand, versions[-1]
-            break
-
-    if keg is None:
-        pytest.skip("none of the candidate formulae are installed and linked")
-
-    plan = linker._build_plan(keg, prefix)
-
-    # Against an already-linked keg, every target lands in `already`, not `links`
-    brewery_links = {
-        f"{prefix}/{rel}"
-        for rel in (
-            *(rel for rel, _ in plan.links),
-            *(rel for rel, _ in plan.dir_links),
-            *plan.already,
-        )
-    }
-
-    # brew's real links into this keg, restricted to the eligible roots.
-    keg_real = os.path.realpath(keg)
-    brew_links: set[str] = set()
-    for sub in linker._ELIGIBLE:
-        root = prefix / sub
-        if root.is_dir() and not root.is_symlink():
-            brew_links |= _symlinks_into(root, keg_real)
-
-    missing = brew_links - brewery_links  # Sstrategy gap
-    spurious = brewery_links - brew_links  # Over-linking
-    assert not spurious, (
-        f"{formula}: would create links, brew did not: {sorted(spurious)}"
-    )
-    assert not missing, f"{formula}: strategy gap, brew links missed: {sorted(missing)}"
-
-
-def _symlinks_into(root: Path, keg_real: str) -> set[str]:
-    """Collect symlinks under root that resolve into keg_real, descending only real directories.
-
-    Args:
-        root: The prefix subdirectory to scan (e.g. `prefix/'bin'`).
-        keg_real: The real (resolved) path of the keg as a string; only symlinks
-            whose real target starts with this prefix are collected.
-
-    Returns:
-        The set of absolute path strings for every matching symlink found.
-    """
-    found: set[str] = set()
-    stack = [str(root)]
-    while stack:
-        with os.scandir(stack.pop()) as it:
-            for e in it:
-                if e.is_symlink():
-                    if os.path.realpath(e.path).startswith(keg_real):
-                        found.add(e.path)
-
-                elif e.is_dir(follow_symlinks=False):
-                    stack.append(e.path)
-
-    return found

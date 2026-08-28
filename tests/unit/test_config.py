@@ -16,8 +16,6 @@ from brewery.core.config import (
     get_brewery_env,
 )
 
-pytestmark = pytest.mark.unit
-
 
 @pytest.fixture
 def cache_dir(tmp_path, monkeypatch) -> Path:

@@ -17,8 +17,6 @@ from brewery.core.catalog.parser import (
 )
 from brewery.core.host import Platform
 
-pytestmark = pytest.mark.unit
-
 
 class TestMacosTag:
     """Tests for _macos_tag."""

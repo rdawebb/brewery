@@ -66,7 +66,7 @@ ERROR_TEMPLATES: dict[type[BrewError], str] = {
         "⚠️ Brew command failed: {command}\n   Exit Code: {returncode}\n   Error: {error}"
     ),
     CacheError: (
-        "⚠️ Cache error: {error}\n"
+        "⚠️ Cache error: {message}\n"
         "   Location: {path}\n"
         "   Fix: Check file permissions, or delete {path} to rebuild the cache"
     ),

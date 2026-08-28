@@ -1,4 +1,4 @@
-"""Unit tests for CLI error-to-exit-code mapping."""
+"""Unit tests for CLI error formatting and error-to-exit-code mapping."""
 
 from __future__ import annotations
 
@@ -21,8 +21,6 @@ from brewery.core.errors import (
     TransientError,
     UserError,
 )
-
-pytestmark = pytest.mark.unit
 
 
 class TestHandleError:

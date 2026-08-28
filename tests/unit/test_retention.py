@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import orjson
-import pytest
 
 from brewery.providers.retention import (
     _stamp_path,
@@ -14,8 +13,6 @@ from brewery.providers.retention import (
     mark_cleanup_run,
     mark_replaced,
 )
-
-pytestmark = pytest.mark.unit
 
 DAY = 86400
 MB = 1024 * 1024

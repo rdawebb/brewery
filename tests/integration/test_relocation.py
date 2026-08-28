@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from test_extraction import make_tar
+from _tar import make_tar
 
 from brewery.core.config import get_brewery_env
 from brewery.core.errors import RelocationError
@@ -26,8 +26,6 @@ from brewery.providers.relocator import RelocationResult, StreamRelocator
 from brewery.providers.relocator import keg as keg_mod
 from brewery.providers.relocator import macho as macho_mod
 from brewery.providers.relocator import substitutions as subs_mod
-
-pytestmark = pytest.mark.integration
 
 _DARWIN = sys.platform == "darwin"
 _LINUX = sys.platform.startswith("linux")
@@ -680,6 +678,7 @@ def relocated_real_keg(request, tmp_path_factory, brew_env) -> tuple[Path, Path]
     return keg, installed
 
 
+@pytest.mark.slow
 @skip_no_brew
 class TestRelocationRealKegs:
     """Test the relocation of real kegs."""

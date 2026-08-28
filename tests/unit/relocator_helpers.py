@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 import struct
+from contextlib import contextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from brewery.providers.receipt import RuntimeDependency
 from brewery.providers.relocator import elf as elf_mod
@@ -14,6 +16,9 @@ from brewery.providers.relocator import macho as macho_mod
 from brewery.providers.relocator import reader as reader_mod
 from brewery.providers.relocator import substitutions as subs_mod
 from brewery.providers.relocator import tools as tools_mod
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 _CPU_ARM64 = 0x0100000C
 _MH_DYLIB = 0x6  # Filetype: value is irrelevant to parsing, but realistic
@@ -113,6 +118,22 @@ def _fat_macho(slices: list[bytes]) -> bytes:
     return header + arches + payload
 
 
+@contextmanager
+def open_reader(path: Path) -> Iterator[reader_mod._Reader]:
+    """Hold a _Reader over `path` for the duration of the block.
+
+    The reader only borrows the descriptor, so the descriptor has to outlive it.
+
+    Args:
+        path: The file to read.
+
+    Yields:
+        A reader positioned over the whole file.
+    """
+    with path.open("rb") as fh:
+        yield reader_mod._Reader(fh.fileno(), os.fstat(fh.fileno()).st_size)
+
+
 def _slots(path: Path) -> list:
     """Parse a Mach-O's install-name slots, offsets included.
 
@@ -122,10 +143,8 @@ def _slots(path: Path) -> list:
     Returns:
         The file's _NameSlot list, one entry per load command per slice.
     """
-    with path.open("rb") as fh:
-        return macho_mod._collect_names(
-            reader_mod._Reader(fh.fileno(), os.fstat(fh.fileno()).st_size)
-        )
+    with open_reader(path) as reader:
+        return macho_mod._collect_names(reader)
 
 
 def _relocate_tree(

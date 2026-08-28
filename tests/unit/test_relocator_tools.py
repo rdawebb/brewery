@@ -7,7 +7,6 @@ import os
 import threading
 from pathlib import Path
 
-import pytest
 from relocator_helpers import (
     _keg_with_dylib,
     _lc_dylib,
@@ -17,8 +16,6 @@ from relocator_helpers import (
 from brewery.providers.relocator import macho as macho_mod
 from brewery.providers.relocator import tools as tools_mod
 from brewery.providers.relocator.macho import InstallName, NameKind
-
-pytestmark = pytest.mark.unit
 
 
 class TestWritable:

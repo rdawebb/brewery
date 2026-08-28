@@ -17,8 +17,6 @@ from brewery.providers.extractor import (
 )
 from brewery.providers.relocator import StreamRelocator
 
-pytestmark = pytest.mark.unit
-
 
 def _apply_links(dest, deferred: list[tuple[str, str, bool]]) -> None:
     """Drive the link pass alone, over a staging directory built by hand.
@@ -139,6 +137,11 @@ class TestAdmit:
         extractor = _Extractor(tmp_path)
         extractor._directory(_member("foo", kind=tarfile.DIRTYPE), "foo")
         extractor.apply_dir_modes()
+
+        # The member's recorded uid/gid are ignored: the extracted directory
+        # belongs to whoever ran the extraction
+        stat = (tmp_path / "foo").stat()
+        assert (stat.st_uid, stat.st_gid) == (os.getuid(), os.getgid())
 
     @pytest.mark.parametrize(
         ("mode", "expected"),

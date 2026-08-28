@@ -19,8 +19,6 @@ from brewery.providers.relocator import macho as macho_mod
 from brewery.providers.relocator import substitutions as subs_mod
 from brewery.providers.relocator import tools as tools_mod
 
-pytestmark = pytest.mark.unit
-
 
 class TestMarkerScan:
     """Tests for the chunked placeholder scan over a file's body."""

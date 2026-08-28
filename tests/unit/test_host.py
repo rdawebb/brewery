@@ -7,66 +7,73 @@ import pytest
 from brewery.core import host as _host_module
 from brewery.core.host import Platform, current_platform, preferred_perl_version
 
-pytestmark = pytest.mark.unit
-
 
 class TestCurrentPlatform:
     """Tests for current_platform, with the platform module monkeypatched."""
 
-    def test_unknown_system_returns_none(self, monkeypatch) -> None:
-        """Test that a system that is neither Darwin nor Linux returns None."""
-        monkeypatch.setattr(_host_module._platform, "system", lambda: "Windows")
-        assert current_platform() is None
+    @pytest.fixture
+    def mock_platform(self, monkeypatch):
+        """Pin what the platform module reports about the host.
 
-    def test_linux_x86_64_platform(self, monkeypatch) -> None:
-        """Test that Linux x86_64 yields os='linux', arch='amd64', no macos_major."""
-        monkeypatch.setattr(_host_module._platform, "system", lambda: "Linux")
-        monkeypatch.setattr(_host_module._platform, "machine", lambda: "x86_64")
-        assert current_platform() == Platform(
-            arch="amd64", os="linux", macos_major=None
-        )
+        Args:
+            monkeypatch: The monkeypatch fixture.
 
-    def test_linux_aarch64_platform(self, monkeypatch) -> None:
-        """Test that Linux aarch64 normalises to arch='arm64'."""
-        monkeypatch.setattr(_host_module._platform, "system", lambda: "Linux")
-        monkeypatch.setattr(_host_module._platform, "machine", lambda: "aarch64")
-        assert current_platform() == Platform(
-            arch="arm64", os="linux", macos_major=None
-        )
+        Returns:
+            A callable taking the system, machine and macOS version to report.
+        """
 
-    def test_empty_mac_ver_returns_none(self, monkeypatch) -> None:
-        """Test that an unresolvable macOS version returns None."""
-        monkeypatch.setattr(_host_module._platform, "system", lambda: "Darwin")
-        monkeypatch.setattr(
-            _host_module._platform, "mac_ver", lambda: ("", ("", "", ""), "")
-        )
-        assert current_platform() is None
+        def _pin(system: str, machine: str = "", mac_ver: str = "") -> None:
+            monkeypatch.setattr(_host_module._platform, "system", lambda: system)
+            monkeypatch.setattr(_host_module._platform, "machine", lambda: machine)
+            monkeypatch.setattr(
+                _host_module._platform, "mac_ver", lambda: (mac_ver, ("", "", ""), "")
+            )
 
-    def test_non_numeric_major_returns_none(self, monkeypatch) -> None:
-        """Test that a non-numeric major version returns None."""
-        monkeypatch.setattr(_host_module._platform, "system", lambda: "Darwin")
-        monkeypatch.setattr(
-            _host_module._platform, "mac_ver", lambda: ("x.0", ("", "", ""), "")
-        )
-        assert current_platform() is None
+        return _pin
 
-    def test_resolved_arm64_platform(self, monkeypatch) -> None:
-        """Test that arm64 yields a Platform with arch='arm64'."""
-        monkeypatch.setattr(_host_module._platform, "system", lambda: "Darwin")
-        monkeypatch.setattr(
-            _host_module._platform, "mac_ver", lambda: ("14.5", ("", "", ""), "")
-        )
-        monkeypatch.setattr(_host_module._platform, "machine", lambda: "arm64")
-        assert current_platform() == Platform(arch="arm64", os="macos", macos_major=14)
+    @pytest.mark.parametrize(
+        ("system", "machine", "mac_ver", "expected"),
+        [
+            pytest.param("Windows", "", "", None, id="unknown_system"),
+            pytest.param(
+                "Linux",
+                "x86_64",
+                "",
+                Platform(arch="amd64", os="linux", macos_major=None),
+                id="linux_x86_64",
+            ),
+            pytest.param(
+                "Linux",
+                "aarch64",
+                "",
+                Platform(arch="arm64", os="linux", macos_major=None),
+                id="linux_aarch64_normalises",
+            ),
+            pytest.param("Darwin", "arm64", "", None, id="unresolvable_macos_version"),
+            pytest.param("Darwin", "arm64", "x.0", None, id="non_numeric_major"),
+            pytest.param(
+                "Darwin",
+                "arm64",
+                "14.5",
+                Platform(arch="arm64", os="macos", macos_major=14),
+                id="macos_arm64",
+            ),
+            pytest.param(
+                "Darwin",
+                "x86_64",
+                "13.6",
+                Platform(arch="amd64", os="macos", macos_major=13),
+                id="macos_x86_64_normalises",
+            ),
+        ],
+    )
+    def test_the_host_resolves_to_a_platform(
+        self, mock_platform, system, machine, mac_ver, expected
+    ) -> None:
+        """Test that each host shape resolves to its Platform, or to None."""
+        mock_platform(system, machine, mac_ver)
 
-    def test_resolved_x86_64_platform(self, monkeypatch) -> None:
-        """Test that x86_64 normalises to arch='amd64'."""
-        monkeypatch.setattr(_host_module._platform, "system", lambda: "Darwin")
-        monkeypatch.setattr(
-            _host_module._platform, "mac_ver", lambda: ("13.6", ("", "", ""), "")
-        )
-        monkeypatch.setattr(_host_module._platform, "machine", lambda: "x86_64")
-        assert current_platform() == Platform(arch="amd64", os="macos", macos_major=13)
+        assert current_platform() == expected
 
 
 class TestPreferredPerlVersion:

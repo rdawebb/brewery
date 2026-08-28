@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 from _layout import _by_name, full_receipt
 
 from brewery.core.fs_state import (
@@ -12,8 +11,6 @@ from brewery.core.fs_state import (
     scan_installed,
 )
 from brewery.core.models import PackageKind
-
-pytestmark = pytest.mark.integration
 
 
 class TestScanFormulae:

@@ -7,10 +7,9 @@ import struct
 from pathlib import Path
 
 import pytest
+from relocator_helpers import open_reader
 
 from brewery.providers.relocator import reader as reader_mod
-
-pytestmark = pytest.mark.unit
 
 
 class TestReader:
@@ -19,8 +18,6 @@ class TestReader:
     @contextlib.contextmanager
     def _reader(self, tmp_path: Path, data: bytes, name: str = "f"):
         """Open a file of `data` and hold a reader over it for the block.
-
-        The descriptor has to outlive the reader, since the reader only borrows it.
 
         Args:
             tmp_path: The pytest temp dir.
@@ -32,8 +29,8 @@ class TestReader:
         """
         p = tmp_path / name
         p.write_bytes(data)
-        with p.open("rb") as fh:
-            yield reader_mod._Reader(fh.fileno(), len(data))
+        with open_reader(p) as reader:
+            yield reader
 
     def test_reads_inside_and_beyond_the_prefetched_head(
         self, tmp_path, monkeypatch

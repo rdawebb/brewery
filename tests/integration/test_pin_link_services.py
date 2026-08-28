@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-import pytest
-
 from brewery.core.models import PackageStatus
 from brewery.services.link import link_packages, unlink_packages
 from brewery.services.pin import pin_packages, unpin_packages
-
-pytestmark = pytest.mark.integration
 
 
 class TestPinAndUnpin:

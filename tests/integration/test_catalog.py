@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import threading
-from typing import Any
 
 import httpx
 import pytest
+from _rows import cask_dict, formula_dict
 
 from brewery.core.catalog import (
     SCHEMA_VERSION,
@@ -21,73 +21,8 @@ from brewery.core.errors import CatalogFetchError
 from brewery.core.host import Platform
 from brewery.daemon.catalog_refresh import _refresh
 
-pytestmark = pytest.mark.integration
-
 # Pinned so the guard tests never depend on the running host's platform
 _PLATFORM = Platform(arch="arm64", os="macos", macos_major=15)
-
-
-def formula_dict(name: str, **overrides: Any) -> dict[str, Any]:
-    """Build a full-column formula row dict, overridable per field.
-
-    Args:
-        name: The name of the formula.
-        **overrides: Additional fields to override in the formula row.
-
-    Returns:
-        A dictionary representing the full formula row.
-    """
-    base = {
-        "name": name,
-        "desc": f"{name} description",
-        "homepage": f"https://example/{name}",
-        "tap": "homebrew/core",
-        "version": "1.0.0",
-        "revision": 0,
-        "version_scheme": 0,
-        "keg_only": 0,
-        "has_service": 0,
-        "post_install": 0,
-        "bottle_url": None,
-        "bottle_sha256": None,
-        "bottle_cellar": None,
-        "bottle_rebuild": 0,
-        "deprecated": 0,
-        "disabled": 0,
-    }
-    base.update(overrides)
-
-    return base
-
-
-def cask_dict(token: str, **overrides: Any) -> dict[str, Any]:
-    """Build a full-column cask row dict, overridable per field.
-
-    Args:
-        token: The token of the cask.
-        **overrides: Additional fields to override in the cask row.
-
-    Returns:
-        A dictionary representing the full cask row.
-    """
-    base = {
-        "token": token,
-        "name": token.title(),
-        "desc": f"{token} description",
-        "homepage": f"https://example/{token}",
-        "tap": "homebrew/cask",
-        "version": "1.0.0",
-        "sha256": None,
-        "url": None,
-        "auto_updates": 0,
-        "artifacts": None,
-        "depends_on": None,
-        "deprecated": 0,
-        "disabled": 0,
-    }
-    base.update(overrides)
-
-    return base
 
 
 class TestSchema:
@@ -413,15 +348,19 @@ class TestSearch:
         tokens = [r.token for r in empty_catalog.search("browser")]
         assert "firefox" in tokens
 
-    def test_empty_query_returns_empty(self, empty_catalog) -> None:
-        """Test that a query with no usable tokens returns nothing."""
+    @pytest.mark.parametrize(
+        "query",
+        [
+            pytest.param("   ", id="whitespace_only"),
+            pytest.param('"""', id="quotes_only"),
+            pytest.param("zzzznomatch", id="matches_nothing"),
+        ],
+    )
+    def test_a_query_with_no_matches_returns_empty(self, empty_catalog, query) -> None:
+        """Test that an unusable or unmatched query is empty, never an error."""
         self._populate(empty_catalog)
-        assert empty_catalog.search("   ") == []
 
-    def test_quote_only_query_returns_empty(self, empty_catalog) -> None:
-        """Test that a query of only quote characters yields no tokens."""
-        self._populate(empty_catalog)
-        assert empty_catalog.search('"""') == []
+        assert empty_catalog.search(query) == []
 
     def test_limit_caps_each_kind(self, empty_catalog) -> None:
         """Test that the limit applies per kind, so casks are never starved."""
@@ -439,11 +378,6 @@ class TestSearch:
 
         assert kinds.count("FormulaRow") == 3
         assert kinds.count("CaskRow") == 3
-
-    def test_no_match_returns_empty(self, empty_catalog) -> None:
-        """Test that a query matching nothing returns an empty list."""
-        self._populate(empty_catalog)
-        assert empty_catalog.search("zzzznomatch") == []
 
     def test_new_write_is_searchable(self, empty_catalog) -> None:
         """Test that a formula added in a later write becomes searchable.

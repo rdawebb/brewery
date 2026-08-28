@@ -15,8 +15,6 @@ from brewery.core.errors import RelocationError
 from brewery.providers.relocator import elf as elf_mod
 from brewery.providers.relocator import reader as reader_mod
 
-pytestmark = pytest.mark.unit
-
 
 class TestElfParsing:
     """Tests for the in-process ELF reader."""

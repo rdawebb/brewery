@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-import pytest
-
 from brewery.core.models import PackageKind, PackageStatus
-
-pytestmark = pytest.mark.integration
 
 
 class TestGetAllInstalled:

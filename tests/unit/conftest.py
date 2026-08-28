@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from _layout import write_keg
 
 from brewery.core.host import Platform
 from brewery.providers.relocator import keg as keg_mod
@@ -16,87 +16,14 @@ from brewery.providers.relocator import substitutions as subs_mod
 from brewery.providers.relocator import tools as tools_mod
 
 
-def _build_keg(version_dir: Path) -> Path:
-    """Populate a minimal openssl@3-shaped keg at *version_dir* and return it.
-
-    Args:
-        version_dir: The directory to populate as a keg version root.
-
-    Returns:
-        The populated version directory.
-    """
-    (version_dir / "bin").mkdir(parents=True)
-    (version_dir / "lib").mkdir()
-
-    exe = version_dir / "bin" / "openssl"
-    exe.write_bytes(b"MACHO-binary")
-    os.chmod(exe, 0o555)
-
-    lib = version_dir / "lib" / "libssl.dylib"
-    lib.write_bytes(b"lib")
-    os.chmod(lib, 0o444)
-
-    os.symlink("libssl.dylib", version_dir / "lib" / "libssl.3.dylib")
-    (version_dir / ".brew").mkdir()
-    (version_dir / ".brew" / "openssl@3.rb").write_bytes(b"class Openssl3\nend\n")
-
-    return version_dir
-
-
-@pytest.fixture
-def staged_keg(tmp_path) -> Path:
-    """A staged openssl@3 3.0 keg tree ready for installation or relocation.
-
-    Args:
-        tmp_path: The pytest-provided temporary directory.
-
-    Returns:
-        The path to the populated keg version directory.
-    """
-    return _build_keg(tmp_path / "stage" / "openssl@3" / "3.0")
-
-
-@pytest.fixture
-def build_keg() -> Callable[[Path], Path]:
-    """Return the keg-builder function for tests that need more than one keg.
-
-    Returns:
-        The _build_keg callable, for constructing additional kegs in a test.
-    """
-    return _build_keg
-
-
 @pytest.fixture
 def make_keg() -> Callable[..., Path]:
-    """Return a factory that creates a keg dir at `cellar/name/version`.
-
-    The factory signature is `make_keg(cellar, name, version="1.0", *,
-    executables=())`. With no executables it just creates the (empty) version
-    directory; otherwise it populates `bin/<exe>` with a trivial shell script
-    for each name given.
+    """Return the shared keg builder, `write_keg(cellar, name, version, ...)`.
 
     Returns:
         A callable producing the created keg version directory.
     """
-
-    def _make(
-        cellar: Path,
-        name: str,
-        version: str = "1.0",
-        *,
-        executables: Sequence[str] = (),
-    ) -> Path:
-        keg = cellar / name / version
-        if executables:
-            (keg / "bin").mkdir(parents=True)
-            for exe in executables:
-                (keg / "bin" / exe).write_text("#!/bin/sh\n")
-        else:
-            keg.mkdir(parents=True)
-
-        return keg
-
-    return _make
+    return write_keg
 
 
 @pytest.fixture
@@ -174,29 +101,11 @@ def mock_run(monkeypatch):
     def install(
         stdout: str = "", stderr: str = "", returncode: int = 0
     ) -> list[list[str]]:
-        """Install the stub and return the call-log list.
-
-        Args:
-            stdout: stdout text the stub returns in CompletedProcess.
-            stderr: stderr text the stub returns in CompletedProcess.
-            returncode: The return code the stub reports.
-
-        Returns:
-            A list that accumulates one argv list per subprocess.run call.
-        """
+        """Install the stub and return the list it appends each argv to."""
         runs: list[list[str]] = []
 
         def stub(cmd, *args, **kwargs) -> subprocess.CompletedProcess:
-            """Record the command and return a CompletedProcess stub.
-
-            Args:
-                cmd: The command to record and return.
-                *args: Additional args to pass to subprocess.run.
-                **kwargs: Additional kwargs to pass to subprocess.run.
-
-            Returns:
-                A CompletedProcess stub with the given return code and stdout/stderr.
-            """
+            """Stub for subprocess.run that records each argv and returns a mock result."""
             runs.append(list(cmd))
 
             return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)

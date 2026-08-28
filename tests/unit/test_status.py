@@ -7,8 +7,6 @@ import pytest
 from brewery.core.merge import derive_local_status
 from brewery.core.models import PackageKind, PackageStatus
 
-pytestmark = pytest.mark.unit
-
 
 class TestFormulaLocalStatus:
     """Tests for locally-derived formula status.

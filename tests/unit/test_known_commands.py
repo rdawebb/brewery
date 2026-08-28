@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import pytest
 from typer_extensions import ExtendedTyper
 
 from brewery.cli.main import KNOWN_COMMANDS, _derive_known_commands
-
-pytestmark = pytest.mark.unit
 
 # The full set of tokens brewery owns: every command name, sub-app name, and alias
 # Kept explicit so a dropped/renamed command or alias is caught as a regression

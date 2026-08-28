@@ -12,8 +12,6 @@ from brewery.cli.renderers import (
 )
 from brewery.core.models import Package, PackageKind, PackageStatus
 
-pytestmark = pytest.mark.unit
-
 
 def _pkg(name: str, status: PackageStatus, *, path: str | None = "/opt/x") -> Package:
     """Build a minimal formula Package for renderer tests."""

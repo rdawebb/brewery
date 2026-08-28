@@ -22,8 +22,6 @@ from brewery.core.settings import (
     write_setting,
 )
 
-pytestmark = pytest.mark.unit
-
 
 @pytest.fixture
 def config_home(tmp_path, monkeypatch) -> Path:

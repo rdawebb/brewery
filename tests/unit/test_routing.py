@@ -6,8 +6,6 @@ import pytest
 
 from brewery.cli import main as main_mod
 
-pytestmark = pytest.mark.unit
-
 
 class _Recorder:
     """Records whether it was called and with what arguments."""
@@ -40,14 +38,7 @@ def routes(monkeypatch):
     monkeypatch.setattr(main_mod, "_brew_passthrough", passthrough)
 
     def _route(argv: list[str]) -> str:
-        """Route the given argv to the app or brew passthrough stub.
-
-        Args:
-            argv: The command-line arguments to route.
-
-        Returns:
-            "app" if the command is dispatched to the app stub, "brew" if forwarded to passthrough.
-        """
+        """Route argv and report which of the two stubs it reached."""
         app_stub.calls.clear()
         passthrough.calls.clear()
         try:
