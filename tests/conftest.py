@@ -275,8 +275,8 @@ def brew(tmp_path) -> Brew:
 
 
 @pytest.fixture
-def catalog(fixture_json) -> Catalog:
-    """Populate a Catalog from the formula/cask fixture JSON and return it.
+def catalog(fixture_json) -> Generator[Catalog, None, None]:
+    """Populate a Catalog from the formula/cask fixture JSON and yield it.
 
     The DB lives in the test-isolated BREWERY_CACHE_DIR (set above), so it
     never touches the real cache.
@@ -284,7 +284,7 @@ def catalog(fixture_json) -> Catalog:
     Args:
         fixture_json: The fixture JSON fixture.
 
-    Returns:
+    Yields:
         The populated Catalog.
     """
     import orjson
@@ -357,7 +357,9 @@ def catalog(fixture_json) -> Catalog:
 
     cat.write_casks(casks)
 
-    return cat
+    yield cat
+
+    cat.close()
 
 
 @pytest.fixture
