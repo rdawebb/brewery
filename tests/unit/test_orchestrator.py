@@ -1188,3 +1188,89 @@ class TestProgressEvents:
         await o.install(["x"])
 
         assert progress.events == []  # Empty transaction stays silent
+
+
+class TestCancellation:
+    """Tests for what an interrupted run leaves behind."""
+
+    async def test_pending_installs_are_cancelled_not_drained(self) -> None:
+        """Test that an interrupted run cancels in-flight installs.
+
+        Draining them instead would wait out whatever `brew` is doing -- and a
+        `brew` detached from the terminal only stops when its caller is
+        cancelled, so draining abandons it still running.
+        """
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        class BlockingBrew(MockBrew):
+            """A brew fallback that blocks until it is cancelled."""
+
+            async def install(self, name) -> bool:
+                """Block forever, recording that cancellation reached here.
+
+                Args:
+                    name: The formula name, unused.
+
+                Returns:
+                    Never returns normally.
+
+                Raises:
+                    asyncio.CancelledError: When the caller is cancelled.
+                """
+                started.set()
+                try:
+                    await asyncio.sleep(60)
+
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+
+                return True
+
+        cat = MockCatalogPort({"x": MockFormula("x")}, {"x": []})
+        o = _make(cat, FailingDownloader(), MockTab(), BlockingBrew(), native={})
+
+        run = asyncio.create_task(o.install(["x"]))
+        await asyncio.wait_for(started.wait(), 1)
+        run.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await run
+
+        assert cancelled.is_set()
+
+    async def test_progress_is_torn_down_on_cancellation(self) -> None:
+        """Test that an interrupted run hands the terminal back."""
+        started = asyncio.Event()
+
+        class BlockingBrew(MockBrew):
+            """A brew fallback that blocks until it is cancelled."""
+
+            async def install(self, name) -> bool:
+                """Block forever.
+
+                Args:
+                    name: The formula name, unused.
+
+                Returns:
+                    Never returns normally.
+                """
+                started.set()
+                await asyncio.sleep(60)
+
+                return True
+
+        cat = MockCatalogPort({"x": MockFormula("x")}, {"x": []})
+        progress = _RecordingProgress()
+        o = _make(cat, FailingDownloader(), MockTab(), BlockingBrew(), native={})
+        o.progress = progress
+
+        run = asyncio.create_task(o.install(["x"]))
+        await asyncio.wait_for(started.wait(), 1)
+        run.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await run
+
+        assert ("end",) in progress.events

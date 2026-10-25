@@ -658,6 +658,11 @@ def relocated_real_keg(request, tmp_path_factory, brew_env) -> tuple[Path, Path]
     if bottle is None:
         pytest.skip(f"{formula} bottle not cached (set BREWERY_FETCH=1 to fetch)")
 
+    # With no bottle for this host brew builds from source, and `brew --cache`
+    # then names the source tarball: nothing here to relocate
+    if ".bottle." not in bottle.name:
+        pytest.skip(f"{formula} cached download is not a bottle ({bottle.name})")
+
     sink = StreamRelocator(
         prefix=prefix,
         cellar=prefix / "Cellar",

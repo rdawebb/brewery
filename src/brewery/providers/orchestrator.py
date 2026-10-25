@@ -596,11 +596,12 @@ class Orchestrator:
             for t in fetch.values():
                 t.cancel()
 
-            await asyncio.gather(*fetch.values(), return_exceptions=True)
+            # Cancel rather than drain: cancelling is what tears down an in-flight
+            # `brew` subprocess; a native pour runs in a thread and finishes anyway
+            for t in pending:
+                t.cancel()
 
-            # Drain any pending tasks
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
+            await asyncio.gather(*fetch.values(), *pending, return_exceptions=True)
 
             self.progress.end()
 
