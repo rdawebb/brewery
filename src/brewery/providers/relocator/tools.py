@@ -12,7 +12,7 @@ import contextlib
 import os
 import subprocess
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -94,7 +94,7 @@ def _run_tool(argv: list[str], *, path: Path, tool: str, hint: str) -> None:
 
 
 @contextlib.contextmanager
-def _writable(path: Path | str) -> Iterator[None]:
+def _writable(path: Path | str) -> Generator[None]:
     """Temporarily add the owner-write bit, restoring the original mode after.
 
     Permission bits belong to the inode, and bottles ship hard links, so holds

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import Coroutine, Iterator
+from collections.abc import Coroutine, Generator
 from contextlib import contextmanager
 from typing import Annotated, Any
 
@@ -77,7 +77,7 @@ def setup(
 
 
 @contextmanager
-def _repository() -> Iterator[Repository]:
+def _repository() -> Generator[Repository]:
     """Yield a repository instance and close it on exit.
 
     Populates the catalog first if it is empty, which happens on a first run and

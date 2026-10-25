@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from brewery.core.locks import lock_path
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator
     from pathlib import Path
 
 
@@ -39,7 +39,7 @@ def hold_lock(path: Path) -> int:
 
 
 @contextmanager
-def held_lock(path: Path) -> Iterator[int]:
+def held_lock(path: Path) -> Generator[int]:
     """Hold `path`'s lock from an unrelated fd for the duration of the block.
 
     Args:
@@ -57,7 +57,7 @@ def held_lock(path: Path) -> Iterator[int]:
 
 
 @contextmanager
-def held_rack(prefix: Path, name: str) -> Iterator[int]:
+def held_rack(prefix: Path, name: str) -> Generator[int]:
     """Hold a formula's rack lock, as a peer mid-install would.
 
     Args:
@@ -72,7 +72,7 @@ def held_rack(prefix: Path, name: str) -> Iterator[int]:
 
 
 @contextmanager
-def held_structure(prefix: Path) -> Iterator[int]:
+def held_structure(prefix: Path) -> Generator[int]:
     """Hold the prefix-wide structure lock, as a peer mid-link would.
 
     Args:

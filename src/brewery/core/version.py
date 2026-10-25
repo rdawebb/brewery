@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from functools import lru_cache, total_ordering
-from typing import ClassVar, TypeVar
+from typing import ClassVar, Generic, TypeVar
 
 _DIGITS = re.compile(r"[0-9]+")
 
@@ -27,6 +27,9 @@ _PKG_VERSION_PATTERN = re.compile(r"\A(.+?)(?:_(\d+))?\Z")
 
 # Type alias for comparable values (int or str)
 _Comparable = TypeVar("_Comparable", int, str)
+
+# A token's value type, fixed per subclass
+_V = TypeVar("_V", str, int, None)
 
 
 def is_head(version: str) -> bool:
@@ -54,7 +57,7 @@ def _cmp(left: _Comparable, right: _Comparable) -> int:
     return (left > right) - (left < right)
 
 
-class _Token:
+class _Token(Generic[_V]):
     """A single component of a version string."""
 
     __slots__ = ("value",)
@@ -62,7 +65,9 @@ class _Token:
     # Whether this token participates in the numeric fast path
     numeric: ClassVar[bool] = False
 
-    def __init__(self, value: str | int | None) -> None:
+    value: _V
+
+    def __init__(self, value: _V) -> None:
         """Initialise the token with the parsed value.
 
         Args:
@@ -90,7 +95,7 @@ class _Token:
         return f"{type(self).__name__}({self.value!r})"
 
 
-class _NullToken(_Token):
+class _NullToken(_Token[None]):
     """The absence of a token, used to pad the shorter side of a comparison."""
 
     __slots__ = ()
@@ -121,12 +126,10 @@ class _NullToken(_Token):
         return -1
 
 
-class _StringToken(_Token):
+class _StringToken(_Token[str]):
     """A run of letters, compared lexically."""
 
     __slots__ = ()
-
-    value: str
 
     def compare(self, other: _Token) -> int:
         """Compare against another token.
@@ -144,14 +147,12 @@ class _StringToken(_Token):
         return -other.compare(self)
 
 
-class _NumericToken(_Token):
+class _NumericToken(_Token[int]):
     """A run of digits, compared numerically."""
 
     __slots__ = ()
 
     numeric: ClassVar[bool] = True
-
-    value: int
 
     def __init__(self, value: str | int) -> None:
         """Initialise the token as an integer.

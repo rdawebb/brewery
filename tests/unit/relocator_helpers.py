@@ -18,7 +18,7 @@ from brewery.providers.relocator import substitutions as subs_mod
 from brewery.providers.relocator import tools as tools_mod
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator
 
 _CPU_ARM64 = 0x0100000C
 _MH_DYLIB = 0x6  # Filetype: value is irrelevant to parsing, but realistic
@@ -119,7 +119,7 @@ def _fat_macho(slices: list[bytes]) -> bytes:
 
 
 @contextmanager
-def open_reader(path: Path) -> Iterator[reader_mod._Reader]:
+def open_reader(path: Path) -> Generator[reader_mod._Reader]:
     """Hold a _Reader over `path` for the duration of the block.
 
     The reader only borrows the descriptor, so the descriptor has to outlive it.

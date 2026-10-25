@@ -16,19 +16,19 @@ test-all:
 
 # Run only unit tests
 test-unit:
-    uv run pytest tests/unit -v --no-cov
+    uv run pytest tests/unit -n auto -v --no-cov
 
 # Run only integration tests
 test-int:
-    uv run pytest tests/integration -v --no-cov
+    uv run pytest tests/integration -n auto -v --no-cov
 
 # Run only CLI tests
 test-cli:
-    uv run pytest tests/cli -v --no-cov
+    uv run pytest tests/cli -n auto -v --no-cov
 
 # Run all tests with coverage
 test-cov:
-    uv run pytest --cov=src --cov-report=html --cov-report=term
+    uv run pytest -n auto --cov=src --cov-report=html --cov-report=term
 
 # Lint code
 lint:

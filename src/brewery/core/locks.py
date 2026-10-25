@@ -21,7 +21,7 @@ import fcntl
 import os
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -203,7 +203,7 @@ def _acquire_fd(
 
 
 @contextlib.contextmanager
-def file_lock(path: Path, *, subject: str, timeout: float = 0.0) -> Iterator[None]:
+def file_lock(path: Path, *, subject: str, timeout: float = 0.0) -> Generator[None]:
     """Hold an exclusive lock on `path` for the duration of the block.
 
     Reentrant within a thread; exclusive against other threads and processes.
