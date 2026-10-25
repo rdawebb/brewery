@@ -143,13 +143,23 @@ class TestInstall:
 
         assert calls[0]["kind"] is PackageKind.FORMULA
 
-    def test_an_explicit_cask_kind_is_forwarded(self, run, installs) -> None:
-        """Test that --kind cask reaches the service unchanged."""
+    def test_the_cask_flag_is_forwarded(self, run, installs) -> None:
+        """Test that --cask reaches the service as the cask kind."""
         calls = installs(installed=[_pkg("iina")])
 
-        run(["install", "iina", "--kind", "cask", "--yes"])
+        run(["install", "iina", "--cask", "--yes"])
 
         assert calls[0]["kind"] is PackageKind.CASK
+
+    def test_formula_and_cask_are_mutually_exclusive(self, run, installs) -> None:
+        """Test that passing both flags is refused before anything is installed."""
+        calls = installs(installed=[_pkg("wget")])
+
+        result = run(["install", "wget", "-f", "-c", "--yes"])
+
+        assert result.exit_code == EXIT_USER_ERROR
+        assert "mutually exclusive" in result.output
+        assert calls == []
 
     def test_progress_is_suppressed_when_output_is_captured(
         self, run, installs

@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Changed
 
+- **Breaking:** `--kind` is replaced by the mutually exclusive `--formula`/`-f` and `--cask`/`-c` flags on `install`, `uninstall`, `upgrade`, `list` and `info`, matching brew; `list -k` is gone with it
 - Installing a large dependency tree is around five times faster: relocation reads each file directly rather than memory-mapping it, which on macOS stalled every other formula's extraction and linking
 - Bottles extract in about half the time, by deciding that a tar member stays inside the staging directory from its name rather than by resolving every member against the filesystem
 - Formulae that ship thousands of individual files link around four times faster due to reduced object allocations
@@ -17,6 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Install timestamps in the table view are shown as `YYYY-MM-DD HH:MM` local time instead of a full ISO-8601 string
 - Upgrading a formula by name when it is already up to date now reports it as up to date instead of reinstalling it, matching the way a bulk upgrade already treated it
 - A package revision is shown the way Homebrew shows it, so the displayed version now matches the keg directory name
+- A formula with no bottle for this platform now fails immediately with a command hint (`brew install --build-from-source <name>`), instead of being handed to `brew` only to fail there; its dependents are reported as skipped
+- Every package in an install now gets its own progress row, including ones handed to `brew` and ones skipped or left unbottled, rather than being passed over without being shown
 
 ### Fixed
 
@@ -37,6 +40,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - A formula that fell back to `brew` successfully is no longer reported as an error
 - The bottle cache directory is created before it is probed, so a first run with no existing Homebrew cache works
 - A bottle download that pauses for a few seconds on a slow or congested connection is no longer abandoned and handed to `brew` to start over
+- A failed upgrade is no longer reported as up to date; each failure now gives its reason, including a failed dependency named as the reason its dependents were skipped
+- Cancelling a run now stops every `brew` process it started, giving each a short grace period to release its lock and clean up its partial keg before it is force-killed
 
 ### Security
 

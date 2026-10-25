@@ -70,10 +70,10 @@ class TestList:
         assert "curl" in result.output
 
     def test_the_kind_filter_is_forwarded(self, run, installed) -> None:
-        """Test that --kind reaches the repository rather than filtering after."""
+        """Test that --cask reaches the repository rather than filtering after."""
         calls = installed([_pkg("iina")])
 
-        run(["list", "--kind", "cask"])
+        run(["list", "--cask"])
 
         assert calls[0]["kind_filter"] is PackageKind.CASK
 

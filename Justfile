@@ -49,6 +49,9 @@ layers:
 # Check code quality
 check: lint format type layers
 
+# Check everything
+verify: check layers test
+
 # Run all pre-commit hooks
 pre:
     uv run prek run --all-files

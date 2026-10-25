@@ -5,7 +5,14 @@ from __future__ import annotations
 import sys
 from typing import Annotated
 
-from brewery.cli.context import _repository, app, run_async
+from brewery.cli.context import (
+    CaskFlag,
+    FormulaFlag,
+    _repository,
+    app,
+    kind_from_flags,
+    run_async,
+)
 from brewery.cli.error_formatting import CommandFailed, command_error
 from brewery.cli.output import (
     confirm_or_cancel,
@@ -21,9 +28,8 @@ from brewery.services.uninstall import uninstall_packages
 @command_error(interrupt_hint="brewery uninstall <name>")
 def uninstall(
     names: list[str],
-    kind: Annotated[
-        PackageKind | None, app.Option("--kind", help="formula | cask | auto (default)")
-    ] = None,
+    formula: FormulaFlag = False,
+    cask: CaskFlag = False,
     yes: Annotated[
         bool, app.Option("--yes", "-y", help="Skip confirmation prompt")
     ] = False,
@@ -32,9 +38,12 @@ def uninstall(
 
     Args:
         names: Name(s) of the package(s) to uninstall.
-        kind: Kind of the package(s) (formula or cask).
+        formula: Treat the package(s) as formulae.
+        cask: Treat the package(s) as casks. With neither flag, auto-detects.
         yes: If true, skip confirmation prompt.
     """
+    kind: PackageKind | None = kind_from_flags(formula, cask)
+
     if not confirm_or_cancel(
         f"Uninstall: {', '.join(names)}?", yes=yes, default=False, style="bold yellow"
     ):

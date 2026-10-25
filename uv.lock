@@ -62,7 +62,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.17.0" },
     { name = "rust-just", marker = "extra == 'dev'", specifier = ">=1.59.0,<2.0.0" },
     { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.91,<1.0.0" },
-    { name = "typer-extensions", specifier = ">=0.3.0,<1.0.0" },
+    { name = "typer-extensions", specifier = ">=0.4.0,<1.0.0" },
     { name = "zstandard", specifier = ">=0.25.0,<1.0.0" },
 ]
 provides-extras = ["dev"]
@@ -877,17 +877,16 @@ wheels = [
 
 [[package]]
 name = "typer-extensions"
-version = "0.3.0"
+version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "click" },
     { name = "pygments" },
     { name = "typer" },
     { name = "wcwidth" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ce/b9/1f5b9abf48433e8f661765afc00b50989b0eb3fed426f31261b98b61e0fa/typer_extensions-0.3.0.tar.gz", hash = "sha256:3026832432a978771912661ce22122283972a0ad9a4a46cd5fd1c35d1eee60f1", size = 73700, upload-time = "2026-06-20T16:29:35.349Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e6/12/14b9bfb98a8d37e59d1386ca3ac66b3b2c971b8e26f616b7aaa6b1ed3966/typer_extensions-0.4.0.tar.gz", hash = "sha256:5bae3a5b368e4a60bba022221109f003b790d41b4a191d6a8856111a5bf2f643", size = 79775, upload-time = "2026-09-30T14:06:53.173Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/39/28/293abe27518a0c152acb52557b8b490f0380fd1cdc1e920f8cf1f62e06ab/typer_extensions-0.3.0-py3-none-any.whl", hash = "sha256:d826886b97a65f1d3ea8575aec36898f7bead07e4fc9525de89a2f1eded40405", size = 24936, upload-time = "2026-06-20T16:29:34.251Z" },
+    { url = "https://files.pythonhosted.org/packages/f9/71/e824943b3022f88f544de0a965dde58a180a75cef130a1117047763a5a79/typer_extensions-0.4.0-py3-none-any.whl", hash = "sha256:66dbbb1130855e9f1e75b9c657b74018ceea707fbd2586fbf8245f2d88b8a017", size = 27195, upload-time = "2026-09-30T14:06:52.006Z" },
 ]
 
 [[package]]

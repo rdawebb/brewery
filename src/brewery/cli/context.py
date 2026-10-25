@@ -12,12 +12,43 @@ from rich.console import Console
 from typer_extensions import ExtendedTyper
 
 from brewery import __version__
+from brewery.core.errors import UserError
 from brewery.core.logging import BreweryLogger, configure_logging, get_logger
+from brewery.core.models import PackageKind
 from brewery.core.repo import Repository
 
 log: BreweryLogger = get_logger(name=__name__)
 
 app = ExtendedTyper(help="Brewery: A package management CLI tool")
+
+FormulaFlag = Annotated[
+    bool, app.Option("--formula", "-f", help="Treat the package(s) as formulae")
+]
+CaskFlag = Annotated[
+    bool, app.Option("--cask", "-c", help="Treat the package(s) as casks")
+]
+
+
+def kind_from_flags(formula: bool, cask: bool) -> PackageKind | None:
+    """Map the mutually exclusive --formula/--cask flags to a package kind.
+
+    Args:
+        formula: Whether --formula was passed.
+        cask: Whether --cask was passed.
+
+    Returns:
+        The selected kind, or None when neither flag was passed.
+
+    Raises:
+        UserError: If both flags were passed.
+    """
+    if formula and cask:
+        raise UserError("--formula and --cask are mutually exclusive")
+
+    if cask:
+        return PackageKind.CASK
+
+    return PackageKind.FORMULA if formula else None
 
 
 def _make_console() -> Console:

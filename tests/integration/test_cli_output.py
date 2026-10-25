@@ -67,7 +67,7 @@ class TestListOutput:
         assert "0.2.88" in out  # act installed version
 
     def test_kind_filter_scopes_to_formulae(self, repo, render) -> None:
-        """--kind formula drops the cask from the rendered table."""
+        """--formula drops the cask from the rendered table."""
         out = render(
             package_table(repo.get_all_installed(kind_filter=PackageKind.FORMULA))
         )

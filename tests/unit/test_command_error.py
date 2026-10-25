@@ -24,7 +24,6 @@ from brewery.core.errors import (
     AlreadyInstalledWarning,
     PackageNotFoundError,
 )
-from brewery.core.models import PackageKind
 
 runner = CliRunner()
 
@@ -180,7 +179,6 @@ class TestWarnings:
 # Module-level so the deferred `Annotated` metadata resolves against globals, and
 # one app per command so each is invoked at the root, without a subcommand name.
 _sig_app = ExtendedTyper()
-_enum_app = ExtendedTyper()
 
 
 class TestSignatureTransparency:
@@ -197,32 +195,17 @@ class TestSignatureTransparency:
         @command_error()
         def decorated(
             names: Annotated[list[str], _sig_app.Argument()],
-            kind: Annotated[PackageKind | None, _sig_app.Option("--kind")] = None,
+            cask: Annotated[bool, _sig_app.Option("--cask", "-c")] = False,
             yes: Annotated[bool, _sig_app.Option("--yes", "-y")] = False,
         ) -> None:
             """Decorated docstring."""
-            print(f"names={names} kind={kind} yes={yes}")
+            print(f"names={names} cask={cask} yes={yes}")
 
         help_out = _plain(runner.invoke(_sig_app, ["--help"]).output)
-        assert "--kind" in help_out
+        assert "--cask" in help_out
         assert "--yes" in help_out
         assert "NAMES" in help_out
         assert "Decorated docstring." in help_out
-
-    def test_enum_option_still_parses(self) -> None:
-        """Test that enum options still parse correctly."""
-
-        @_enum_app.command()
-        @command_error()
-        def decorated(
-            kind: Annotated[PackageKind | None, _enum_app.Option("--kind")] = None,
-        ) -> None:
-            print(f"kind={kind}")
-
-        result = runner.invoke(_enum_app, ["--kind", "cask"])
-
-        assert result.exit_code == 0
-        assert "PackageKind.CASK" in result.output
 
     def test_name_is_preserved_for_known_commands_derivation(self) -> None:
         """Test that name is preserved for known commands derivation."""

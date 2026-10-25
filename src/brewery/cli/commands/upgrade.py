@@ -5,7 +5,15 @@ from __future__ import annotations
 import sys
 from typing import Annotated
 
-from brewery.cli.context import _repository, app, console, run_async
+from brewery.cli.context import (
+    CaskFlag,
+    FormulaFlag,
+    _repository,
+    app,
+    console,
+    kind_from_flags,
+    run_async,
+)
 from brewery.cli.error_formatting import CommandFailed, command_error
 from brewery.cli.output import (
     confirm_or_cancel,
@@ -29,9 +37,8 @@ def upgrade(
         list[str] | None,
         app.Argument(help="Package(s) to upgrade (leave empty to upgrade all)"),
     ] = None,
-    kind: Annotated[
-        PackageKind | None, app.Option("--kind", help="formula | cask | auto (default)")
-    ] = None,
+    formula: FormulaFlag = False,
+    cask: CaskFlag = False,
     yes: Annotated[
         bool, app.Option("--yes", "-y", help="Skip confirmation prompt")
     ] = False,
@@ -40,9 +47,12 @@ def upgrade(
 
     Args:
         names: Name(s) of the package(s) to upgrade (if None, upgrades all outdated).
-        kind: Kind of the package (formula or cask).
+        formula: Treat the package(s) as formulae.
+        cask: Treat the package(s) as casks. With neither flag, auto-detects.
         yes: If true, skip confirmation prompt.
     """
+    kind: PackageKind | None = kind_from_flags(formula, cask)
+
     with _repository() as repo:
         if yes:
             sys.stdout.write("\n")

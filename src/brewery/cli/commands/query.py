@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from brewery.cli.context import _repository, app, console
+from brewery.cli.context import (
+    CaskFlag,
+    FormulaFlag,
+    _repository,
+    app,
+    console,
+    kind_from_flags,
+)
 from brewery.cli.error_formatting import command_error
 from brewery.cli.output import spinner
 from brewery.core.models import Package, PackageKind
@@ -13,9 +20,8 @@ from brewery.core.models import Package, PackageKind
 @app.command(name="list", aliases=["l", "ls"])
 @command_error()
 def list_pkgs(
-    kind: Annotated[
-        PackageKind | None, app.Option("--kind", "-k", help="formula | cask | all")
-    ] = None,
+    formula: FormulaFlag = False,
+    cask: CaskFlag = False,
     rescan: Annotated[
         bool,
         app.Option("--rescan", "-r", help="Re-scan installed packages from disk"),
@@ -28,7 +34,8 @@ def list_pkgs(
     """List packages in the repository.
 
     Args:
-        kind: Filter by package kind.
+        formula: List formulae only.
+        cask: List casks only.
         rescan: Re-scan the Cellar and Caskroom before listing, instead of reading
             the filesystem-state cache.
         table: Show the full multi-column table instead of the compact view.
@@ -39,6 +46,8 @@ def list_pkgs(
         package_table,
         paginate,
     )
+
+    kind: PackageKind | None = kind_from_flags(formula, cask)
 
     with _repository() as repo:
         pkgs: list[Package]
@@ -68,17 +77,19 @@ def list_pkgs(
 @command_error()
 def info(
     name: str,
-    kind: Annotated[
-        PackageKind | None, app.Option("--kind", help="formula | cask | auto (default)")
-    ] = None,
+    formula: FormulaFlag = False,
+    cask: CaskFlag = False,
 ) -> None:
     """Show detailed information about a package.
 
     Args:
         name: Name of the package.
-        kind: Kind of the package (formula or cask). If not provided, will auto-detect.
+        formula: Look the package up as a formula.
+        cask: Look the package up as a cask. With neither flag, auto-detects.
     """
     from brewery.cli.renderers import package_details
+
+    kind: PackageKind | None = kind_from_flags(formula, cask)
 
     with _repository() as repo:
         pkg: Package = repo.get_details(name, kind)

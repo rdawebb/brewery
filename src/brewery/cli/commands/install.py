@@ -5,7 +5,15 @@ from __future__ import annotations
 import sys
 from typing import Annotated
 
-from brewery.cli.context import _repository, app, console, run_async
+from brewery.cli.context import (
+    CaskFlag,
+    FormulaFlag,
+    _repository,
+    app,
+    console,
+    kind_from_flags,
+    run_async,
+)
 from brewery.cli.error_formatting import CommandFailed, command_error
 from brewery.cli.output import (
     confirm_or_cancel,
@@ -25,10 +33,8 @@ from brewery.services.install import install_packages
 )
 def install(
     names: Annotated[list[str], app.Argument()],
-    kind: Annotated[
-        PackageKind | None,
-        app.Option("--kind", help="formula | cask (default: formula)"),
-    ] = None,
+    formula: FormulaFlag = False,
+    cask: CaskFlag = False,
     yes: Annotated[
         bool, app.Option("--yes", "-y", help="Skip confirmation prompt")
     ] = False,
@@ -37,10 +43,11 @@ def install(
 
     Args:
         names: Name(s) of the package(s) to install.
-        kind: Kind of the package(s) (formula or cask).
+        formula: Install the package(s) as formulae (the default).
+        cask: Install the package(s) as casks.
         yes: If true, skip confirmation prompt.
     """
-    target: PackageKind = kind or PackageKind.FORMULA
+    target: PackageKind = kind_from_flags(formula, cask) or PackageKind.FORMULA
 
     if not confirm_or_cancel(
         f"Install {target.value}: {', '.join(names)}?", yes=yes, default=True
