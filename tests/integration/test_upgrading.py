@@ -288,13 +288,15 @@ class TestUpgrade:
         monkeypatch.setattr("brewery.providers.brew.run_brew", no_brew)
 
         repo = Repository(catalog=empty_catalog)
-        upgraded, _current, _advisories, failures = await upgrade_packages(
+        upgraded, current, _advisories, failures = await upgrade_packages(
             repo, ["wget"]
         )
 
-        # Version bump reported
+        # Version bump reported, and reported once: a keg that moved is upgraded,
+        # never also up-to-date
         assert [p.name for p in upgraded] == ["wget"]
         assert upgraded[0].versions[0] == "2.0"
+        assert current == []
         assert failures == []
 
         # New keg linked; opt and the prefix link point at 2.0

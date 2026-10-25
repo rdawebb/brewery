@@ -16,7 +16,7 @@ from brewery.providers.pipeline import run_upgrade
 from brewery.services.cask import upgrade_casks
 
 if TYPE_CHECKING:
-    from brewery.providers.orchestrator import ProgressPort
+    from brewery.providers.orchestrator import InstallReport, ProgressPort
 
 UpgradeOutcome = tuple[list[Package], list[Package], Notes, Notes]
 
@@ -177,6 +177,25 @@ def _old_kegs(targets: list[Package]) -> dict[str, Path]:
     }
 
 
+def _pipeline_failures(report: InstallReport | None) -> Notes:
+    """The per-formula failures the native pipeline recorded.
+
+    Includes dependencies pulled into the closure.
+
+    Args:
+        report: The report from `run_upgrade`, or None when no formula ran.
+
+    Returns:
+        One (name, reason) failure per failed formula, sorted by name.
+    """
+    if report is None:
+        return []
+
+    errors = report.errors
+
+    return sorted((name, errors.get(name, "upgrade failed")) for name in report.failed)
+
+
 def _classify_outcome(
     touched: list[str], pre_versions: dict[str, str | None], post: dict[str, Package]
 ) -> tuple[list[Package], list[Package]]:
@@ -251,8 +270,9 @@ async def upgrade_packages(
         p.name: _active_version(p) for p in (*targets, *satisfied)
     }
 
+    report: InstallReport | None = None
     if formula_names:
-        await run_upgrade(
+        report = await run_upgrade(
             formula_names,
             _old_kegs(targets),
             catalog=repo.catalog,
@@ -271,7 +291,16 @@ async def upgrade_packages(
         repo.cache_mgr.invalidate()
 
     post: dict[str, Package] = {p.name: p for p in repo.cache_mgr.installed_packages()}
-    touched = formula_names + cask_names + [p.name for p in satisfied]
+
+    # A failed upgrade keeps its old version, so by version alone it would look
+    # "already current": exclude pipeline failures before classifying
+    pipeline_failures = _pipeline_failures(report)
+    failed = {name for name, _ in pipeline_failures}
+    touched = [
+        n
+        for n in (*formula_names, *cask_names, *(p.name for p in satisfied))
+        if n not in failed
+    ]
     upgraded, current = _classify_outcome(touched, pre_versions, post)
 
-    return upgraded, current, advisories, failures
+    return upgraded, current, advisories, failures + pipeline_failures
