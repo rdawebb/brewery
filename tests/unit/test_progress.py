@@ -185,6 +185,16 @@ class TestUpdate:
         assert fields["status"] == "installing"
         assert fields["activity"] == "spinner"
 
+    def test_brew_fallback_gets_a_row(self, reporter) -> None:
+        """Test that a formula handed to brew is shown rather than sitting invisible.
+
+        brew's own output is captured away, so the row is the only sign the
+        formula is being worked on at all.
+        """
+        reporter.update("grpc", "brew")
+
+        assert _fields(reporter, "grpc")["status"] == "brew"
+
     def test_a_row_is_created_once_and_reused(self, reporter) -> None:
         """Test that repeated updates for one package do not stack up rows."""
         for done in (10, 20, 30):
@@ -243,6 +253,17 @@ class TestFinish:
         assert overall.completed == 1
 
         reporter.end()
+
+    def test_finish_shows_a_package_that_never_reported(self, reporter) -> None:
+        """Test that a formula resolved without progress still gets a marked row.
+
+        One with no bottle here, or skipped because a dependency failed, reaches
+        `finish` having reported nothing: without a row the run would advance
+        the anchor bar past it and show the user nothing.
+        """
+        reporter.finish("uv", Outcome.FAILED.value)
+
+        assert _fields(reporter, "uv")["glyph"] == _GLYPH_FAILED
 
 
 class TestTrim:

@@ -17,6 +17,7 @@ from graphlib import TopologicalSorter
 from pathlib import Path
 from typing import Protocol
 
+from brewery.core.catalog.parser import platform_tag
 from brewery.core.errors import (
     CellarError,
     DownloadError,
@@ -26,6 +27,7 @@ from brewery.core.errors import (
     OperationInProgressError,
     RelocationError,
 )
+from brewery.core.host import current_platform
 from brewery.core.locks import formula_lock
 from brewery.core.logging import BreweryLogger, get_logger
 from brewery.core.version import PkgVersion
@@ -282,10 +284,11 @@ class ProgressPort(Protocol):
         done: int | None = None,
         total: int | None = None,
     ) -> None:
-        """Report progress for `name` at `stage` ("download" | "install").
+        """Report progress for `name` at `stage`.
 
-        For the download stage, `done`/`total` are byte counts (total may be
-        None when the server sent no Content-Length).
+        Stages are "download", "install" (the native pour) and "brew" (handed to
+        the brew fallback); for the download stage, `done`/`total` are byte
+        counts (total may be None when the server sent no Content-Length).
         """
         ...
 
@@ -427,6 +430,37 @@ class InstallReport:
         failed = set(self.failed)
 
         return {n: "; ".join(m) for n, m in self.notes.items() if n in failed}
+
+
+def _host_tag() -> str:
+    """The bottle tag naming this host, for "no bottle here" diagnostics.
+
+    Returns:
+        The host's bottle tag (e.g. `sequoia`), or `"this platform"` when the
+        host is not one brew publishes bottles for.
+    """
+    plat = current_platform()
+
+    return platform_tag(platform=plat) if plat is not None else "this platform"
+
+
+def _bottle_ref(name: str, fr: FormulaRowP | None) -> BottleRef | None:
+    """The bottle `fr` publishes for this host, or None when it publishes none.
+
+    `catalog.parser.resolve_bottle` leaves url and digest empty when no bottle
+    matches any tag this host accepts.
+
+    Args:
+        name: The canonical formula name, carried on the reference.
+        fr: The formula row, or None when the catalog does not know the formula.
+
+    Returns:
+        A `BottleRef` to fetch, or None when there is nothing bottled to fetch.
+    """
+    if fr is None or not fr.bottle_url or not fr.bottle_sha256:
+        return None
+
+    return BottleRef(name, fr.bottle_url, fr.bottle_sha256)
 
 
 @dataclass
@@ -686,11 +720,10 @@ class Orchestrator:
         Returns:
             A tuple containing bottle path, tab, bottle error, and tab error information.
         """
-        if fr is None or fr.bottle_url is None or fr.bottle_sha256 is None:
+        ref = _bottle_ref(name, fr)
+        if fr is None or ref is None:
             return None, None, "no bottle in catalog", "no bottle in catalog"
 
-        sha256: str = fr.bottle_sha256
-        ref = BottleRef(name, fr.bottle_url, sha256)
         tab_error: str | None = None
         bottle_error: str | None = None
 
@@ -706,7 +739,7 @@ class Orchestrator:
                     return await self.tab_fetcher(
                         name=name,
                         version=fr.version,
-                        bottle_sha256=sha256,
+                        bottle_sha256=ref.sha256,
                         revision=fr.revision,
                         rebuild=fr.bottle_rebuild,
                     )
@@ -781,7 +814,18 @@ class Orchestrator:
 
         bottle_path, tab, bottle_error, tab_error = await fetch[name]
 
-        # No bottle, no tab, or unknown formula -> brew owns this one.
+        # Nothing is bottled for this host; falling back would fail as well, so
+        # fail with the one command that would work
+        if fr is not None and _bottle_ref(name, fr) is None:
+            report.add_note(
+                name,
+                f"no bottle for {_host_tag()} - build from source: "
+                f"brew install --build-from-source {name}",
+            )
+
+            return Outcome.FAILED
+
+        # No bottle file, no tab, or unknown formula -> brew owns this one
         if fr is None or bottle_path is None or tab is None:
             reason = (
                 "unknown formula"
@@ -860,6 +904,9 @@ class Orchestrator:
         Returns:
             The outcome of the installation.
         """
+        # brew's output is captured, so without a row this formula shows nothing
+        self.progress.update(name, "brew")
+
         ok = await (self.brew.upgrade(name) if upgrade else self.brew.install(name))
         if not ok:
             return Outcome.FAILED

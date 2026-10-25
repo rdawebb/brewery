@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 from _mocks import _NullSink
 from _repo_helpers import _provider_calls
 
@@ -16,22 +14,20 @@ from brewery.services.upgrade import upgrade_packages
 class TestUpgrade:
     """Tests for the upgrade service."""
 
-    async def test_upgrade_all_targets_outdated(self, repo, mock_brew) -> None:
+    async def test_upgrade_all_targets_outdated(self, repo) -> None:
         """Test that an upgrade with no names targets the outdated set.
 
-        act is the only outdated package, so it is the upgrade target.
+        act is the only outdated package, so it is the only one the pipeline reaches.
         """
-        await upgrade_packages(repo)
-        upgrades = _provider_calls(mock_brew, "upgrade")
-        flat = [arg for call in upgrades for arg in call]
-        assert "act" in flat
-        assert "yazi" not in flat  # Up-to-date, not targeted
+        _upgraded, _current, _advisories, failures = await upgrade_packages(repo)
+        assert [n for n, _ in failures] == ["act"]  # yazi is current, not targeted
 
-    async def test_upgrade_named_package(self, repo, mock_brew) -> None:
-        """Test that a named upgrade routes that package to the provider."""
-        await upgrade_packages(repo, ["act"])
-        flat = [arg for call in _provider_calls(mock_brew, "upgrade") for arg in call]
-        assert "act" in flat
+    async def test_upgrade_named_package(self, repo) -> None:
+        """Test that a named upgrade routes that package to the pipeline."""
+        _upgraded, _current, _advisories, failures = await upgrade_packages(
+            repo, ["act"]
+        )
+        assert [n for n, _ in failures] == ["act"]
 
     async def test_named_up_to_date_formula_is_not_repoured(
         self, repo, mock_brew
@@ -49,19 +45,17 @@ class TestUpgrade:
         assert failures == []
         assert [p.name for p in current] == ["yazi"]
 
-    async def test_named_outdated_formula_still_upgrades(self, repo, mock_brew) -> None:
+    async def test_named_outdated_formula_still_upgrades(self, repo) -> None:
         """Test that the up-to-date filter leaves an outdated named target alone.
 
-        Both are still reported: the mock provider changes no version on disk, so
-        act comes back as current rather than upgraded.
+        The two are reported separately: yazi never reached the pipeline and is
+        current, while act did and failed there
         """
-        _upgraded, current, _advisories, _failures = await upgrade_packages(
+        _upgraded, current, _advisories, failures = await upgrade_packages(
             repo, ["act", "yazi"]
         )
-        flat = [arg for call in _provider_calls(mock_brew, "upgrade") for arg in call]
-        assert "act" in flat
-        assert "yazi" not in flat
-        assert sorted(p.name for p in current) == ["act", "yazi"]
+        assert [p.name for p in current] == ["yazi"]
+        assert [n for n, _ in failures] == ["act"]
 
     async def test_upgrade_unknown_name_is_failure(self, repo) -> None:
         """Test that upgrading a non-installed name is reported as not found."""
@@ -111,47 +105,6 @@ class TestUpgrade:
         upgraded, _current, advisories, _failures = await upgrade_packages(repo)
         assert ("act", "pinned - not upgraded") not in advisories
         assert all(p.name != "act" for p in upgraded)
-
-    async def test_upgrade_detects_version_change(
-        self, mock_brew, catalog, mock_env
-    ) -> None:
-        """Test that a version bump on the mock fs is reported as upgraded.
-
-        Simulating brew replacing act 0.2.88 with 0.2.89 during the upgrade makes
-        the post-upgrade re-scan see a new version, classifying it as upgraded
-        rather than current. The swap happens inside an injected mock provider so
-        act is still present (at 0.2.88) when the pre-upgrade snapshot is taken.
-        """
-        import shutil
-
-        import orjson
-
-        async def mock_formula_upgrade(names) -> list[str]:
-            """Simulate brew upgrade replacing the keg with a new version.
-
-            Args:
-                names: The names to operate on.
-
-            Returns:
-                The names unchanged.
-            """
-            act_dir = mock_env.cellar / "act"
-            shutil.rmtree(act_dir)
-            new_keg = act_dir / "0.2.89"
-            new_keg.mkdir(parents=True)
-            (new_keg / "INSTALL_RECEIPT.json").write_bytes(
-                orjson.dumps({"source": {"tap": "homebrew/core"}})
-            )
-
-            return names
-
-        upgraded, current, _advisories, _failures = await upgrade_packages(
-            Repository(catalog=catalog),
-            ["act"],
-            formula=SimpleNamespace(upgrade=mock_formula_upgrade),
-        )
-        assert [p.name for p in upgraded] == ["act"]
-        assert current == []
 
     async def test_kind_filter_limits_targets(self, repo, mock_brew) -> None:
         """Test that a kind filter restricts which providers are invoked.

@@ -11,10 +11,15 @@ from brewery.services.install import install_packages
 class TestInstall:
     """Tests for the install service."""
 
-    async def test_install_calls_provider(self, repo, mock_brew) -> None:
-        """Test that installing a formula not already in the Cellar falls back to brew install."""
-        await install_packages(repo, ["ripgrep"], kind=PackageKind.FORMULA)
-        assert _provider_calls(mock_brew, "install")
+    async def test_unbottled_formula_is_not_handed_to_brew(
+        self, repo, mock_brew
+    ) -> None:
+        """Test that a formula with no bottle here fails instead of reaching brew."""
+        _installed, failures = await install_packages(
+            repo, ["ripgrep"], kind=PackageKind.FORMULA
+        )
+        assert _provider_calls(mock_brew, "install") == []
+        assert [n for n, _ in failures] == ["ripgrep"]
 
     async def test_install_reports_present_package_as_installed(self, repo) -> None:
         """Test that a package present on the mock fs is reported installed.

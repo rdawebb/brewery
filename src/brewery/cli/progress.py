@@ -204,7 +204,7 @@ class ProgressReporter:
 
         Args:
             name: The formula name.
-            stage: "download" (with byte counts) or "install".
+            stage: "download" (with byte counts), "install", or "brew".
             done: Downloaded bytes so far (download stage only).
             total: Total bytes, if the server reported a Content-Length.
         """
@@ -228,8 +228,16 @@ class ProgressReporter:
                 tid, glyph=_GLYPH_INSTALL, status="installing", activity="spinner"
             )
 
+        elif stage == "brew":
+            self._progress.update(
+                tid, glyph=_GLYPH_INSTALL, status="brew", activity="spinner"
+            )
+
     def finish(self, name: str, outcome: str) -> None:
         """Mark `name` done: freeze its row with a glyph, advance the overall bar.
+
+        A formula that never reported progress (no bottle, or skipped for a
+        failed dependency) gets its row here, so every package shows an outcome.
 
         Args:
             name: The formula name.
@@ -237,13 +245,13 @@ class ProgressReporter:
         """
         failed = outcome in _FAILED_OUTCOMES
         glyph = _GLYPH_FAILED if failed else _GLYPH_DONE
-        tid = self._tasks.get(name)
-        if tid is not None:
-            # activity="" blanks the indicator, stop_task freezes the row
-            self._progress.update(tid, glyph=glyph, status="", activity="")
-            self._progress.stop_task(tid)
-            self._finished.append(tid)
-            self._trim()
+        tid = self._task_for(name)
+
+        # activity="" blanks the indicator, stop_task freezes the row
+        self._progress.update(tid, glyph=glyph, status="", activity="")
+        self._progress.stop_task(tid)
+        self._finished.append(tid)
+        self._trim()
 
         if self._overall is not None:
             self._done += 1
@@ -252,11 +260,9 @@ class ProgressReporter:
             )
 
     def _trim(self) -> None:
-        """Drop the oldest finished rows so the region fits the screen.
+        """Drop the oldest finished rows to keep at most `_MAX_VISIBLE` rows.
 
-        Keeps the visible package rows at or below `_MAX_VISIBLE`, removing
-        only finished rows -- oldest first -- so the live region never scrolls
-        and the transient stop can clear it fully.
+        A region that scrolls can't be fully cleared by the transient stop.
         """
         anchor = 1 if self._overall is not None else 0
         while len(self._progress.tasks) - anchor > _MAX_VISIBLE and self._finished:

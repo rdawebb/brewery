@@ -474,6 +474,53 @@ class TestFallbackPaths:
         assert report.outcomes["x"] is Outcome.FAILED
         assert "x" in report.failed
 
+    async def test_unbottled_formula_fails_without_calling_brew(self) -> None:
+        """Tests that a formula with no bottle here fails instead of reaching brew.
+
+        brew would answer a missing bottle with a source build: hours of work
+        behind captured output, indistinguishable from a hang. The pipeline
+        stops at the catalog and says what to run instead.
+        """
+        cat = MockCatalogPort({"x": MockFormula("x", has_bottle=False)}, {"x": []})
+        brew = MockBrew()
+        o = _make(cat, MockDownloader(), MockTab(), brew, native={})
+        report = await o.install(["x"])
+
+        assert report.outcomes["x"] is Outcome.FAILED
+        assert brew.calls == []
+        assert "no bottle for" in report.errors["x"]
+        assert "--build-from-source x" in report.errors["x"]
+
+    async def test_unbottled_dependency_skips_its_dependent(self) -> None:
+        """Tests that an unbottled dependency stops its dependents too."""
+        deps = {"app": ["nobottle"], "nobottle": []}
+        cat = MockCatalogPort(
+            {
+                "app": MockFormula("app"),
+                "nobottle": MockFormula("nobottle", has_bottle=False),
+            },
+            deps,
+        )
+        o = _make(cat, MockDownloader(), MockTab(), MockBrew(), native={})
+        report = await o.install(["app"])
+
+        assert report.outcomes["nobottle"] is Outcome.FAILED
+        assert report.outcomes["app"] is Outcome.SKIPPED_DEP_FAILED
+
+    async def test_unbottled_upgrade_target_fails_without_brew_upgrade(self) -> None:
+        """Tests that the upgrade path does not hand an unbottled target to brew."""
+        cat = MockCatalogPort(
+            {"wget": MockFormula("wget", has_bottle=False)},
+            {"wget": []},
+            satisfied={"wget"},
+        )
+        brew = MockBrew()
+        o = _make(cat, MockDownloader(), MockTab(), brew, native={})
+        report = await o.upgrade(["wget"], {"wget": Path("/hb/Cellar/wget/1.0")})
+
+        assert report.outcomes["wget"] is Outcome.FAILED
+        assert ("upgrade", "wget") not in brew.calls
+
     async def test_dependent_skipped_when_dependency_fails(self) -> None:
         """Tests that dependent formulas are skipped when a dependency fails."""
         deps = {"app": ["badlib"], "badlib": []}
@@ -1188,6 +1235,22 @@ class TestProgressEvents:
         await o.install(["x"])
 
         assert progress.events == []  # Empty transaction stays silent
+
+    async def test_brew_fallback_reports_its_own_stage(self) -> None:
+        """Test that a formula handed to brew announces itself before it blocks.
+
+        brew's output is captured away, so without this the row would show
+        nothing for as long as brew runs.
+        """
+        cat = MockCatalogPort({"x": MockFormula("x")}, {"x": []})
+        progress = _RecordingProgress()
+        o = _make(cat, FailingDownloader(), MockTab(), MockBrew(), native={})
+        o.progress = progress
+
+        report = await o.install(["x"])
+
+        assert report.outcomes["x"] is Outcome.BREW_INSTALL
+        assert ("update", "x", "brew") in progress.events
 
 
 class TestCancellation:
