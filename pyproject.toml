@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "brewery"
-version = "0.4.0"
+version = "0.5.0"
 description = "Fast Homebrew Package Manager"
 authors = [{ name = "Rob Webb" }]
 requires-python = ">=3.11"
