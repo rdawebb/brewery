@@ -1,4 +1,4 @@
-"""Download Homebrew bottle tarballs from ghcr.io into a content-addressed cache."""
+"""Download bottles and cask payloads into a content-addressed cache."""
 
 from __future__ import annotations
 
@@ -21,6 +21,9 @@ from brewery.core.retry import RETRYABLE_STATUS, retry_async
 # Homebrew's hardcoded anonymous bearer for pulling bottles from ghcr.io
 DEFAULT_GHCR_TOKEN = "QQ=="
 _GHCR_HOSTS = frozenset({"ghcr.io"})
+
+# A cask's `sha256 :no_check`: fetched unverified
+NO_CHECK = "no_check"
 _OCI_LAYER_ACCEPT = "application/vnd.oci.image.layer.v1.tar+gzip"
 _CHUNK = 1_048_576  # 1 MiB
 
@@ -48,12 +51,24 @@ class BottleRef:
     Attributes:
         name: The name of the bottle.
         url: The download URL of the bottle.
-        sha256: The expected SHA256 checksum of the bottle.
+        sha256: The expected SHA256 checksum of the bottle, or `NO_CHECK`.
     """
 
     name: str
     url: str
     sha256: str  # Lowercase hex
+
+    @property
+    def key(self) -> str:
+        """Get the cache key for a bottle.
+
+        Returns:
+            The digest, or the URL's digest when there is none to check.
+        """
+        if self.sha256 == NO_CHECK:
+            return hashlib.sha256(self.url.encode()).hexdigest()
+
+        return self.sha256
 
 
 def _sha256_file(path: Path) -> str:
@@ -122,10 +137,13 @@ class Downloader:
             url: The URL to request.
 
         Returns:
-            The headers to include in the request.
+            The headers to include in the request, none for a vendor host.
         """
+        if urlsplit(url).hostname not in _GHCR_HOSTS:
+            return {}
+
         headers = {"Accept": _OCI_LAYER_ACCEPT}
-        if self._token and urlsplit(url).hostname in _GHCR_HOSTS:
+        if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
 
         return headers
@@ -145,9 +163,13 @@ class Downloader:
         # Ensure the cache directory exists before downloading
         self._cache_dir.mkdir(parents=True, exist_ok=True)
 
-        dest = self.cache_path(ref.sha256)
+        dest = self.cache_path(ref.key)
         if dest.exists():
-            if not self._verify_cached or _sha256_file(dest) == ref.sha256:
+            if (
+                not self._verify_cached
+                or ref.sha256 == NO_CHECK
+                or _sha256_file(dest) == ref.sha256
+            ):
                 return dest
 
             dest.unlink()  # Corrupt entry; re-download
@@ -240,7 +262,7 @@ class Downloader:
                             on_progress(downloaded, total)
 
             digest = hasher.hexdigest()
-            if digest != ref.sha256:
+            if ref.sha256 != NO_CHECK and digest != ref.sha256:
                 raise DownloadError(
                     f"sha256 mismatch: expected {ref.sha256}, got {digest}",
                     name=ref.name,

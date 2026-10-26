@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
 
-from brewery.providers.downloader import DEFAULT_GHCR_TOKEN, BottleRef, Downloader
+from brewery.providers.downloader import (
+    DEFAULT_GHCR_TOKEN,
+    NO_CHECK,
+    BottleRef,
+    Downloader,
+)
 
 
 def _dl(token: str = DEFAULT_GHCR_TOKEN) -> Downloader:
@@ -62,18 +68,14 @@ class TestRequestHeaders:
         else:
             assert h["Authorization"] == expected_auth
 
-    @pytest.mark.parametrize(
-        "url",
-        [
-            "https://ghcr.io/v2/x/blobs/sha256:abc",
-            "https://example.org/some/mirror.tar.gz",
-        ],
-    )
-    def test_headers_always_sets_accept(self, url) -> None:
-        """Test that the Accept header is always set regardless of host."""
-        assert (
-            _dl()._headers(url)["Accept"].startswith("application/vnd.oci.image.layer")
-        )
+    def test_headers_ghcr_sets_accept(self) -> None:
+        """Test that ghcr is asked for the OCI layer."""
+        h = _dl()._headers("https://ghcr.io/v2/x/blobs/sha256:abc")
+        assert h["Accept"].startswith("application/vnd.oci.image.layer")
+
+    def test_headers_vendor_host_sends_none(self) -> None:
+        """Test that a cask's vendor host gets a plain request."""
+        assert _dl()._headers("https://example.org/Foo-1.0.dmg") == {}
 
 
 class TestBottleRef:
@@ -90,3 +92,14 @@ class TestBottleRef:
         assert {ref}  # Hashable -> usable as a dict/set key
         with pytest.raises(AttributeError):
             ref.sha256 = "x"  # ty: ignore[invalid-assignment]
+
+    def test_key_is_the_digest(self) -> None:
+        """Test that a verified ref is cached under its own digest."""
+        assert BottleRef("foo", "https://example.org/foo.zip", "abc").key == "abc"
+
+    def test_no_check_key_is_the_url_digest(self) -> None:
+        """Test that a `no_check` ref is cached under sha256(url), per URL."""
+        a = BottleRef("foo", "https://example.org/foo-1.zip", NO_CHECK)
+        b = BottleRef("foo", "https://example.org/foo-2.zip", NO_CHECK)
+        assert a.key == hashlib.sha256(a.url.encode()).hexdigest()
+        assert a.key != b.key

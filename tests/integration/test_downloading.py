@@ -13,7 +13,7 @@ import pytest
 
 import brewery.providers.downloader as d
 from brewery.core.errors import DownloadError
-from brewery.providers.downloader import BottleRef, Downloader
+from brewery.providers.downloader import NO_CHECK, BottleRef, Downloader
 
 CDN = "https://pkg-containers.githubusercontent.com/blob/obj"
 
@@ -228,12 +228,28 @@ async def test_no_auth_for_non_ghcr_host(tmp_path) -> None:
             The HTTP response with the requested content.
         """
         reqs.append((req.url.host, "authorization" in req.headers))
+        assert "oci" not in req.headers["accept"]  # Plain request for a vendor host
         return httpx2.Response(200, content=blob)
 
     ref = _ref(blob, host="example.org")
     async with _make(tmp_path, handler) as dl:
         await dl.fetch(ref)
     assert reqs == [("example.org", False)]
+
+
+async def test_no_check_downloads_unverified_and_caches_by_url(tmp_path) -> None:
+    """Test that a `no_check` cask is published unverified, keyed on its URL."""
+    blob = _blob(13)
+    reqs: list = []
+    ref = BottleRef("foo", "https://example.org/Foo.dmg", NO_CHECK)
+    async with _make(
+        tmp_path, _redirecting_handler(blob, requests=reqs), verify_cached=True
+    ) as dl:
+        path = await dl.fetch(ref)
+        again = await dl.fetch(ref)
+    assert path == again == dl.cache_path(ref.key)
+    assert path.read_bytes() == blob
+    assert len(reqs) == 1  # Served from cache the second time
 
 
 async def test_cache_hit_makes_no_request(tmp_path) -> None:
