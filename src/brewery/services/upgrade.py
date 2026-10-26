@@ -86,7 +86,8 @@ def _drop_satisfied(targets: list[Package]) -> tuple[list[Package], list[Package
 
     The orchestrator forces requested targets past `is_satisfied`, so a current
     formula would otherwise be re-poured in full; a named cask that updates itself
-    still counts as outdated.
+    still counts as outdated, and one the catalog doesn't know (e.g. from a
+    third-party tap) is left for brew to judge.
 
     Args:
         targets: The named packages still bound for upgrade.
@@ -94,7 +95,14 @@ def _drop_satisfied(targets: list[Package]) -> tuple[list[Package], list[Package
     Returns:
         Tuple of (targets still worth upgrading, already-current packages).
     """
-    satisfied = [p for p in targets if PackageStatus.OUTDATED not in p.status]
+    satisfied = [
+        p
+        for p in targets
+        if PackageStatus.OUTDATED not in p.status
+        and not (
+            p.kind == PackageKind.CASK and p.metadata.get("latest_version") is None
+        )
+    ]
     skip = {p.name for p in satisfied}
 
     return [p for p in targets if p.name not in skip], satisfied

@@ -136,6 +136,15 @@ class TestUpgrade:
         await upgrade_packages(repo, ["iina"])
         assert _iina_upgrades() == 2
 
+    async def test_named_cask_missing_from_the_catalog_goes_to_brew(
+        self, repo, brew, mock_brew
+    ) -> None:
+        """Test that a named cask the catalog doesn't know is left for brew to judge."""
+        brew.cask("tapped", ["1.0"])
+
+        await upgrade_packages(repo, ["tapped"])
+        assert any("tapped" in call for call in _provider_calls(mock_brew, "upgrade"))
+
     async def test_native_upgrade_bumps_version_and_retains_old(
         self, brew, empty_catalog, monkeypatch
     ) -> None:
