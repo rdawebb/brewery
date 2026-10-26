@@ -76,9 +76,12 @@ class TestOutdatedDerivation:
         repo.get_outdated()
         all_pkgs = repo.get_all_installed()
         yazi = next(p for p in all_pkgs if p.name == "yazi")
-        iina = next(p for p in all_pkgs if p.name == "iina")
         assert PackageStatus.OUTDATED not in yazi.status
-        assert PackageStatus.OUTDATED not in iina.status
+
+    def test_auto_updating_cask_is_outdated_only_when_greedy(self, repo) -> None:
+        """Test that iina (1.4.1,160 → 1.4.3, auto_updates) needs greedy to show."""
+        assert "iina" not in {p.name for p in repo.get_outdated()}
+        assert {p.name for p in repo.get_outdated(greedy=True)} == {"act", "iina"}
 
     def test_get_outdated_does_not_refresh(self, repo, monkeypatch) -> None:
         """Test that get_outdated never touches the network/refresh path.

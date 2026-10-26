@@ -218,7 +218,7 @@ class TestOutdated:
 
     def test_nothing_outdated_reports_success(self, run, monkeypatch, repo) -> None:
         """Test that an up-to-date machine says so and exits 0."""
-        monkeypatch.setattr(type(repo), "get_outdated", lambda self: [])
+        monkeypatch.setattr(type(repo), "get_outdated", lambda self, greedy=False: [])
 
         result = run(["outdated"])
 
@@ -232,7 +232,7 @@ class TestOutdated:
         monkeypatch.setattr(
             type(repo),
             "get_outdated",
-            lambda self: [_pkg("wget", "1.24.5", latest="1.25.0")],
+            lambda self, greedy=False: [_pkg("wget", "1.24.5", latest="1.25.0")],
         )
 
         result = run(["outdated"])
@@ -240,11 +240,25 @@ class TestOutdated:
         assert "1 outdated package(s)" in result.output
         assert "wget → 1.25.0" in result.output
 
+    def test_greedy_is_forwarded(self, run, monkeypatch, repo) -> None:
+        """Test that --greedy reaches get_outdated, and is off by default."""
+        seen: list[bool] = []
+        monkeypatch.setattr(
+            type(repo),
+            "get_outdated",
+            lambda self, greedy=False: seen.append(greedy) or [],
+        )
+
+        run(["outdated"])
+        run(["outdated", "--greedy"])
+
+        assert seen == [False, True]
+
     def test_the_default_path_does_not_refetch_the_catalog(
         self, run, monkeypatch, repo
     ) -> None:
         """Test that a bare `outdated` stays instant by reading the cache."""
-        monkeypatch.setattr(type(repo), "get_outdated", lambda self: [])
+        monkeypatch.setattr(type(repo), "get_outdated", lambda self, greedy=False: [])
         refreshed: list[bool] = []
         monkeypatch.setattr(
             outdated_mod,
@@ -264,7 +278,7 @@ class TestOutdated:
         Refreshing without invalidating would compare fresh upstream versions
         against a stale installed scan, so the two have to happen together.
         """
-        monkeypatch.setattr(type(repo), "get_outdated", lambda self: [])
+        monkeypatch.setattr(type(repo), "get_outdated", lambda self, greedy=False: [])
         invalidated: list[bool] = []
         repo.cache_mgr.invalidate = lambda: invalidated.append(True)
         refreshed: list[bool] = []

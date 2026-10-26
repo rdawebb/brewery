@@ -42,8 +42,10 @@ def upgrades(monkeypatch):
     def _arrange(upgraded=(), current=(), advisories=(), failures=(), raises=None):
         calls: list[dict] = []
 
-        async def _upgrade(repo, names, kind, *, progress=None):
-            calls.append({"names": names, "kind": kind, "progress": progress})
+        async def _upgrade(repo, names, kind, *, greedy=False, progress=None):
+            calls.append(
+                {"names": names, "kind": kind, "greedy": greedy, "progress": progress}
+            )
             if raises is not None:
                 raise raises
 
@@ -68,7 +70,9 @@ def outdated(monkeypatch):
     """
 
     def _arrange(pkgs, repo):
-        monkeypatch.setattr(type(repo), "get_outdated", lambda self: list(pkgs))
+        monkeypatch.setattr(
+            type(repo), "get_outdated", lambda self, greedy=False: list(pkgs)
+        )
 
     return _arrange
 
@@ -84,6 +88,27 @@ class TestPromptBranches:
 
         assert result.exit_code == 0
         assert calls[0]["names"] is None
+        assert calls[0]["greedy"] is False
+
+    def test_greedy_reaches_the_listing_and_the_service(
+        self, run, upgrades, repo, monkeypatch
+    ) -> None:
+        """Test that --greedy widens both the prompt's list and the upgrade itself."""
+        calls = upgrades(upgraded=[_pkg("iina", "1.4.3")])
+        seen: list[bool] = []
+        monkeypatch.setattr(
+            type(repo),
+            "get_outdated",
+            lambda self, greedy=False: (
+                seen.append(greedy) or [_pkg("iina", latest="1.4.3")]
+            ),
+        )
+
+        result = run(["upgrade", "--greedy"], input="y\n")
+
+        assert result.exit_code == 0
+        assert seen == [True]
+        assert calls[0]["greedy"] is True
 
     def test_named_packages_are_confirmed_by_name(self, run, upgrades) -> None:
         """Test that naming packages prompts with those names and nothing else."""

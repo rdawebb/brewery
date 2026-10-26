@@ -12,7 +12,7 @@ test:
 
 # Run every test, slow included; a command-line -m replaces the addopts one
 test-all:
-    uv run pytest -m "" -v --no-cov
+    uv run pytest -n auto -m "" -v --no-cov
 
 # Run only unit tests
 test-unit:

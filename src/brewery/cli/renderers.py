@@ -29,6 +29,7 @@ _STATUS_STYLES: dict[PackageStatus, tuple[str, str]] = {
     PackageStatus.KEG_ONLY: ("bold magenta", "Keg-Only"),
     PackageStatus.HEAD: ("bold cyan", "HEAD"),
     PackageStatus.HAS_SERVICE: ("bold green", "Service"),
+    PackageStatus.AUTO_UPDATES: ("dim", "Auto-Updates"),
 }
 
 STATUS_LABELS: dict[PackageStatus, str] = {

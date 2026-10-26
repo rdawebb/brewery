@@ -19,6 +19,9 @@ def outdated(
         "-c",
         help="Refetch the catalog, then re-scan installed packages",
     ),
+    greedy: bool = app.Option(
+        False, "--greedy", "-g", help="Include casks that update themselves"
+    ),
 ) -> None:
     """List outdated packages.
 
@@ -28,6 +31,7 @@ def outdated(
     Args:
         check: If True, refetches the upstream catalog and re-scans installed
             packages before filtering.
+        greedy: If True, includes casks that update themselves.
     """
     with _repository() as repo:
         pkgs: list[Package]
@@ -39,10 +43,10 @@ def outdated(
 
                 run_async(coro=refresh_catalog(catalog=repo.catalog))
                 repo.cache_mgr.invalidate()
-                pkgs = repo.get_outdated()
+                pkgs = repo.get_outdated(greedy=greedy)
 
         else:
-            pkgs = repo.get_outdated()
+            pkgs = repo.get_outdated(greedy=greedy)
 
         if not pkgs:
             console.print("✓ All packages are up to date!\n", style="bold green")

@@ -29,6 +29,7 @@ class PackageStatus(Flag):
     KEG_ONLY = auto()
     HEAD = auto()
     HAS_SERVICE = auto()
+    AUTO_UPDATES = auto()
 
 
 @dataclass

@@ -6,11 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added
+
+- `outdated` and `upgrade` commands now report outdated casks with brew's rules: a cask is outdated when its version differs from the catalog's, `:latest` casks never are, and casks that update themselves are left out unless `--greedy`/`-g` is passed or the cask is named; `list` and `info` now mark such casks `Auto-Updates`
+
 ## [0.5.0] - 2026-10-25
 
 ### Changed
 
-- **Breaking:** `--kind` is replaced by the mutually exclusive `--formula`/`-f` and `--cask`/`-c` flags on `install`, `uninstall`, `upgrade`, `list` and `info`, matching brew; `list -k` is gone with it
+- **Breaking:** `--kind` is replaced by the mutually exclusive `--formula`/`-f` and `--cask`/`-c` flags on `install`, `uninstall`, `upgrade`, `list` and `info`, matching brew; `list -k` is dropped
 - Installing a large dependency tree is around five times faster: relocation reads each file directly rather than memory-mapping it, which on macOS stalled every other formula's extraction and linking
 - Bottles extract in about half the time, by deciding that a tar member stays inside the staging directory from its name rather than by resolving every member against the filesystem
 - Formulae that ship thousands of individual files link around four times faster due to reduced object allocations

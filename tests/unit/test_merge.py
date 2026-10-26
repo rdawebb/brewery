@@ -449,6 +449,32 @@ class TestMergeCask:
         assert pkg.desc == "web browser"
         assert pkg.metadata["latest_version"] == "120.0"
 
+    @pytest.mark.parametrize(
+        ("installed", "latest", "expected"),
+        [
+            ("119.0", "120.0", True),  # plain bump
+            ("120.0", "120.0", False),
+            ("1.4.1,160", "1.4.1", True),  # string inequality, not version order
+            ("1.0", "latest", False),  # `:latest` is never outdated
+            ("1.0", None, False),
+        ],
+    )
+    def test_outdated_decision(self, installed, latest, expected) -> None:
+        """Test brew's cask rule: outdated when the version strings differ."""
+        record = make_record("firefox", kind=PackageKind.CASK, version=installed)
+        catalog = mock_catalog(casks={"firefox": cask_row("firefox", version=latest)})
+        assert (PackageStatus.OUTDATED in merge_one(record, catalog).status) is expected
+
+    def test_auto_updates_is_flagged_but_still_outdated(self) -> None:
+        """Test that auto_updates sets its flag; filtering it is get_outdated's job."""
+        record = make_record("firefox", kind=PackageKind.CASK, version="119.0")
+        catalog = mock_catalog(
+            casks={"firefox": cask_row("firefox", version="120.0", auto_updates=True)}
+        )
+        status = merge_one(record, catalog).status
+        assert PackageStatus.AUTO_UPDATES in status
+        assert PackageStatus.OUTDATED in status
+
     def test_tap_prefers_record_over_row(self) -> None:
         """Test that the installed record's tap overrides the cask row's tap."""
         record = make_record(

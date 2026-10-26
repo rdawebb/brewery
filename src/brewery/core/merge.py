@@ -159,6 +159,14 @@ def _merge_cask(record: InstalledRecord, row: CaskRow | None) -> Package:
     latest: str | None = row.version if row else None
     tap: str | None = record.tap or (row.tap if row else None)
 
+    if row is not None:
+        if row.auto_updates:
+            status |= PackageStatus.AUTO_UPDATES
+
+        # brew compares cask versions as plain strings; `:latest` is never outdated
+        if row.version not in (None, "latest") and row.version != record.version:
+            status |= PackageStatus.OUTDATED
+
     return _package(record=record, desc=desc, latest=latest, status=status, tap=tap)
 
 

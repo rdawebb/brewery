@@ -116,6 +116,26 @@ class TestUpgrade:
         flat = [arg for call in _provider_calls(mock_brew, "upgrade") for arg in call]
         assert "act" not in flat
 
+    async def test_auto_updating_cask_needs_greedy_or_a_name(
+        self, repo, mock_brew
+    ) -> None:
+        """Test that iina (outdated, auto_updates) is left alone by a bare upgrade.
+
+        brew upgrades it with --greedy, or when named.
+        """
+
+        def _iina_upgrades() -> int:
+            return sum("iina" in call for call in _provider_calls(mock_brew, "upgrade"))
+
+        await upgrade_packages(repo, kind=PackageKind.CASK)
+        assert _iina_upgrades() == 0
+
+        await upgrade_packages(repo, kind=PackageKind.CASK, greedy=True)
+        assert _iina_upgrades() == 1
+
+        await upgrade_packages(repo, ["iina"])
+        assert _iina_upgrades() == 2
+
     async def test_native_upgrade_bumps_version_and_retains_old(
         self, brew, empty_catalog, monkeypatch
     ) -> None:

@@ -21,16 +21,15 @@ if TYPE_CHECKING:
 UpgradeOutcome = tuple[list[Package], list[Package], Notes, Notes]
 
 
-def _select_outdated(installed: list[Package]) -> tuple[list[Package], Notes]:
+def _select_outdated(outdated: list[Package]) -> tuple[list[Package], Notes]:
     """Everything outdated, skipping pins without failing.
 
     Args:
-        installed: Every installed package, already merged.
+        outdated: Every outdated package, already merged.
 
     Returns:
         Tuple of (targets, advisories) - one advisory per pin left behind.
     """
-    outdated = [p for p in installed if PackageStatus.OUTDATED in p.status]
     advisories: Notes = [
         (p.name, "pinned - not upgraded")
         for p in outdated
@@ -83,10 +82,11 @@ def _drop_pinned(targets: list[Package]) -> tuple[list[Package], Notes]:
 
 
 def _drop_satisfied(targets: list[Package]) -> tuple[list[Package], list[Package]]:
-    """Hold back formulae that are already current, to report rather than re-pour.
+    """Hold back packages that are already current, to report rather than re-pour.
 
     The orchestrator forces requested targets past `is_satisfied`, so a current
-    formula would otherwise be re-poured in full.
+    formula would otherwise be re-poured in full; a named cask that updates itself
+    still counts as outdated.
 
     Args:
         targets: The named packages still bound for upgrade.
@@ -94,31 +94,28 @@ def _drop_satisfied(targets: list[Package]) -> tuple[list[Package], list[Package
     Returns:
         Tuple of (targets still worth upgrading, already-current packages).
     """
-    satisfied = [
-        p
-        for p in targets
-        if p.kind == PackageKind.FORMULA and PackageStatus.OUTDATED not in p.status
-    ]
+    satisfied = [p for p in targets if PackageStatus.OUTDATED not in p.status]
     skip = {p.name for p in satisfied}
 
     return [p for p in targets if p.name not in skip], satisfied
 
 
 def _select_targets(
-    repo: Repository, installed: list[Package], names: list[str] | None
+    repo: Repository, installed: list[Package], names: list[str] | None, greedy: bool
 ) -> tuple[list[Package], list[Package], Notes, Notes]:
     """Resolve the packages to upgrade, and what to say about the ones skipped.
 
     Args:
-        repo: The data facade, for alias resolution.
+        repo: The data facade, for alias resolution and the outdated set.
         installed: Every installed package, already merged.
         names: Explicit targets, or None for "everything outdated".
+        greedy: With no names, also upgrade casks that update themselves.
 
     Returns:
         Tuple of (targets, already-current packages, advisories, failures).
     """
     if names is None:
-        targets, advisories = _select_outdated(installed)
+        targets, advisories = _select_outdated(repo.get_outdated(greedy=greedy))
 
         return targets, [], advisories, []
 
@@ -233,6 +230,7 @@ async def upgrade_packages(
     names: list[str] | None = None,
     kind: PackageKind | None = None,
     *,
+    greedy: bool = False,
     env: BreweryENV | None = None,
     formula: PackageBackend = brew.formula_backend,
     cask: PackageBackend = brew.cask_backend,
@@ -247,6 +245,7 @@ async def upgrade_packages(
         repo: The data facade to read installed state and aliases through.
         names: Name(s) of the package(s) to upgrade.
         kind: Kind of the package(s) (formula, cask, auto (default))
+        greedy: With no names, also upgrade casks that update themselves.
         env: Brewery environment (paths), resolved by the pipeline if omitted.
         formula: Formula backend for the per-formula brew fallback.
         cask: Cask backend, which handles casks wholesale.
@@ -260,7 +259,9 @@ async def upgrade_packages(
         BrewCommandError: Propagated from provider.
     """
     installed: list[Package] = repo.cache_mgr.installed_packages()
-    targets, satisfied, advisories, failures = _select_targets(repo, installed, names)
+    targets, satisfied, advisories, failures = _select_targets(
+        repo, installed, names, greedy
+    )
 
     targets, satisfied = _filter_kind(targets, satisfied, kind)
 

@@ -39,6 +39,10 @@ def upgrade(
     ] = None,
     formula: FormulaFlag = False,
     cask: CaskFlag = False,
+    greedy: Annotated[
+        bool,
+        app.Option("--greedy", "-g", help="Also upgrade casks that update themselves"),
+    ] = False,
     yes: Annotated[
         bool, app.Option("--yes", "-y", help="Skip confirmation prompt")
     ] = False,
@@ -49,6 +53,7 @@ def upgrade(
         names: Name(s) of the package(s) to upgrade (if None, upgrades all outdated).
         formula: Treat the package(s) as formulae.
         cask: Treat the package(s) as casks. With neither flag, auto-detects.
+        greedy: Also upgrade casks that update themselves (named ones always are).
         yes: If true, skip confirmation prompt.
     """
     kind: PackageKind | None = kind_from_flags(formula, cask)
@@ -62,7 +67,7 @@ def upgrade(
                 return
 
         else:
-            outdated: list[Package] = repo.get_outdated()
+            outdated: list[Package] = repo.get_outdated(greedy=greedy)
             if not outdated:
                 console.print("\n✓ All packages are up to date!\n", style="bold green")
                 return
@@ -82,7 +87,9 @@ def upgrade(
                 return
 
         upgraded, current, advisories, failures = run_async(
-            coro=upgrade_packages(repo, names, kind, progress=make_reporter(console))
+            coro=upgrade_packages(
+                repo, names, kind, greedy=greedy, progress=make_reporter(console)
+            )
         )
 
         if not upgraded and not advisories and not failures and not current:

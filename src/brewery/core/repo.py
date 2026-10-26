@@ -100,12 +100,20 @@ class Repository:
         return search_packages(catalog=self.catalog, query=term, installed=installed)
 
     @log_operation(event_prefix="get_outdated")
-    def get_outdated(self) -> list[Package]:
+    def get_outdated(self, greedy: bool = False) -> list[Package]:
         """Return outdated packages (OUTDATED is derived in the merge).
+
+        Args:
+            greedy: Include casks that update themselves.
 
         Returns:
             Packages flagged OUTDATED.
         """
         packages: list[Package] = self.cache_mgr.installed_packages()
 
-        return [p for p in packages if PackageStatus.OUTDATED in p.status]
+        return [
+            p
+            for p in packages
+            if PackageStatus.OUTDATED in p.status
+            and (greedy or PackageStatus.AUTO_UPDATES not in p.status)
+        ]
