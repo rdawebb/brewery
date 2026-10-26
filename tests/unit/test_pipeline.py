@@ -6,7 +6,7 @@ import functools
 from pathlib import Path
 
 import pytest
-from _mocks import MockHTTPClient, patch_httpx
+from _mocks import MockHTTPClient, patch_httpx2
 from _stubs import MockPorts, _run_brew
 
 import brewery.providers.pipeline as svc
@@ -82,7 +82,7 @@ class MockOrchestrator:
 
 @pytest.fixture
 def patched(monkeypatch) -> MockHTTPClient:
-    """Patch httpx.AsyncClient, Downloader, and Orchestrator with stubs.
+    """Patch httpx2.AsyncClient, Downloader, and Orchestrator with stubs.
 
     Args:
         monkeypatch: The pytest monkeypatch fixture.
@@ -90,7 +90,7 @@ def patched(monkeypatch) -> MockHTTPClient:
     Returns:
         The MockHTTPClient the patched AsyncClient constructor returns.
     """
-    client = patch_httpx(monkeypatch)
+    client = patch_httpx2(monkeypatch)
 
     monkeypatch.setattr(svc, "Downloader", MockDownloader)
     monkeypatch.setattr(svc, "Orchestrator", MockOrchestrator)
@@ -170,7 +170,7 @@ class TestRunInstall:
     async def test_client_gets_the_streaming_timeout(
         self, patched, ports, mock_env
     ) -> None:
-        """Test the client is built with the pipeline timeout, not httpx's 5s default."""
+        """Test the client is built with the pipeline timeout, not httpx2's 5s default."""
         await _install(["wget"], ports, env=mock_env)
         assert patched.kwargs["timeout"] is svc.PIPELINE_TIMEOUT
 

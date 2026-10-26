@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Self
 
-import httpx
+import httpx2
 import orjson
 import pytest
 from _mocks import both_feeds, not_modified, ok
@@ -188,7 +188,7 @@ class TestErrorHandling:
         """Test that an unexpected HTTP status raises CatalogFetchError."""
         from brewery.core.catalog.api import CatalogFetchError
 
-        client = http_client(both_feeds(httpx.Response(500), httpx.Response(500)))
+        client = http_client(both_feeds(httpx2.Response(500), httpx2.Response(500)))
         with pytest.raises(CatalogFetchError):
             await refresh_catalog(empty_catalog, client=client)
 
@@ -198,7 +198,7 @@ class TestErrorHandling:
         """Test that a transport error is wrapped as CatalogFetchError."""
         from brewery.core.catalog.api import CatalogFetchError
 
-        client = http_client({}, raise_on_get=httpx.ConnectError("boom"))
+        client = http_client({}, raise_on_get=httpx2.ConnectError("boom"))
         with pytest.raises(CatalogFetchError):
             await refresh_catalog(empty_catalog, client=client)
 
@@ -212,7 +212,7 @@ class TestErrorHandling:
         """
         from brewery.core.catalog.api import CatalogFetchError
 
-        client = http_client(both_feeds(httpx.Response(503), httpx.Response(200)))
+        client = http_client(both_feeds(httpx2.Response(503), httpx2.Response(200)))
         with pytest.raises(CatalogFetchError):
             await refresh_catalog(empty_catalog, client=client)
         assert empty_catalog.get_meta("formula_etag") is None

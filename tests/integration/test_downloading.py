@@ -8,7 +8,7 @@ import hashlib
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 
 import brewery.providers.downloader as d
@@ -60,8 +60,8 @@ async def _make(cache: Path, handler, **kw):
     Yields:
         A Downloader instance.
     """
-    transport = httpx.MockTransport(handler)
-    async with httpx.AsyncClient(transport=transport) as client:
+    transport = httpx2.MockTransport(handler)
+    async with httpx2.AsyncClient(transport=transport) as client:
         yield Downloader(cache, client, **kw)
 
 
@@ -76,19 +76,19 @@ def _redirecting_handler(blob: bytes, *, requests: list | None = None):
         A handler function for the HTTP request.
     """
 
-    def handler(req: httpx.Request) -> httpx.Response:
+    def handler(req: httpx2.Request) -> httpx2.Response:
         if requests is not None:
             requests.append((req.url.host, "authorization" in req.headers))
         if req.url.host == "ghcr.io":
-            return httpx.Response(307, headers={"Location": CDN})
-        return httpx.Response(
+            return httpx2.Response(307, headers={"Location": CDN})
+        return httpx2.Response(
             200, content=blob, headers={"Content-Length": str(len(blob))}
         )
 
     return handler
 
 
-class _RaisingStream(httpx.AsyncByteStream):
+class _RaisingStream(httpx2.AsyncByteStream):
     """Yields some bytes, then raises — simulates a dropped connection."""
 
     def __init__(self, head: bytes, exc: Exception) -> None:
@@ -132,7 +132,7 @@ class _LiveCounter:
         self.now -= 1
 
 
-class _SlowStream(httpx.AsyncByteStream):
+class _SlowStream(httpx2.AsyncByteStream):
     """Streams content with a pause so concurrent downloads actually overlap,
     recording how many are in flight at once."""
 
@@ -168,7 +168,7 @@ class _SlowStream(httpx.AsyncByteStream):
         """Close the stream."""
 
 
-class _PlainStream(httpx.AsyncByteStream):
+class _PlainStream(httpx2.AsyncByteStream):
     """Streams content in one chunk with no known length (no Content-Length)."""
 
     def __init__(self, data: bytes) -> None:
@@ -218,7 +218,7 @@ async def test_no_auth_for_non_ghcr_host(tmp_path) -> None:
     blob = _blob(3)
     reqs: list = []
 
-    def handler(req: httpx.Request) -> httpx.Response:
+    def handler(req: httpx2.Request) -> httpx2.Response:
         """Handle HTTP requests.
 
         Args:
@@ -228,7 +228,7 @@ async def test_no_auth_for_non_ghcr_host(tmp_path) -> None:
             The HTTP response with the requested content.
         """
         reqs.append((req.url.host, "authorization" in req.headers))
-        return httpx.Response(200, content=blob)
+        return httpx2.Response(200, content=blob)
 
     ref = _ref(blob, host="example.org")
     async with _make(tmp_path, handler) as dl:
@@ -287,7 +287,7 @@ async def test_body_longer_than_content_length_aborts(tmp_path) -> None:
     blob = _blob(20, size=64 * 1024)
     ref = _ref(blob)
 
-    def handler(req: httpx.Request) -> httpx.Response:
+    def handler(req: httpx2.Request) -> httpx2.Response:
         """Serve a body far longer than the Content-Length it advertises.
 
         Args:
@@ -296,7 +296,7 @@ async def test_body_longer_than_content_length_aborts(tmp_path) -> None:
         Returns:
             The HTTP response with the requested content.
         """
-        return httpx.Response(200, content=blob, headers={"Content-Length": "1024"})
+        return httpx2.Response(200, content=blob, headers={"Content-Length": "1024"})
 
     async with _make(tmp_path, handler) as dl:
         with pytest.raises(DownloadError, match="exceeds 1024 bytes"):
@@ -321,7 +321,7 @@ async def test_unbounded_body_aborts_at_hard_cap(tmp_path, monkeypatch) -> None:
         for i in range(0, len(blob), 4096):
             yield blob[i : i + 4096]
 
-    def handler(req: httpx.Request) -> httpx.Response:
+    def handler(req: httpx2.Request) -> httpx2.Response:
         """Serve the blob without a Content-Length header.
 
         Args:
@@ -330,7 +330,7 @@ async def test_unbounded_body_aborts_at_hard_cap(tmp_path, monkeypatch) -> None:
         Returns:
             The HTTP response with the requested content.
         """
-        return httpx.Response(200, content=_stream())
+        return httpx2.Response(200, content=_stream())
 
     async with _make(tmp_path, handler) as dl:
         with pytest.raises(DownloadError, match="exceeds 1024 bytes"):
@@ -343,7 +343,7 @@ async def test_http_404_raises_without_retry(tmp_path) -> None:
     """Test that a 404 error raises an error without retrying."""
     calls: list = []
 
-    def handler(req: httpx.Request) -> httpx.Response:
+    def handler(req: httpx2.Request) -> httpx2.Response:
         """Handle HTTP requests.
 
         Args:
@@ -353,7 +353,7 @@ async def test_http_404_raises_without_retry(tmp_path) -> None:
             The HTTP response with the requested content.
         """
         calls.append(req.url.host)
-        return httpx.Response(404)
+        return httpx2.Response(404)
 
     ref = _ref(_blob(7), host="example.org")
     async with _make(tmp_path, handler, max_retries=3) as dl:
@@ -367,7 +367,7 @@ async def test_retries_then_succeeds_on_transient_5xx(tmp_path, delays) -> None:
     blob = _blob(8)
     state = {"n": 0}
 
-    def handler(req: httpx.Request) -> httpx.Response:
+    def handler(req: httpx2.Request) -> httpx2.Response:
         """Handle HTTP requests.
 
         Args:
@@ -378,8 +378,8 @@ async def test_retries_then_succeeds_on_transient_5xx(tmp_path, delays) -> None:
         """
         state["n"] += 1
         if state["n"] == 1:
-            return httpx.Response(503)
-        return httpx.Response(200, content=blob)
+            return httpx2.Response(503)
+        return httpx2.Response(200, content=blob)
 
     ref = _ref(blob, host="example.org")
     async with _make(tmp_path, handler, max_retries=3) as dl:
@@ -392,7 +392,7 @@ async def test_exhausts_retries_then_raises(tmp_path, delays) -> None:
     """Test that exhausting all retries raises an error."""
     calls: list = []
 
-    def handler(req: httpx.Request) -> httpx.Response:
+    def handler(req: httpx2.Request) -> httpx2.Response:
         """Handle HTTP requests.
 
         Args:
@@ -402,7 +402,7 @@ async def test_exhausts_retries_then_raises(tmp_path, delays) -> None:
             The HTTP response with the requested content.
         """
         calls.append(1)
-        return httpx.Response(503)
+        return httpx2.Response(503)
 
     ref = _ref(_blob(9), host="example.org")
     async with _make(tmp_path, handler, max_retries=3) as dl:
@@ -418,7 +418,7 @@ async def test_resumes_cleanly_after_midstream_drop(tmp_path, delays) -> None:
     ref = _ref(blob, host="example.org")
     state = {"n": 0}
 
-    def handler(req: httpx.Request) -> httpx.Response:
+    def handler(req: httpx2.Request) -> httpx2.Response:
         """Handle HTTP requests.
 
         Args:
@@ -430,11 +430,11 @@ async def test_resumes_cleanly_after_midstream_drop(tmp_path, delays) -> None:
         state["n"] += 1
         if state["n"] == 1:
             # Deliver half the bytes, then drop the connection
-            return httpx.Response(
+            return httpx2.Response(
                 200,
-                stream=_RaisingStream(blob[: len(blob) // 2], httpx.ReadError("drop")),
+                stream=_RaisingStream(blob[: len(blob) // 2], httpx2.ReadError("drop")),
             )
-        return httpx.Response(200, content=blob)
+        return httpx2.Response(200, content=blob)
 
     async with _make(tmp_path, handler, max_retries=3) as dl:
         path = await dl.fetch(ref)
@@ -460,7 +460,7 @@ async def test_progress_total_none_without_content_length(tmp_path) -> None:
     blob = _blob(12)
     ref = _ref(blob, host="example.org")
 
-    def handler(req: httpx.Request) -> httpx.Response:
+    def handler(req: httpx2.Request) -> httpx2.Response:
         """Handle HTTP requests.
 
         Args:
@@ -469,7 +469,7 @@ async def test_progress_total_none_without_content_length(tmp_path) -> None:
         Returns:
             The HTTP response with the requested content.
         """
-        return httpx.Response(200, stream=_PlainStream(blob))  # No Content-Length
+        return httpx2.Response(200, stream=_PlainStream(blob))  # No Content-Length
 
     seen: list[tuple[int, int | None]] = []
     async with _make(tmp_path, handler) as dl:
@@ -488,7 +488,7 @@ async def test_concurrent_fetches_are_bounded(tmp_path) -> None:
     by_sha = {hashlib.sha256(b).hexdigest(): b for b in blobs}
     refs = [_ref(b, name=f"g{i}", host="example.org") for i, b in enumerate(blobs)]
 
-    def handler(req: httpx.Request) -> httpx.Response:
+    def handler(req: httpx2.Request) -> httpx2.Response:
         """Handle HTTP requests.
 
         Args:
@@ -498,7 +498,7 @@ async def test_concurrent_fetches_are_bounded(tmp_path) -> None:
             The HTTP response with the requested content.
         """
         sha = req.url.path.rsplit("sha256:", 1)[-1]
-        return httpx.Response(200, stream=_SlowStream(by_sha[sha], live))
+        return httpx2.Response(200, stream=_SlowStream(by_sha[sha], live))
 
     async with _make(tmp_path, handler, max_concurrency=2) as dl:
         await asyncio.gather(*(dl.fetch(ref) for ref in refs))

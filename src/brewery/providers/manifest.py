@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import httpx
+import httpx2
 import orjson
 
 from brewery.core.errors import ManifestFetchError, ManifestParseError
@@ -204,15 +204,15 @@ def _index_retryable(exc: Exception) -> bool:
         True for connection-level failures and retryable statuses; False for
         genuine ones such as 404.
     """
-    if isinstance(exc, httpx.HTTPStatusError):
+    if isinstance(exc, httpx2.HTTPStatusError):
         return exc.response.status_code in RETRYABLE_STATUS
 
-    return isinstance(exc, httpx.TransportError)
+    return isinstance(exc, httpx2.TransportError)
 
 
 async def _get_index_with_retry(
-    client: httpx.AsyncClient, url: str, headers: dict, *, attempts: int = 3
-) -> httpx.Response:
+    client: httpx2.AsyncClient, url: str, headers: dict, *, attempts: int = 3
+) -> httpx2.Response:
     """GET the manifest index, retrying transient failures with exponential backoff.
 
     Args:
@@ -222,15 +222,15 @@ async def _get_index_with_retry(
         attempts: Total number of GETs, including the first.
 
     Returns:
-        The successful `httpx.Response` object.
+        The successful `httpx2.Response` object.
 
     Raises:
-        httpx.HTTPStatusError: On a non-retryable HTTP error (e.g. 404).
-        httpx.TransportError: If all retry attempts are exhausted due to
+        httpx2.HTTPStatusError: On a non-retryable HTTP error (e.g. 404).
+        httpx2.TransportError: If all retry attempts are exhausted due to
             connection-level failures.
     """
 
-    async def get() -> httpx.Response:
+    async def get() -> httpx2.Response:
         resp = await client.get(url, headers=headers, follow_redirects=True)
         resp.raise_for_status()
 
@@ -247,7 +247,7 @@ async def _get_index_with_retry(
 
 
 async def fetch_bottle_tab(
-    client: httpx.AsyncClient,
+    client: httpx2.AsyncClient,
     *,
     name: str,
     version: str,
@@ -287,7 +287,7 @@ async def fetch_bottle_tab(
         )
         index = orjson.loads(resp.content)
 
-    except (httpx.HTTPError, orjson.JSONDecodeError) as exc:
+    except (httpx2.HTTPError, orjson.JSONDecodeError) as exc:
         raise ManifestFetchError(
             f"manifest fetch failed: {exc}", name=name, tag=tag
         ) from exc

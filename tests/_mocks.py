@@ -1,15 +1,15 @@
 """Test doubles shared across the unit, integration and CLI layers.
 
 `MockHTTPClient` is used for tests that accept an injected client; for tests
-building their own client, `httpx.MockTransport` is used instead so the real
-httpx request/response machinery still runs.
+building their own client, `httpx2.MockTransport` is used instead so the real
+httpx2 request/response machinery still runs.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Self
 
-import httpx
+import httpx2
 
 from brewery.core.catalog import api
 
@@ -29,15 +29,15 @@ class _NullSink:
 
 
 class MockHTTPClient:
-    """Async httpx-like stub, either injected into code or patched in for it.
+    """Async httpx2-like stub, either injected into code or patched in for it.
 
     Construct with either a single canned response/exception, or a mapping of
     `url -> response`; every GET is recorded (url + request headers) so tests
     can assert that conditional validators were sent.
 
     Args:
-        response: One of an `httpx.Response`, an `Exception` to raise, a
-            `dict[str, httpx.Response]` keyed by URL, or `None`.
+        response: One of an `httpx2.Response`, an `Exception` to raise, a
+            `dict[str, httpx2.Response]` keyed by URL, or `None`.
         raise_on_get: If set, every GET raises this exception (used for
             transport-error paths), regardless of `response`.
     """
@@ -46,8 +46,8 @@ class MockHTTPClient:
         """Initialise a MockHTTPClient.
 
         Args:
-            response: One of an `httpx.Response`, an `Exception` to raise, a
-                `dict[str, httpx.Response]` keyed by URL, or `None`.
+            response: One of an `httpx2.Response`, an `Exception` to raise, a
+                `dict[str, httpx2.Response]` keyed by URL, or `None`.
             raise_on_get: If set, every GET raises this exception (used for
                 transport-error paths), regardless of `response`.
         """
@@ -85,7 +85,7 @@ class MockHTTPClient:
         headers: dict[str, str] | None = None,
         timeout: float = 30.0,
         follow_redirects: bool = False,
-    ) -> httpx.Response | None:
+    ) -> httpx2.Response | None:
         """Simulate an HTTP GET request.
 
         Args:
@@ -123,10 +123,10 @@ class MockHTTPClient:
         self.closed = True
 
 
-def patch_httpx(monkeypatch) -> MockHTTPClient:
-    """Patch httpx.AsyncClient with a stub that records its constructor kwargs.
+def patch_httpx2(monkeypatch) -> MockHTTPClient:
+    """Patch httpx2.AsyncClient with a stub that records its constructor kwargs.
 
-    The modules under test do a plain `import httpx`, so patching the attribute on
+    The modules under test do a plain `import httpx2`, so patching the attribute on
     the shared module object covers whichever entry point is under test.
 
     Args:
@@ -141,7 +141,7 @@ def patch_httpx(monkeypatch) -> MockHTTPClient:
         """Record the constructor kwargs and return the stub.
 
         Args:
-            **kwargs: The keyword arguments the service passes to httpx.
+            **kwargs: The keyword arguments the service passes to httpx2.
 
         Returns:
             The mock client instance.
@@ -150,12 +150,12 @@ def patch_httpx(monkeypatch) -> MockHTTPClient:
 
         return client
 
-    monkeypatch.setattr(httpx, "AsyncClient", _client)
+    monkeypatch.setattr(httpx2, "AsyncClient", _client)
 
     return client
 
 
-def ok(body: bytes, **headers: str) -> httpx.Response:
+def ok(body: bytes, **headers: str) -> httpx2.Response:
     """A 200 response carrying `body` and any validator headers.
 
     Args:
@@ -165,21 +165,21 @@ def ok(body: bytes, **headers: str) -> httpx.Response:
     Returns:
         The response.
     """
-    return httpx.Response(200, content=body, headers=headers)
+    return httpx2.Response(200, content=body, headers=headers)
 
 
-def not_modified() -> httpx.Response:
+def not_modified() -> httpx2.Response:
     """A 304, the answer to a conditional request whose validator still matches.
 
     Returns:
         The response.
     """
-    return httpx.Response(304)
+    return httpx2.Response(304)
 
 
 def both_feeds(
-    formula_resp: httpx.Response, cask_resp: httpx.Response
-) -> dict[str, httpx.Response]:
+    formula_resp: httpx2.Response, cask_resp: httpx2.Response
+) -> dict[str, httpx2.Response]:
     """Map both API feed URLs to their responses, for a refresh that reads each.
 
     Args:

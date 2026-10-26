@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 from urllib.parse import quote
 
-import httpx
+import httpx2
 
 from brewery import __version__
 from brewery.core.errors import CatalogFetchError
@@ -35,7 +35,7 @@ class _HttpClient(Protocol):
         headers: dict[str, str] | None = ...,
         timeout: float = ...,
         follow_redirects: bool = ...,
-    ) -> httpx.Response: ...
+    ) -> httpx2.Response: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,7 +105,7 @@ async def fetch_feed(
         feed: The feed to fetch.
         etag: Previously stored ETag, sent as `If-None-Match`.
         last_modified: Previously stored Last-Modified, sent as `If-Modified-Since`.
-        client: Existing `httpx.AsyncClient` to reuse, or `None` to create a new one.
+        client: Existing `httpx2.AsyncClient` to reuse, or `None` to create a new one.
         timeout: Socket timeout in seconds.
 
     Returns:
@@ -122,11 +122,11 @@ async def fetch_feed(
         headers["If-Modified-Since"] = last_modified
 
     try:
-        response: httpx.Response = await _get(
+        response: httpx2.Response = await _get(
             url=feed.url, headers=headers, client=client, timeout=timeout
         )
 
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         raise CatalogFetchError(
             message=f"Catalog feed '{feed.name}' could not be reached",
             context={
@@ -183,7 +183,7 @@ async def fetch_single_formula(
 
     Args:
         name: Formula name
-        client: Existing `httpx.AsyncClient` to reuse, or `None` to create a new one.
+        client: Existing `httpx2.AsyncClient` to reuse, or `None` to create a new one.
         timeout: Socket timeout in seconds.
 
     Returns:
@@ -196,11 +196,11 @@ async def fetch_single_formula(
     headers: dict[str, str] = {"User-Agent": _USER_AGENT}
 
     try:
-        response: httpx.Response = await _get(
+        response: httpx2.Response = await _get(
             url=url, headers=headers, client=client, timeout=timeout
         )
 
-    except httpx.HTTPError as e:
+    except httpx2.HTTPError as e:
         raise CatalogFetchError(
             message=f"Single-formula fetch for '{name}' could not be reached",
             context={
@@ -261,13 +261,13 @@ async def _get(
     headers: dict[str, str],
     client: _HttpClient | None,
     timeout: float,
-) -> httpx.Response:
+) -> httpx2.Response:
     """GET a URL via the supplied client, or an ephemeral one if none given.
 
     Args:
         url: The URL to GET.
         headers: The request headers.
-        client: Existing `httpx.AsyncClient` to reuse, or `None` to create a new one.
+        client: Existing `httpx2.AsyncClient` to reuse, or `None` to create a new one.
         timeout: The request timeout in seconds.
 
     Returns:
@@ -278,7 +278,7 @@ async def _get(
             url, headers=headers, timeout=timeout, follow_redirects=True
         )
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as ephemeral:
+    async with httpx2.AsyncClient(follow_redirects=True, timeout=timeout) as ephemeral:
         return await ephemeral.get(url, headers=headers)
 
 

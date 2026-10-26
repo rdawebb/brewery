@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-import httpx
+import httpx2
 
 from brewery.core.catalog import Catalog, api, parser
 from brewery.core.catalog.api import CatalogFetchError, _HttpClient
@@ -29,7 +29,7 @@ async def refresh_catalog(catalog: Catalog, client: _HttpClient | None = None) -
         await _refresh(catalog, client)
         return
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=_TIMEOUT) as owned:
+    async with httpx2.AsyncClient(follow_redirects=True, timeout=_TIMEOUT) as owned:
         await _refresh(catalog, owned)
 
 

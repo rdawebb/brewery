@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import httpx
+import httpx2
 import pytest
 from _mocks import not_modified, ok
 
@@ -98,13 +98,13 @@ class TestFetchFeed:
 
     async def test_unexpected_status_raises(self, http_client) -> None:
         """Test that a non-200/304 status raises CatalogFetchError."""
-        client = http_client(httpx.Response(500))
+        client = http_client(httpx2.Response(500))
         with pytest.raises(CatalogFetchError):
             await fetch_feed(FORMULA_FEED, client=client)
 
     async def test_network_error_wrapped(self, http_client) -> None:
-        """Test that an httpx error is wrapped as CatalogFetchError."""
-        client = http_client(httpx.ConnectError("boom"))
+        """Test that an httpx2 error is wrapped as CatalogFetchError."""
+        client = http_client(httpx2.ConnectError("boom"))
         with pytest.raises(CatalogFetchError):
             await fetch_feed(FORMULA_FEED, client=client)
 
@@ -127,18 +127,18 @@ class TestFetchSingleFormula:
 
     async def test_404_returns_none(self, http_client) -> None:
         """Test that a 404 returns None rather than raising."""
-        client = http_client(httpx.Response(404))
+        client = http_client(httpx2.Response(404))
         assert await fetch_single_formula("ghost", client=client) is None
 
     async def test_unexpected_status_raises(self, http_client) -> None:
         """Test that another error status raises CatalogFetchError."""
-        client = http_client(httpx.Response(500))
+        client = http_client(httpx2.Response(500))
         with pytest.raises(CatalogFetchError):
             await fetch_single_formula("wget", client=client)
 
     async def test_network_error_wrapped(self, http_client) -> None:
         """Test that a transport error is wrapped as CatalogFetchError."""
-        client = http_client(httpx.ConnectError("down"))
+        client = http_client(httpx2.ConnectError("down"))
         with pytest.raises(CatalogFetchError):
             await fetch_single_formula("wget", client=client)
 

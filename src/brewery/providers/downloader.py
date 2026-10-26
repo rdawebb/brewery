@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
-import httpx
+import httpx2
 
 from brewery.core.errors import DownloadError, SysError
 from brewery.core.retry import RETRYABLE_STATUS, retry_async
@@ -77,7 +77,7 @@ class Downloader:
     def __init__(
         self,
         cache_dir: Path,
-        client: httpx.AsyncClient | None = None,
+        client: httpx2.AsyncClient | None = None,
         *,
         token: str = DEFAULT_GHCR_TOKEN,
         max_concurrency: int = 8,
@@ -172,7 +172,7 @@ class Downloader:
             return await retry_async(
                 functools.partial(self._attempt, ref, dest, on_progress),
                 retry_on=lambda exc: isinstance(
-                    exc, (httpx.TransportError, _RetryableStatus)
+                    exc, (httpx2.TransportError, _RetryableStatus)
                 ),
                 attempts=self._max_retries,
                 base=1.0,
@@ -180,7 +180,7 @@ class Downloader:
                 label=f"download {ref.name}",
             )
 
-        except (httpx.TransportError, _RetryableStatus) as exc:
+        except (httpx2.TransportError, _RetryableStatus) as exc:
             raise DownloadError(
                 f"failed after {self._max_retries} attempts: {exc}",
                 name=ref.name,
@@ -250,7 +250,7 @@ class Downloader:
 
             return dest
 
-        except httpx.HTTPStatusError as exc:
+        except httpx2.HTTPStatusError as exc:
             raise DownloadError(
                 f"HTTP {exc.response.status_code}", name=ref.name, url=ref.url
             ) from exc

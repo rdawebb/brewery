@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import httpx
+import httpx2
 import orjson
 import pytest
 
@@ -92,7 +92,7 @@ def _handler(body: bytes, *, status: int = 200, requests: list | None = None):
         callable: The request handler.
     """
 
-    def handler(req: httpx.Request) -> httpx.Response:
+    def handler(req: httpx2.Request) -> httpx2.Response:
         """Handle an HTTP request.
 
         Args:
@@ -103,7 +103,7 @@ def _handler(body: bytes, *, status: int = 200, requests: list | None = None):
         """
         if requests is not None:
             requests.append(req)
-        return httpx.Response(status, content=body)
+        return httpx2.Response(status, content=body)
 
     return handler
 
@@ -123,7 +123,7 @@ async def _fetch(
     Returns:
         The fetched bottle tab information.
     """
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
         return await fetch_bottle_tab(
             client, name=name, version=version, bottle_sha256=sha, revision=revision
         )
@@ -262,12 +262,12 @@ async def test_index_retries_transient_status(delays) -> None:
     body = _index([{"digest": DIGEST, "tab": TAB_PLATFORM}])
     calls = {"n": 0}
 
-    def handler(req) -> httpx.Response:
+    def handler(req) -> httpx2.Response:
         calls["n"] += 1
         if calls["n"] < 3:
-            return httpx.Response(503, content=b"")
+            return httpx2.Response(503, content=b"")
 
-        return httpx.Response(200, content=body)
+        return httpx2.Response(200, content=body)
 
     info = await _fetch(handler)
     assert isinstance(info, BottleTabInfo)

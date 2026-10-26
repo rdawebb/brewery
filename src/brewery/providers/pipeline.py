@@ -6,7 +6,7 @@ import functools
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-import httpx
+import httpx2
 
 from brewery.core.config import BreweryENV, get_brewery_env
 from brewery.providers.base import PackageBackend
@@ -27,10 +27,10 @@ from brewery.providers.orchestrator import (
 
 RunBrew = Callable[[list[str]], Awaitable[object]]
 
-# httpx's 5s default is too tight for streaming a bottle body; read/write
+# httpx2's 5s default is too tight for streaming a bottle body; read/write
 # timeouts are per-socket-operation, not whole-request, so 30s bounds a stall
 # without capping how long a large bottle may take
-PIPELINE_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+PIPELINE_TIMEOUT = httpx2.Timeout(30.0, connect=10.0)
 
 
 def build_orchestrator(
@@ -38,7 +38,7 @@ def build_orchestrator(
     catalog: CatalogSource,
     cache_mgr: InstalledSource,
     formula: PackageBackend,
-    client: httpx.AsyncClient,
+    client: httpx2.AsyncClient,
     env: BreweryENV,
     run_brew: RunBrew,
     progress: ProgressPort | None = None,
@@ -51,7 +51,7 @@ def build_orchestrator(
         catalog: The catalog backing formula/alias/dependency lookups.
         cache_mgr: Installed-state cache, used to answer `is_satisfied`.
         formula: Formula backend for the per-formula brew fallback.
-        client: An open httpx.AsyncClient.
+        client: An open httpx2.AsyncClient.
         env: Brewery environment (paths).
         run_brew: Async `brew <args>` runner for link/postinstall fallback.
         progress: Optional progress sink forwarded to the Orchestrator.
@@ -102,7 +102,7 @@ async def run_install(
     """
     env = env or get_brewery_env()
 
-    async with httpx.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
+    async with httpx2.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
         orchestrator = build_orchestrator(
             catalog=catalog,
             cache_mgr=cache_mgr,
@@ -144,7 +144,7 @@ async def run_upgrade(
     """
     env = env or get_brewery_env()
 
-    async with httpx.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
+    async with httpx2.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
         orch = build_orchestrator(
             catalog=catalog,
             cache_mgr=cache_mgr,

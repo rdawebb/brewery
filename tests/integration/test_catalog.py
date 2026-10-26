@@ -6,7 +6,7 @@ import asyncio
 import sqlite3
 import threading
 
-import httpx
+import httpx2
 import pytest
 from _rows import cask_dict, formula_dict
 
@@ -471,7 +471,7 @@ class TestFeedGuards:
         empty_catalog.set_meta("formula_etag", '"old"')
 
         client = http_client(
-            httpx.Response(200, content=b"[]", headers={"ETag": '"new"'})
+            httpx2.Response(200, content=b"[]", headers={"ETag": '"new"'})
         )
 
         with pytest.raises(CatalogFetchError):
