@@ -1,4 +1,4 @@
-"""Extract a downloaded bottle tarball into a staging directory."""
+"""Extract downloaded bottle and cask tarballs into a staging directory."""
 
 from __future__ import annotations
 
@@ -243,14 +243,14 @@ class _Extractor:
 
         if self._bytes > _MAX_EXTRACTED_BYTES:
             raise ExtractionError(
-                f"bottle expands past the {_MAX_EXTRACTED_BYTES} byte extraction "
+                f"archive expands past the {_MAX_EXTRACTED_BYTES} byte extraction "
                 f"limit at member {member.name!r}",
                 archive=self.archive,
             )
 
         if self._members > _MAX_MEMBERS:
             raise ExtractionError(
-                f"bottle holds more than {_MAX_MEMBERS} members",
+                f"archive holds more than {_MAX_MEMBERS} members",
                 archive=self.archive,
             )
 
@@ -580,34 +580,33 @@ def _extract_stream(fileobj: BinaryIO, extractor: _Extractor) -> None:
         extractor.extract(tar)
 
 
-def extract_bottle(archive: Path, dest: Path, *, sink: _Sink | None = None) -> Path:
-    """Extract `archive` into `dest` and return the keg directory.
+def extract_tar(archive: Path, dest: Path, *, sink: _Sink | None = None) -> None:
+    """Extract a tar archive, plain or compressed, into `dest`.
 
-    A bottle unpacks to `<name>/<version>/...` (plus a `<name>/.brew` metadata
-    dir); the returned path the `<name>/<version>` keg root, which is what the
-    relocator operates on.
+    zstd is decompressed here; gzip, bzip2 and xz are left to tarfile.
 
     Args:
         archive: The path to the archive file.
         dest: The directory to extract the archive into.
         sink: A relocator to drive from the member loop, or None.
 
-    Returns:
-        The path to the extracted keg directory.
+    Raises:
+        ExtractionError: If the archive is unsafe, corrupt or not a tar.
     """
-    fmt = detect_format(archive)
     dest.mkdir(parents=True, exist_ok=True)
     extractor = _Extractor(dest, archive=archive, sink=sink)
 
     try:
-        if fmt == "gzip":
-            with archive.open("rb") as fh:
-                _extract_stream(fh, extractor)
+        with archive.open("rb") as fh:
+            if fh.read(4) == _ZSTD_MAGIC:
+                fh.seek(0)
+                dctx = zstandard.ZstdDecompressor()
+                with dctx.stream_reader(fh) as reader:
+                    _extract_stream(reader, extractor)
 
-        else:  # zstd
-            dctx = zstandard.ZstdDecompressor()
-            with archive.open("rb") as fh, dctx.stream_reader(fh) as reader:
-                _extract_stream(reader, extractor)
+            else:
+                fh.seek(0)
+                _extract_stream(fh, extractor)
 
         # Links first, then modes: every directory is still writable here
         extractor.apply_links()
@@ -623,6 +622,26 @@ def extract_bottle(archive: Path, dest: Path, *, sink: _Sink | None = None) -> P
         raise ExtractionError(
             f"failed to extract {archive.name}: {exc}", archive=archive, dest=dest
         ) from exc
+
+
+def extract_bottle(archive: Path, dest: Path, *, sink: _Sink | None = None) -> Path:
+    """Extract `archive` into `dest` and return the keg directory.
+
+    A bottle unpacks to `<name>/<version>/...` (plus a `<name>/.brew` metadata
+    dir); the returned path the `<name>/<version>` keg root, which is what the
+    relocator operates on.
+
+    Args:
+        archive: The path to the archive file.
+        dest: The directory to extract the archive into.
+        sink: A relocator to drive from the member loop, or None.
+
+    Returns:
+        The path to the extracted keg directory.
+    """
+    # Bottles are only ever gzip or zstd; anything else is a bad download
+    detect_format(archive)
+    extract_tar(archive, dest, sink=sink)
 
     return _locate_keg(dest)
 

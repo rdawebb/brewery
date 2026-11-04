@@ -415,6 +415,22 @@ class TestParseCask:
         assert row["artifacts"] is None
         assert row["depends_on"] is None
 
+    @pytest.mark.parametrize(
+        ("tag", "url"),
+        [
+            pytest.param("sonoma", "https://example/intel.dmg", id="matching_tag"),
+            pytest.param("arm64_sonoma", "https://example/dmg", id="other_tag"),
+            pytest.param(None, "https://example/dmg", id="no_tag"),
+        ],
+    )
+    def test_host_variation_overrides_top_level(self, tag, url) -> None:
+        """Test that only the host's exact-tag variation overrides the top level."""
+        variations = {"sonoma": {"url": "https://example/intel.dmg", "sha256": "def"}}
+        row = _parse_cask(self._obj(variations=variations), tag=tag)
+        assert row["url"] == url
+        assert row["sha256"] == ("def" if tag == "sonoma" else "abc")
+        assert row["version"] == "120.0"
+
 
 class TestJsonText:
     """Tests for _json_text."""

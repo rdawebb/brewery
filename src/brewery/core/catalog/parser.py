@@ -202,12 +202,13 @@ def load_formulae(
     return len(formulae)
 
 
-def load_casks(catalog: Catalog, body: bytes) -> int:
+def load_casks(catalog: Catalog, body: bytes, platform: Platform | None = None) -> int:
     """Parse a `cask.json` body and write the cask catalog.
 
     Args:
         catalog: The catalog store to write into.
         body: Raw (decoded) `cask.json` bytes.
+        platform: Platform whose variation to apply; auto-detected if None.
 
     Returns:
         The number of casks written.
@@ -215,8 +216,10 @@ def load_casks(catalog: Catalog, body: bytes) -> int:
     Raises:
         CatalogFetchError: The body is empty or malformed.
     """
+    resolved: Platform | None = platform or current_platform()
+    tag: str | None = platform_tag(platform=resolved) if resolved else None
     entries: list[Any] = _decode_feed(name="cask", body=body)
-    casks: list[dict[str, Any]] = [_parse_cask(obj=obj) for obj in entries]
+    casks: list[dict[str, Any]] = [_parse_cask(obj=obj, tag=tag) for obj in entries]
     catalog.write_casks(casks=casks)
 
     return len(casks)
@@ -283,15 +286,22 @@ def _parse_formula(
     return row, obj_deps, obj_aliases
 
 
-def _parse_cask(obj: dict[str, Any]) -> dict[str, Any]:
+def _parse_cask(obj: dict[str, Any], tag: str | None = None) -> dict[str, Any]:
     """Trim one cask entry to its catalog row.
+
+    The top level describes arm64 on the newest macOS; the host's exact-tag
+    variation overrides it.
 
     Args:
         obj: The cask object to parse.
+        tag: The host's platform tag, or None to keep the top level.
 
     Returns:
         The parsed cask row.
     """
+    if tag and (variation := (obj.get("variations") or {}).get(tag)):
+        obj = obj | variation
+
     names: Any = obj.get("name") or []
     display_name: str | None = names[0] if isinstance(names, list) and names else None
 
