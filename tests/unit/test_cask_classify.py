@@ -82,6 +82,42 @@ class TestClassify:
         row = cask_row(artifacts=[{"app": ["Foo.app"]}], depends_on=depends_on)
         assert classify(row, SEQUOIA) == expected
 
+    @pytest.mark.parametrize(
+        ("fields", "reason"),
+        [
+            pytest.param(
+                {"container": {"nested": "Foo.dmg"}},
+                "`container` unpacking",
+                id="nested",
+            ),
+            pytest.param(
+                {"container": {"type": "naked"}}, "`container` unpacking", id="naked"
+            ),
+            pytest.param(
+                {"url_specs": {"branch": "main", "only_path": "fonts"}},
+                "`url branch:`",
+                id="git",
+            ),
+            pytest.param(
+                {"url_specs": {"user_agent": ":fake"}}, "`url user_agent:`", id="header"
+            ),
+            pytest.param(
+                {"url_specs": {"using": "post", "data": {"a": "b"}}},
+                "`url data:`",
+                id="post",
+            ),
+            pytest.param(
+                {"language_variations": [{"languages": ["de"], "default": False}]},
+                "`language` variants",
+                id="languages",
+            ),
+        ],
+    )
+    def test_download_brew_alone_can_fetch(self, fields, reason) -> None:
+        """Test that a download only brew can fetch or unpack goes to brew up front."""
+        row = cask_row(artifacts=[{"app": ["Foo.app"]}], **fields)
+        assert classify(row, SEQUOIA) == ("brew", reason)
+
     def test_off_macos_goes_to_brew(self) -> None:
         """Test that native casks are macOS-only."""
         linux = Platform(arch="amd64", os="linux")
@@ -92,7 +128,10 @@ class TestReadCaskOpts:
     """Tests for read_cask_opts."""
 
     def test_reads_what_brew_reads(self, monkeypatch) -> None:
-        """Test dirs (expanded, hyphens to underscores), switches and languages."""
+        """Test dirs (expanded, hyphens to underscores) and switches.
+
+        `--language` isn't a dir: only `languages` casks read it, and those go to brew.
+        """
         monkeypatch.setenv("HOME", "/Users/me")
         opts = read_cask_opts(
             "--appdir=~/Applications '--input-methoddir=/Library/Input Methods' "
@@ -104,11 +143,7 @@ class TestReadCaskOpts:
             "appdir": Path("/Users/me/Applications"),
             "input_methoddir": Path("/Library/Input Methods"),
         }
-        assert (opts.binaries, opts.require_sha, opts.languages) == (
-            False,
-            True,
-            ["de", "fr"],
-        )
+        assert (opts.binaries, opts.require_sha) == (False, True)
 
     def test_empty_means_brew_defaults(self) -> None:
         """Test that an unset variable changes nothing."""

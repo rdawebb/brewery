@@ -165,9 +165,6 @@ def _brew_reason(row: CaskRow, opts: CaskOpts) -> str:
     if not row.url or not row.version:
         return "no download"
 
-    if opts.languages:
-        return "--language"  # Only brew picks a cask's language variant
-
     if opts.require_sha and row.sha256 in (None, NO_CHECK):
         return "--require-sha"
 

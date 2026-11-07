@@ -55,13 +55,11 @@ class CaskOpts:
         dirs: `--<name>dir=` overrides, keyed as brew's config keys them.
         binaries: False for `--no-binaries`.
         require_sha: True for `--require-sha`.
-        languages: `--language=` values.
     """
 
     dirs: dict[str, Path] = field(default_factory=dict)
     binaries: bool = True
     require_sha: bool = False
-    languages: list[str] = field(default_factory=list)
 
 
 def read_cask_opts(raw: str) -> CaskOpts:
@@ -74,23 +72,20 @@ def read_cask_opts(raw: str) -> CaskOpts:
         The parsed options; unknown switches are ignored.
     """
     dirs: dict[str, Path] = {}
-    languages: list[str] = []
     binaries = True
     args = shlex.split(raw)
     for arg in args:
         flag, eq, value = arg.partition("=")
         key = flag.removeprefix("--").replace("-", "_")
 
-        if eq and key == "language":
-            languages.extend(value.split(","))
-
-        elif eq:
+        # Classify sends 'languages' casks to brew
+        if eq and key != "language":
             dirs[key] = Path(os.path.abspath(os.path.expanduser(value)))
 
         elif arg in ("--binaries", "--no-binaries"):
             binaries = arg == "--binaries"  # The last one wins
 
-    return CaskOpts(dirs, binaries, "--require-sha" in args, languages)
+    return CaskOpts(dirs, binaries, "--require-sha" in args)
 
 
 def classify(row: CaskRow, plat: Platform | None) -> tuple[Route, str]:
@@ -105,6 +100,15 @@ def classify(row: CaskRow, plat: Platform | None) -> tuple[Route, str]:
     """
     if plat is None or plat.os != "macos" or plat.macos_major is None:
         return "brew", "native casks need macOS"
+
+    if row.container:
+        return "brew", "`container` unpacking"
+
+    if row.url_specs:  # git checkout, headers or POST: only brew's strategies fetch
+        return "brew", f"`url {min(row.url_specs)}:`"
+
+    if row.language_variations:
+        return "brew", "`language` variants"  # brew picks one from the locale
 
     for stanza in row.artifacts or []:
         if not isinstance(stanza, dict):

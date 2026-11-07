@@ -317,6 +317,9 @@ def _parse_cask(obj: dict[str, Any], tag: str | None = None) -> dict[str, Any]:
         "auto_updates": bool(obj.get("auto_updates", False)),
         "artifacts": _json_text(obj.get("artifacts")),
         "depends_on": _json_text(obj.get("depends_on")),
+        "container": _json_text(obj.get("container")),
+        "url_specs": _json_text(obj.get("url_specs")),
+        "language_variations": _json_text(obj.get("language_variations")),
         "deprecated": bool(obj.get("deprecated", False)),
         "disabled": bool(obj.get("disabled", False)),
     }

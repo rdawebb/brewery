@@ -287,9 +287,8 @@ def catalog(fixture_json) -> Generator[Catalog, None, None]:
     Yields:
         The populated Catalog.
     """
-    import orjson
-
     from brewery.core.catalog import Catalog
+    from brewery.core.catalog.parser import _parse_cask
 
     formula_data: dict = fixture_json["formula"]
     cask_data: dict = fixture_json["cask"]
@@ -332,28 +331,7 @@ def catalog(fixture_json) -> Generator[Catalog, None, None]:
 
     cat.write_formulae(formulae, deps, aliases)
 
-    casks = [
-        {
-            "token": c["token"],
-            "name": c["name"][0] if c.get("name") else None,
-            "desc": c.get("desc"),
-            "homepage": c.get("homepage"),
-            "tap": c.get("tap"),
-            "version": c.get("version"),
-            "sha256": c.get("sha256"),
-            "url": c.get("url"),
-            "auto_updates": int(c.get("autobump", False)),
-            "artifacts": orjson.dumps(c["artifacts"]).decode()
-            if c.get("artifacts")
-            else None,
-            "depends_on": orjson.dumps(c["depends_on"]).decode()
-            if c.get("depends_on")
-            else None,
-            "deprecated": int(c.get("deprecated", False)),
-            "disabled": int(c.get("disabled", False)),
-        }
-        for c in cask_data["casks"]
-    ]
+    casks = [_parse_cask(c) for c in cask_data["casks"]]
 
     cat.write_casks(casks)
 

@@ -50,6 +50,9 @@ CREATE TABLE cask (
     auto_updates INTEGER NOT NULL DEFAULT 0,
     artifacts    TEXT,            -- JSON; enough to tell app vs pkg for later
     depends_on   TEXT,            -- JSON
+    container    TEXT,            -- JSON; `nested:`/`type:` unpacking
+    url_specs    TEXT,            -- JSON; git, header and POST download options
+    language_variations TEXT,     -- JSON; per-locale url/sha256 overrides
     deprecated   INTEGER NOT NULL DEFAULT 0,
     disabled     INTEGER NOT NULL DEFAULT 0
 );
@@ -105,6 +108,9 @@ _CASK_COLUMNS: tuple[str, ...] = (
     "auto_updates",
     "artifacts",
     "depends_on",
+    "container",
+    "url_specs",
+    "language_variations",
     "deprecated",
     "disabled",
 )
@@ -163,6 +169,9 @@ class CaskRow:
     auto_updates: bool
     artifacts: Any | None  # parsed JSON (list/dict) or None
     depends_on: Any | None  # parsed JSON (dict) or None
+    container: Any | None
+    url_specs: Any | None
+    language_variations: Any | None
     deprecated: bool
     disabled: bool
 
@@ -237,6 +246,9 @@ def _cask_from_row(row: sqlite3.Row) -> CaskRow:
         auto_updates=bool(row["auto_updates"]),
         artifacts=_json_or_none(row["artifacts"]),
         depends_on=_json_or_none(row["depends_on"]),
+        container=_json_or_none(row["container"]),
+        url_specs=_json_or_none(row["url_specs"]),
+        language_variations=_json_or_none(row["language_variations"]),
         deprecated=bool(row["deprecated"]),
         disabled=bool(row["disabled"]),
     )

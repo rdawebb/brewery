@@ -415,6 +415,28 @@ class TestParseCask:
         assert row["artifacts"] is None
         assert row["depends_on"] is None
 
+    def test_download_options_are_json_text(self) -> None:
+        """Test that container, url_specs and language_variations are kept for classify.
+
+        A variation can set its own `container`, so it's read after the host's
+        variation is merged.
+        """
+        variations = {"sonoma": {"container": {"nested": "Foo.dmg"}}}
+        language_variations = [{"languages": ["de"], "default": False, "url": "u"}]
+        row = _parse_cask(
+            self._obj(
+                url_specs={"user_agent": ":fake"},
+                language_variations=language_variations,
+                variations=variations,
+            ),
+            tag="sonoma",
+        )
+
+        assert orjson.loads(row["container"]) == {"nested": "Foo.dmg"}
+        assert orjson.loads(row["url_specs"]) == {"user_agent": ":fake"}
+        assert orjson.loads(row["language_variations"]) == language_variations
+        assert _parse_cask(self._obj())["container"] is None
+
     @pytest.mark.parametrize(
         ("tag", "url"),
         [

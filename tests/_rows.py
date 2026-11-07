@@ -66,6 +66,9 @@ def cask_dict(token: str, **overrides: Any) -> dict[str, Any]:
         "auto_updates": 0,
         "artifacts": None,
         "depends_on": None,
+        "container": None,
+        "url_specs": None,
+        "language_variations": None,
         "deprecated": 0,
         "disabled": 0,
     }

@@ -41,6 +41,7 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
+    "brotli>=1.2.1",                      # CVE-2026-111497
     "httpx2[brotli,zstd]>=2.16.0,<3.0.0",
     "orjson>=3.12.0,<4.0.0",
     "pygments>=2.20.0",
