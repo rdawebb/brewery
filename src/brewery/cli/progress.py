@@ -269,7 +269,11 @@ class ProgressReporter:
             self._progress.remove_task(self._finished.popleft())
 
     def end(self) -> None:
-        """Cancel a pending reveal and stop the live display (clears it)."""
+        """Cancel a pending reveal, stop the live display (clears it) and reset.
+
+        Resetting lets one command run several transactions, such as a cask's
+        formula dependencies and then the casks.
+        """
         if self._reveal_handle is not None:
             self._reveal_handle.cancel()
             self._reveal_handle = None
@@ -277,3 +281,11 @@ class ProgressReporter:
         if self._started:
             self._progress.stop()
             self._started = False
+
+        for tid in self._progress.task_ids:
+            self._progress.remove_task(tid)
+
+        self._overall = None
+        self._total = self._done = 0
+        self._tasks.clear()
+        self._finished.clear()

@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import operator
+import os
+import shlex
 from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 from brewery.core.catalog import CaskRow
@@ -41,6 +45,52 @@ _COMPARE: dict[str, Callable[[int, int], bool]] = {
     "<": operator.lt,
     "==": operator.eq,
 }
+
+
+@dataclass(frozen=True)
+class CaskOpts:
+    """The parts of `HOMEBREW_CASK_OPTS` a native install has to honour.
+
+    Attributes:
+        dirs: `--<name>dir=` overrides, keyed as brew's config keys them.
+        binaries: False for `--no-binaries`.
+        require_sha: True for `--require-sha`.
+        languages: `--language=` values.
+    """
+
+    dirs: dict[str, Path] = field(default_factory=dict)
+    binaries: bool = True
+    require_sha: bool = False
+    languages: list[str] = field(default_factory=list)
+
+
+def read_cask_opts(raw: str) -> CaskOpts:
+    """Parse `HOMEBREW_CASK_OPTS` the way brew's `Cask::Config#env` does.
+
+    Args:
+        raw: The variable's value.
+
+    Returns:
+        The parsed options; unknown switches are ignored.
+    """
+    dirs: dict[str, Path] = {}
+    languages: list[str] = []
+    binaries = True
+    args = shlex.split(raw)
+    for arg in args:
+        flag, eq, value = arg.partition("=")
+        key = flag.removeprefix("--").replace("-", "_")
+
+        if eq and key == "language":
+            languages.extend(value.split(","))
+
+        elif eq:
+            dirs[key] = Path(os.path.abspath(os.path.expanduser(value)))
+
+        elif arg in ("--binaries", "--no-binaries"):
+            binaries = arg == "--binaries"  # The last one wins
+
+    return CaskOpts(dirs, binaries, "--require-sha" in args, languages)
 
 
 def classify(row: CaskRow, plat: Platform | None) -> tuple[Route, str]:

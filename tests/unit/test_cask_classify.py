@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from _rows import cask_row
 
 from brewery.core.host import Platform
-from brewery.providers.cask import classify
+from brewery.providers.cask import classify, read_cask_opts
 
 SEQUOIA = Platform(arch="arm64", os="macos", macos_major=15)
 
@@ -84,3 +86,32 @@ class TestClassify:
         """Test that native casks are macOS-only."""
         linux = Platform(arch="amd64", os="linux")
         assert classify(cask_row(artifacts=[{"font": ["a.ttf"]}]), linux)[0] == "brew"
+
+
+class TestReadCaskOpts:
+    """Tests for read_cask_opts."""
+
+    def test_reads_what_brew_reads(self, monkeypatch) -> None:
+        """Test dirs (expanded, hyphens to underscores), switches and languages."""
+        monkeypatch.setenv("HOME", "/Users/me")
+        opts = read_cask_opts(
+            "--appdir=~/Applications '--input-methoddir=/Library/Input Methods' "
+            "--no-binaries --binaries --no-binaries --require-sha --language=de,fr "
+            "--unknown"
+        )
+
+        assert opts.dirs == {
+            "appdir": Path("/Users/me/Applications"),
+            "input_methoddir": Path("/Library/Input Methods"),
+        }
+        assert (opts.binaries, opts.require_sha, opts.languages) == (
+            False,
+            True,
+            ["de", "fr"],
+        )
+
+    def test_empty_means_brew_defaults(self) -> None:
+        """Test that an unset variable changes nothing."""
+        opts = read_cask_opts("")
+
+        assert (opts.dirs, opts.binaries, opts.require_sha) == ({}, True, False)

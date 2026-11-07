@@ -41,7 +41,7 @@ async def install_packages(
         kind: Kind of the package(s) - formula (default) or cask.
         env: Brewery environment (paths), resolved by the pipeline if omitted.
         formula: Formula backend for the per-formula brew fallback.
-        cask: Cask backend, which handles casks wholesale.
+        cask: Cask backend, for the casks brewery can't install natively.
         progress: Optional progress sink for the native pipeline.
 
     Returns:
@@ -51,7 +51,14 @@ async def install_packages(
         BrewCommandError: Propagated from provider.
     """
     if kind == PackageKind.CASK:
-        await install_casks(names, backend=cask)
+        await install_casks(
+            names,
+            repo=repo,
+            backend=cask,
+            formula=formula,
+            env=env,
+            progress=progress,
+        )
 
     else:
         await run_install(

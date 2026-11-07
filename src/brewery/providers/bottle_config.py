@@ -6,8 +6,8 @@ keg: they are copied in, so the user owns them from then on and an uninstall
 leaves them behind.
 
 The copy never clobbers an edited config. A destination that differs from the
-bottled file is left alone and the new default lands beside it as `<name>.default`
--- unless the destination is itself an untouched default from an older keg of the
+bottled file is left alone and the new default lands beside it as `<name>.default`,
+unless the destination is itself an untouched default from an older keg of the
 same formula, in which case it is advanced in place.
 """
 

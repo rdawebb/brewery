@@ -144,6 +144,21 @@ class TestBegin:
 
         assert reporter._started is False
 
+    async def test_a_second_transaction_starts_fresh(self, reporter) -> None:
+        """Test that a cask run after its formula dependencies' run counts anew."""
+        reporter.begin(2)
+        reporter.finish("dep", Outcome.NATIVE.value)
+        reporter.end()
+
+        reporter.begin(3)
+
+        assert [t.fields["name"] for t in reporter._progress.tasks] == [
+            "[bold green]Installing[/bold green]"
+        ]
+        assert (reporter._done, reporter._total) == (0, 3)
+
+        reporter.end()
+
 
 class TestUpdate:
     """Tests per-row glyph and activity transitions."""

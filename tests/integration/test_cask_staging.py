@@ -15,7 +15,12 @@ from _tar import make_tar
 from brewery.core.errors import ExtractionError, LinkError
 from brewery.core.fs_state import scan_installed
 from brewery.core.models import PackageKind
-from brewery.providers.caskroom import QUARANTINE, install_artifacts, stage
+from brewery.providers.caskroom import (
+    ALT_NAMES,
+    QUARANTINE,
+    install_artifacts,
+    stage,
+)
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "darwin", reason="native casks are macOS-only"
@@ -291,9 +296,26 @@ class TestInstallArtifacts:
         for rel, source in links.items():
             assert os.readlink(brew.prefix / rel) == str(source), rel
         assert os.access(staged / "bin" / "foo-cli", os.X_OK)
+        alt = subprocess.run(
+            ["xattr", "-p", ALT_NAMES, str(app)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert alt.stdout.strip() == '("Foo.app")'
 
         config = json.loads((staged.parent / ".metadata" / "config.json").read_text())
-        assert config["default"]["appdir"] == str(dirs["appdir"])
+        assert config["default"]["appdir"] == "/Applications"
+        assert config["env"]["appdir"] == str(dirs["appdir"])
+
+    def test_no_binaries_skips_binary_links(self, brew, staged, dirs) -> None:
+        """Test that --no-binaries leaves bin/ alone and still links the rest."""
+        row = cask_row("foo", version="1.0", artifacts=FULL)
+
+        install_artifacts(row, staged, brew.env, dirs=dirs, binaries=False)
+
+        assert not (brew.prefix / "bin").exists()
+        assert (brew.prefix / "share" / "man" / "man1" / "foo.1.gz").is_symlink()
 
     def test_conflict_puts_everything_back(self, brew, staged, dirs) -> None:
         """Test that a taken target raises and restores what was already moved."""

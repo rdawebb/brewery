@@ -35,6 +35,7 @@ from brewery.providers.receipt import RECEIPT_NAME, current_arch, dumps_bytes
 log: BreweryLogger = get_logger(name=__name__)
 
 QUARANTINE = "com.apple.quarantine"
+ALT_NAMES = "com.apple.metadata:kMDItemAlternateNames"
 
 # brew's defaults for the dirs moved artifacts go to, keyed as its config.json keys them
 DEFAULT_DIRS: Mapping[str, Path] = {
@@ -87,13 +88,15 @@ _DMG_METADATA = frozenset(
     }
 )
 
-# Archives brewery can't open; raising hands the cask back to brew
+# Archives brewery can't open; raising falls back to brew
 _UNSUPPORTED = {b"7z\xbc\xaf": "7z", b"Rar!": "rar", b"xar!": "xar"}
 
 _TAR_MAGIC = (b"\x1f\x8b", b"BZh", b"\xfd7zXZ", b"\x28\xb5\x2f\xfd")
 
 
-def stage(row: CaskRow, download: Path, caskroom: Path) -> Path:
+def stage(
+    row: CaskRow, download: Path, caskroom: Path, *, on_request: bool = True
+) -> Path:
     """Unpack `download` into `Caskroom/<token>/<version>/` and record it as brew does.
 
     The download is quarantined, and the quarantine copied onto everything
@@ -104,6 +107,7 @@ def stage(row: CaskRow, download: Path, caskroom: Path) -> Path:
         row: The cask's catalog row.
         download: The verified download, from the downloader's cache.
         caskroom: The Caskroom directory.
+        on_request: False when it's installed for another cask's `depends_on`.
 
     Returns:
         The staged version directory.
@@ -141,7 +145,7 @@ def stage(row: CaskRow, download: Path, caskroom: Path) -> Path:
         shutil.rmtree(scratch, ignore_errors=True)
 
     try:
-        _write_metadata(row, token_dir)
+        _write_metadata(row, token_dir, on_request=on_request)
 
     except BaseException:
         shutil.rmtree(staged, ignore_errors=True)
@@ -150,12 +154,30 @@ def stage(row: CaskRow, download: Path, caskroom: Path) -> Path:
     return staged
 
 
-def _write_metadata(row: CaskRow, token_dir: Path) -> None:
-    """Write the installed caskfile and receipt brew 7 reads for an API cask.
+def unstage(row: CaskRow, caskroom: Path) -> None:
+    """Remove what `stage` wrote, and the cask's dir if nothing else is in it.
+
+    Args:
+        row: The cask's catalog row.
+        caskroom: The Caskroom directory.
+    """
+    token_dir = caskroom / row.token
+    shutil.rmtree(token_dir / str(row.version), ignore_errors=True)
+    shutil.rmtree(token_dir / ".metadata" / str(row.version), ignore_errors=True)
+    if token_dir.is_dir() and all(p.name == ".metadata" for p in token_dir.iterdir()):
+        shutil.rmtree(token_dir)
+
+
+def _write_metadata(row: CaskRow, token_dir: Path, *, on_request: bool) -> None:
+    """Write the installed caskfile and receipt for an API cask.
+
+    `runtime_dependencies` stays empty: brew's autoremove reads a cask's
+    `depends_on` from the cask itself, not from this receipt.
 
     Args:
         row: The cask's catalog row.
         token_dir: The cask's Caskroom directory.
+        on_request: Whether the user asked for it, rather than a dependent cask.
     """
     version = str(row.version)
     # The `target` key is install-time only
@@ -177,8 +199,8 @@ def _write_metadata(row: CaskRow, token_dir: Path) -> None:
         "loaded_from_api": True,
         "loaded_from_internal_api": False,
         "uninstall_flight_blocks": False,
-        "installed_as_dependency": False,
-        "installed_on_request": True,
+        "installed_as_dependency": not on_request,
+        "installed_on_request": on_request,
         "time": int(time.time()),
         "runtime_dependencies": {},
         "source": {
@@ -200,6 +222,7 @@ def install_artifacts(
     env: BreweryENV,
     *,
     dirs: Mapping[str, Path] | None = None,
+    binaries: bool = True,
 ) -> None:
     """Move and link a staged cask's artifacts into place, as brew does.
 
@@ -212,14 +235,16 @@ def install_artifacts(
         row: The cask's catalog row.
         staged: The version dir `stage` returned.
         env: The Homebrew layout.
-        dirs: Overrides for `DEFAULT_DIRS`, which brew reads back from
-            `.metadata/config.json` to uninstall.
+        dirs: Overrides for `DEFAULT_DIRS`, from `HOMEBREW_CASK_OPTS`; brew
+            reads both back from `.metadata/config.json` to uninstall.
+        binaries: False skips `binary` artifacts, as `--no-binaries` does.
 
     Raises:
         LinkError: If a target is already taken.
         CellarError: If an artifact's source is missing or can't be moved.
     """
-    dirs = {**DEFAULT_DIRS, **(dirs or {})}
+    overrides = dict(dirs or {})
+    dirs = {**DEFAULT_DIRS, **overrides}
     done: list[tuple[str, Path, Path]] = []
     try:
         # The feed lists artifacts in brew's install order: apps before binaries into them
@@ -227,6 +252,9 @@ def install_artifacts(
             for key, args in stanza.items():
                 if key not in _MOVED and key not in _LINKED:
                     continue  # `uninstall`, `zap` and the feed's own `target` hint
+
+                if key == "binary" and not binaries:
+                    continue
 
                 source, target = _locate(key, args, staged, env, dirs)
                 if not source.exists():
@@ -260,8 +288,8 @@ def install_artifacts(
         subprocess.run(["qlmanage", "-r"], capture_output=True, check=False)
 
     config = {
-        "default": {k: str(v) for k, v in dirs.items()},
-        "env": {},
+        "default": {k: str(v) for k, v in DEFAULT_DIRS.items()},
+        "env": {k: str(v) for k, v in overrides.items()},
         "explicit": {},
     }
     (staged.parent / ".metadata" / "config.json").write_bytes(dumps_bytes(config))
@@ -343,6 +371,36 @@ def _move_out(source: Path, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     _relocate(source, target)
     source.symlink_to(target)
+    _add_alt_name(target, source.name)
+
+
+def _add_alt_name(target: Path, name: str) -> None:
+    """Tell Spotlight a renamed artifact's original name.
+
+    Best-effort, unlike brew: cosmetic, so not worth failing the install.
+
+    Args:
+        target: The moved artifact.
+        name: Its name in the cask.
+    """
+    if name.casefold() == target.name.casefold():
+        return
+
+    def xattr(*args: str) -> str:
+        cmd = ["xattr", *args, str(target)]
+        return subprocess.run(cmd, capture_output=True, text=True, check=False).stdout
+
+    names = xattr("-p", ALT_NAMES).strip()
+    if names.startswith("(") and names.endswith(")"):
+        names = names[1:-1]
+
+    # Some apps ship read-only, so make the top level writable first
+    subprocess.run(
+        ["chmod", "--", "u+rw", str(target), str(target.resolve())],
+        capture_output=True,
+        check=False,
+    )
+    xattr("-w", ALT_NAMES, f'({names}{", " if names else ""}"{name}")')
 
 
 def _link(source: Path, target: Path, cellar: Path, *, binary: bool) -> bool:

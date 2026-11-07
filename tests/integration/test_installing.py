@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import shutil
+import subprocess
+import sys
+
+import pytest
 from _repo_helpers import _add_alias, _provider_calls
+from _rows import cask_dict
 
 from brewery.core.models import PackageKind
 from brewery.services.install import install_packages
@@ -76,3 +84,197 @@ class TestInstall:
         )
         assert [p.name for p in installed] == ["yazi"]
         assert failures == []
+
+
+def _zip_app(tmp_path, cache) -> str:
+    """Zip a minimal `Foo.app` into the download cache, as if already fetched.
+
+    Args:
+        tmp_path: The pytest tmp_path fixture.
+        cache: The downloader's cache dir.
+
+    Returns:
+        The zip's sha256, which is its cache key.
+    """
+    macos = tmp_path / "src" / "Foo.app" / "Contents" / "MacOS"
+    macos.mkdir(parents=True)
+    (macos / "foo").write_text("#!/bin/sh\n")
+    archive = tmp_path / "foo.zip"
+    subprocess.run(
+        ["ditto", "-c", "-k", str(tmp_path / "src"), str(archive)], check=True
+    )
+    sha = hashlib.sha256(archive.read_bytes()).hexdigest()
+    cache.mkdir(parents=True, exist_ok=True)
+    shutil.copy(archive, cache / sha)
+    return sha
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="native casks are macOS-only")
+class TestInstallCasks:
+    """Tests for routing casks between the native installer and brew."""
+
+    @pytest.fixture
+    def appdir(self, tmp_path, monkeypatch):
+        """Point brew's appdir away from /Applications, as HOMEBREW_CASK_OPTS can.
+
+        Args:
+            tmp_path: The pytest tmp_path fixture.
+            monkeypatch: The pytest monkeypatch fixture.
+
+        Returns:
+            The temporary appdir.
+        """
+        monkeypatch.setenv("HOMEBREW_CASK_OPTS", f"--appdir={tmp_path / 'apps'}")
+        return tmp_path / "apps"
+
+    @pytest.fixture
+    def casks(self, repo, mock_env, tmp_path, appdir):
+        """Catalog casks over one cached zip: `name` -> its depends_on and artifacts.
+
+        Args:
+            repo: The repository fixture.
+            mock_env: The mock environment fixture.
+            tmp_path: The pytest tmp_path fixture.
+            appdir: The temporary appdir fixture.
+
+        Returns:
+            A callable writing `{token: (depends_on, artifacts)}` to the catalog.
+        """
+        sha = _zip_app(tmp_path, mock_env.bottle_cache)
+
+        def write(spec: dict) -> None:
+            repo.catalog.write_casks(
+                [
+                    cask_dict(
+                        token,
+                        version="1.0",
+                        url=f"https://example.org/{token}.zip",
+                        sha256=sha,
+                        depends_on=json.dumps(deps) if deps else None,
+                        artifacts=json.dumps(artifacts),
+                    )
+                    for token, (deps, artifacts) in spec.items()
+                ]
+            )
+
+        return write
+
+    @staticmethod
+    def _receipt(env, token) -> dict:
+        """Read a cask's install receipt."""
+        return json.loads(
+            (env.caskroom / token / ".metadata" / "INSTALL_RECEIPT.json").read_text()
+        )
+
+    async def test_native_cask_skips_brew(
+        self, repo, mock_brew, mock_env, casks, appdir
+    ) -> None:
+        """Test that a simple cask is installed natively, honouring --appdir."""
+        casks({"foo": (None, [{"app": ["Foo.app"]}])})
+
+        installed, failures = await install_packages(
+            repo, ["foo"], kind=PackageKind.CASK
+        )
+
+        assert ([p.name for p in installed], failures) == (["foo"], [])
+        assert _provider_calls(mock_brew, "install") == []
+        assert (appdir / "Foo.app" / "Contents" / "MacOS" / "foo").is_file()
+        config = json.loads(
+            (mock_env.caskroom / "foo" / ".metadata" / "config.json").read_text()
+        )
+        assert config["env"] == {"appdir": str(appdir)}
+        assert self._receipt(mock_env, "foo")["installed_on_request"] is True
+
+    async def test_only_unsupported_casks_go_to_brew(
+        self, repo, mock_brew, casks
+    ) -> None:
+        """Test that brew gets the pkg cask and the unknown name, and nothing else."""
+        casks(
+            {
+                "foo": (None, [{"app": ["Foo.app"]}]),
+                "bar": (None, [{"pkg": ["Bar.pkg"]}]),
+            }
+        )
+
+        await install_packages(
+            repo, ["foo", "bar", "nope", "iina"], kind=PackageKind.CASK
+        )
+
+        assert _provider_calls(mock_brew, "install") == [
+            ("brew", "install", "--cask", "bar", "nope")
+        ]
+
+    async def test_failed_install_is_unstaged_and_goes_to_brew(
+        self, repo, mock_brew, mock_env, casks, appdir
+    ) -> None:
+        """Test that a taken target hands the cask to brew, leaving no Caskroom entry."""
+        (appdir / "Foo.app").mkdir(parents=True)
+        casks({"foo": (None, [{"app": ["Foo.app"]}])})
+
+        await install_packages(repo, ["foo"], kind=PackageKind.CASK)
+
+        assert _provider_calls(mock_brew, "install") == [
+            ("brew", "install", "--cask", "foo")
+        ]
+        assert not (mock_env.caskroom / "foo").exists()
+        assert list((appdir / "Foo.app").iterdir()) == []
+
+    async def test_cask_dependency_is_installed_first(
+        self, repo, mock_brew, mock_env, casks, appdir
+    ) -> None:
+        """Test that a depends_on cask is installed natively, as a dependency."""
+        casks(
+            {
+                "foo": (None, [{"app": ["Foo.app"]}]),
+                "baz": (
+                    {"cask": ["foo"]},
+                    [{"app": ["Foo.app", {"target": "Baz.app"}]}],
+                ),
+            }
+        )
+
+        installed, _ = await install_packages(repo, ["baz"], kind=PackageKind.CASK)
+
+        assert [p.name for p in installed] == ["baz"]
+        assert _provider_calls(mock_brew, "install") == []
+        assert (appdir / "Baz.app").is_dir()
+        assert self._receipt(mock_env, "foo")["installed_as_dependency"] is True
+        assert self._receipt(mock_env, "baz")["installed_as_dependency"] is False
+
+    async def test_brew_only_dependency_sends_the_dependent_to_brew(
+        self, repo, mock_brew, casks
+    ) -> None:
+        """Test that brew is given the dependent, and installs the dependency itself."""
+        casks(
+            {
+                "bar": (None, [{"pkg": ["Bar.pkg"]}]),
+                "foo": ({"cask": ["bar"]}, [{"app": ["Foo.app"]}]),
+            }
+        )
+
+        await install_packages(repo, ["foo"], kind=PackageKind.CASK)
+
+        assert _provider_calls(mock_brew, "install") == [
+            ("brew", "install", "--cask", "foo")
+        ]
+
+    @pytest.mark.parametrize(
+        ("formula", "brewed"),
+        [
+            pytest.param("yazi", [], id="installed"),
+            pytest.param(
+                "ripgrep", [("brew", "install", "--cask", "foo")], id="unbottled"
+            ),
+        ],
+    )
+    async def test_formula_dependency_gates_the_native_install(
+        self, repo, mock_brew, mock_env, casks, formula, brewed
+    ) -> None:
+        """Test that a cask goes to brew only when its formula dependency fails."""
+        # A receipt makes the fixture's yazi keg a complete install
+        (mock_env.cellar / "yazi" / "26.5.6" / "INSTALL_RECEIPT.json").write_text("{}")
+        casks({"foo": ({"formula": [formula]}, [{"app": ["Foo.app"]}])})
+
+        await install_packages(repo, ["foo"], kind=PackageKind.CASK)
+
+        assert _provider_calls(mock_brew, "install") == brewed
