@@ -1,9 +1,10 @@
-"""Integration tests for staging cask downloads into a brew-shaped Caskroom."""
+"""Integration tests for staging casks into a brew-shaped Caskroom and installing them."""
 
 from __future__ import annotations
 
 import gzip
 import json
+import os
 import subprocess
 import sys
 
@@ -11,10 +12,10 @@ import pytest
 from _rows import cask_row
 from _tar import make_tar
 
-from brewery.core.errors import ExtractionError
+from brewery.core.errors import ExtractionError, LinkError
 from brewery.core.fs_state import scan_installed
 from brewery.core.models import PackageKind
-from brewery.providers.caskroom import QUARANTINE, stage
+from brewery.providers.caskroom import QUARANTINE, install_artifacts, stage
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "darwin", reason="native casks are macOS-only"
@@ -197,3 +198,144 @@ class TestStage:
             ".metadata",
             "1.0",
         ]
+
+
+# In brew's install order, with the feed's sibling `target` hints, one of them wrong
+FULL = [
+    {"uninstall": [{"quit": "org.example.foo"}]},
+    {"app": ["Foo.app", {"target": "Foo Renamed.app"}], "target": "/Applications/x"},
+    {"font": ["Foo.ttf"], "target": "/$HOME/Library/Fonts/Foo.ttf"},
+    {"qlplugin": ["Foo.qlgenerator"]},
+    {
+        "artifact": ["share", {"target": "$HOMEBREW_PREFIX/share/foo"}],
+        "target": "$HOMEBREW_PREFIX/share/foo",
+    },
+    {
+        "binary": ["$APPDIR/Foo Renamed.app/Contents/MacOS/foo", {"target": "foo"}],
+        "target": "$HOMEBREW_PREFIX/bin/$APPDIR/foo",
+    },
+    {"binary": ["bin/foo-cli"]},
+    {"manpage": ["$APPDIR/Foo Renamed.app/Contents/Resources/foo.1.gz"]},
+    {"bash_completion": ["completions/foo.bash"]},
+    {"zsh_completion": ["completions/foo.zsh"]},
+    {"fish_completion": ["completions/foo"]},
+]
+
+
+class TestInstallArtifacts:
+    """Tests for install_artifacts."""
+
+    @pytest.fixture
+    def staged(self, brew, tmp_path):
+        """A staged cask carrying every simple artifact type.
+
+        Args:
+            brew: The hermetic Homebrew layout.
+            tmp_path: The pytest tmp_path fixture.
+
+        Returns:
+            The staged version dir.
+        """
+        src = tmp_path / "src"
+        _app(src)
+        (src / "Foo.app" / "Contents" / "Resources").mkdir()
+        (src / "Foo.app" / "Contents" / "Resources" / "foo.1.gz").write_bytes(b"")
+        (src / "Foo.ttf").write_bytes(b"font")
+        (src / "Foo.qlgenerator").mkdir()
+        (src / "share").mkdir()
+        (src / "bin").mkdir()
+        (src / "bin" / "foo-cli").write_text("#!/bin/sh\n")
+        (src / "completions").mkdir()
+        for name in ("foo.bash", "foo.zsh", "foo"):
+            (src / "completions" / name).write_text("")
+
+        archive = tmp_path / "download"
+        subprocess.run(["ditto", "-c", "-k", str(src), str(archive)], check=True)
+        row = cask_row("foo", version="1.0", url="https://e.org/f.zip", artifacts=FULL)
+        return stage(row, archive, brew.caskroom)
+
+    @pytest.fixture
+    def dirs(self, tmp_path):
+        """Temporary stand-ins for /Applications and ~/Library.
+
+        Args:
+            tmp_path: The pytest tmp_path fixture.
+
+        Returns:
+            The dirs mapping.
+        """
+        return {k: tmp_path / k for k in ("appdir", "fontdir", "qlplugindir")}
+
+    def test_installs_every_simple_artifact(self, brew, staged, dirs) -> None:
+        """Test moves, links, completion renames and the config brew reads back."""
+        row = cask_row("foo", version="1.0", artifacts=FULL)
+
+        install_artifacts(row, staged, brew.env, dirs=dirs)
+
+        app = dirs["appdir"] / "Foo Renamed.app"
+        assert (app / "Contents" / "MacOS" / "foo").is_file()
+        assert os.readlink(staged / "Foo.app") == str(app)
+        assert (dirs["fontdir"] / "Foo.ttf").read_bytes() == b"font"
+        assert (dirs["qlplugindir"] / "Foo.qlgenerator").is_dir()
+        assert (brew.prefix / "share" / "foo").is_dir()
+        assert (staged / "share").is_symlink()
+
+        links = {
+            "bin/foo": app / "Contents" / "MacOS" / "foo",
+            "bin/foo-cli": staged / "bin" / "foo-cli",
+            "share/man/man1/foo.1.gz": app / "Contents" / "Resources" / "foo.1.gz",
+            "etc/bash_completion.d/foo": staged / "completions" / "foo.bash",
+            "share/zsh/site-functions/_foo": staged / "completions" / "foo.zsh",
+            "share/fish/vendor_completions.d/foo.fish": staged / "completions" / "foo",
+        }
+        for rel, source in links.items():
+            assert os.readlink(brew.prefix / rel) == str(source), rel
+        assert os.access(staged / "bin" / "foo-cli", os.X_OK)
+
+        config = json.loads((staged.parent / ".metadata" / "config.json").read_text())
+        assert config["default"]["appdir"] == str(dirs["appdir"])
+
+    def test_conflict_puts_everything_back(self, brew, staged, dirs) -> None:
+        """Test that a taken target raises and restores what was already moved."""
+        taken = brew.prefix / "bin" / "foo-cli"
+        taken.parent.mkdir()
+        taken.write_text("mine")
+        row = cask_row("foo", version="1.0", artifacts=FULL)
+
+        with pytest.raises(LinkError, match="foo-cli"):
+            install_artifacts(row, staged, brew.env, dirs=dirs)
+
+        assert (staged / "Foo.app").is_dir()
+        assert not (staged / "Foo.app").is_symlink()
+        assert list(dirs["appdir"].iterdir()) == []
+        assert not (brew.prefix / "bin" / "foo").is_symlink()
+        assert taken.read_text() == "mine"
+        assert not (staged.parent / ".metadata" / "config.json").exists()
+
+    def test_formula_owned_link_is_kept(self, brew, staged, dirs) -> None:
+        """Test that a binary a formula already links is skipped, as brew does."""
+        keg_bin = brew.cellar / "foo" / "1.0" / "bin"
+        keg_bin.mkdir(parents=True)
+        (keg_bin / "foo-cli").write_text("")
+        (brew.prefix / "bin").mkdir()
+        (brew.prefix / "bin" / "foo-cli").symlink_to(keg_bin / "foo-cli")
+        row = cask_row("foo", version="1.0", artifacts=FULL)
+
+        install_artifacts(row, staged, brew.env, dirs=dirs)
+
+        assert os.readlink(brew.prefix / "bin" / "foo-cli") == str(keg_bin / "foo-cli")
+
+    def test_rollback_keeps_a_link_it_found(self, brew, staged, dirs) -> None:
+        """Test that a link already in place survives a later conflict's rollback."""
+        found = brew.prefix / "bin" / "foo-cli"
+        found.parent.mkdir()
+        found.symlink_to(staged / "bin" / "foo-cli")
+        taken = brew.prefix / "etc" / "bash_completion.d" / "foo"
+        taken.parent.mkdir(parents=True)
+        taken.write_text("mine")
+        row = cask_row("foo", version="1.0", artifacts=FULL)
+
+        with pytest.raises(LinkError, match="bash_completion"):
+            install_artifacts(row, staged, brew.env, dirs=dirs)
+
+        assert os.readlink(found) == str(staged / "bin" / "foo-cli")

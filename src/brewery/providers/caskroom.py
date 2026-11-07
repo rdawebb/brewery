@@ -1,26 +1,67 @@
-"""Stage a cask's download into the Caskroom, laid out as brew lays it out.
+"""Stage a cask into the Caskroom and install its artifacts.
 
 macOS-only, like native casks themselves: `classify` sends every other host to brew.
 """
 
+# This file contains code derived from Homebrew (https://github.com/Homebrew/brew)
+# Copyright (c) 2009-present, Homebrew contributors
+# Licensed under BSD 2-Clause License (see LICENSE-HOMEBREW)
+#
+# Portions of this module reimplement Homebrew's keg cask installing logic.
+
 from __future__ import annotations
 
+import errno
 import os
 import plistlib
+import re
 import shutil
 import subprocess
 import tempfile
 import time
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from brewery.core.catalog import CaskRow
-from brewery.core.errors import ExtractionError
+from brewery.core.config import BreweryENV
+from brewery.core.errors import CellarError, ExtractionError, LinkError
+from brewery.core.logging import BreweryLogger, get_logger
 from brewery.providers.extractor import extract_tar
 from brewery.providers.receipt import RECEIPT_NAME, current_arch, dumps_bytes
 
+log: BreweryLogger = get_logger(name=__name__)
+
 QUARANTINE = "com.apple.quarantine"
+
+# brew's defaults for the dirs moved artifacts go to, keyed as its config.json keys them
+DEFAULT_DIRS: Mapping[str, Path] = {
+    "appdir": Path("/Applications"),
+    "fontdir": Path.home() / "Library" / "Fonts",
+    "qlplugindir": Path.home() / "Library" / "QuickLook",
+}
+
+# Artifacts moved out of the Caskroom, and the dir a relative target lands in
+_MOVED = {
+    "app": "appdir",
+    "suite": "appdir",
+    "font": "fontdir",
+    "qlplugin": "qlplugindir",
+    "artifact": None,  # brew requires an absolute target
+}
+
+# Artifacts symlinked into the prefix, and where under it
+_LINKED = {
+    "binary": "bin",
+    "manpage": "share/man",
+    "bash_completion": "etc/bash_completion.d",
+    "zsh_completion": "share/zsh/site-functions",
+    "fish_completion": "share/fish/vendor_completions.d",
+}
+
+_MANPAGE_SECTION = re.compile(r"\.([1-8]|n|l)(?:\.gz)?$")
 
 # brew's `Cask::Metadata::TIMESTAMP_FORMAT`, to the millisecond
 _TIMESTAMP_FORMAT = "%Y%m%d%H%M%S.%f"
@@ -151,6 +192,225 @@ def _write_metadata(row: CaskRow, token_dir: Path) -> None:
         "built_on": None,
     }
     (token_dir / ".metadata" / RECEIPT_NAME).write_bytes(dumps_bytes(receipt))
+
+
+def install_artifacts(
+    row: CaskRow,
+    staged: Path,
+    env: BreweryENV,
+    *,
+    dirs: Mapping[str, Path] | None = None,
+) -> None:
+    """Move and link a staged cask's artifacts into place, as brew does.
+
+    Apps, suites, fonts, Quick Look plugins and generic artifacts are moved out,
+    leaving a symlink in the version dir that brew's uninstall moves them back
+    over. Binaries, manpages and completions are symlinked into the prefix. On
+    failure, whatever was already installed is put back.
+
+    Args:
+        row: The cask's catalog row.
+        staged: The version dir `stage` returned.
+        env: The Homebrew layout.
+        dirs: Overrides for `DEFAULT_DIRS`, which brew reads back from
+            `.metadata/config.json` to uninstall.
+
+    Raises:
+        LinkError: If a target is already taken.
+        CellarError: If an artifact's source is missing or can't be moved.
+    """
+    dirs = {**DEFAULT_DIRS, **(dirs or {})}
+    done: list[tuple[str, Path, Path]] = []
+    try:
+        # The feed lists artifacts in brew's install order: apps before binaries into them
+        for stanza in row.artifacts or []:
+            for key, args in stanza.items():
+                if key not in _MOVED and key not in _LINKED:
+                    continue  # `uninstall`, `zap` and the feed's own `target` hint
+
+                source, target = _locate(key, args, staged, env, dirs)
+                if not source.exists():
+                    raise CellarError(
+                        f"{row.token}: {source} is not there", path=source
+                    )
+
+                if key in _MOVED:
+                    _move_out(source, target)
+
+                elif not _link(source, target, env.cellar, binary=key == "binary"):
+                    continue
+
+                done.append((key, source, target))
+
+    except BaseException:
+        for key, source, target in reversed(done):
+            try:
+                if key in _MOVED:
+                    source.unlink()
+                    _relocate(target, source)
+                else:
+                    target.unlink()
+
+            except (OSError, CellarError) as exc:
+                log.warning(f"couldn't put back {target}: {exc}")
+
+        raise
+
+    if any(key == "qlplugin" for key, _, _ in done):
+        subprocess.run(["qlmanage", "-r"], capture_output=True, check=False)
+
+    config = {
+        "default": {k: str(v) for k, v in dirs.items()},
+        "env": {},
+        "explicit": {},
+    }
+    (staged.parent / ".metadata" / "config.json").write_bytes(dumps_bytes(config))
+
+
+def _locate(
+    key: str, args: list[Any], staged: Path, env: BreweryENV, dirs: Mapping[str, Path]
+) -> tuple[Path, Path]:
+    """Resolve an artifact's source and target the way brew's `Relocated` does.
+
+    The feed's sibling `target` is computed before placeholders are expanded, so
+    it is wrong for absolute targets; the target is worked out from `args` instead.
+
+    Args:
+        key: The artifact's stanza key.
+        args: The stanza's value: a source, then an optional `{"target": …}`.
+        staged: The version dir.
+        env: The Homebrew layout.
+        dirs: The dirs moved artifacts go to.
+
+    Returns:
+        Tuple of (source, target).
+
+    Raises:
+        CellarError: If the artifact names no target brew could place.
+    """
+
+    def expand(value: str) -> str:
+        return (
+            value.replace("/$HOME", str(Path.home()))
+            .replace("$HOMEBREW_PREFIX", str(env.prefix))
+            .replace("$HOMEBREW_CELLAR", str(env.cellar))
+            .replace("$APPDIR", str(dirs["appdir"]))
+        )
+
+    source = staged / expand(args[0])  # Absolute source replaces `staged`
+    given = args[1].get("target") if len(args) > 1 else None
+    name = expand(given) if given else source.name
+
+    if key == "manpage":
+        if not (section := _MANPAGE_SECTION.search(args[0])):
+            raise CellarError(f"{args[0]} is not a man page name", path=source)
+
+        return source, env.prefix / _LINKED[key] / f"man{section[1]}" / source.name
+
+    if key == "bash_completion":
+        name = Path(name).stem
+    elif key == "zsh_completion" and not name.startswith("_"):
+        name = f"_{Path(name).stem}"
+    elif key == "fish_completion" and not name.endswith(".fish"):
+        name = f"{Path(name).stem}.fish"
+
+    target = Path(name).expanduser()
+    if target.is_absolute():
+        return source, target
+
+    if key in _LINKED:
+        return source, env.prefix / _LINKED[key] / target
+
+    if base := _MOVED[key]:
+        return source, dirs[base] / target
+
+    raise CellarError(f"{key} {args[0]} has no absolute target", path=source)
+
+
+def _move_out(source: Path, target: Path) -> None:
+    """Move an artifact to its target, leaving a symlink to it at the source.
+
+    Args:
+        source: The artifact in the version dir.
+        target: Where it goes.
+
+    Raises:
+        LinkError: If the target is already taken.
+    """
+    if os.path.lexists(target):
+        raise LinkError([(str(target), "an existing file")])
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _relocate(source, target)
+    source.symlink_to(target)
+
+
+def _link(source: Path, target: Path, cellar: Path, *, binary: bool) -> bool:
+    """Symlink `target` to `source`, as brew's `Symlinked` does.
+
+    Args:
+        source: The file in the Caskroom or an installed app.
+        target: The link to create.
+        cellar: The Cellar, whose formulae keep links they already own.
+        binary: Whether to make the source executable.
+
+    Returns:
+        Whether a link was created: False if it was already there or a formula
+        owns the target, so rollback leaves it alone.
+
+    Raises:
+        LinkError: If anything else is at the target.
+    """
+    if target.exists():
+        real = target.resolve()
+        if real == source.resolve():
+            return False  # Already linked
+
+        if target.is_symlink() and real.is_relative_to(cellar.resolve()):
+            log.warning(f"{target} is from a formula; skipping link")
+            return False
+
+        raise LinkError([(str(target), "an existing file")])
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.unlink(missing_ok=True)  # brew's `ln -sfn` replaces a dangling link
+    target.symlink_to(source)
+    if binary and not os.access(source, os.X_OK):
+        source.chmod(source.stat().st_mode | 0o111)
+
+    return True
+
+
+def _relocate(source: Path, target: Path) -> None:
+    """Rename `source` to `target`, copying with ditto across volumes.
+
+    Args:
+        source: The path to move.
+        target: Its new path, which must not exist.
+
+    Raises:
+        CellarError: If the move or cross-volume copy fails.
+    """
+    try:
+        source.rename(target)
+
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise CellarError(f"can't move {source} to {target}: {exc}") from exc
+
+        try:
+            _run(["ditto", str(source), str(target)])
+
+        except ExtractionError as exc:
+            # `target` didn't exist before, so whatever is there is ditto's partial copy
+            shutil.rmtree(target, ignore_errors=True)
+            target.unlink(missing_ok=True)  # The file or link rmtree can't remove
+            raise CellarError(f"can't move {source} to {target}: {exc}") from exc
+
+        if source.is_dir() and not source.is_symlink():
+            shutil.rmtree(source)
+        else:
+            source.unlink()
 
 
 def _unpack(download: Path, dest: Path, *, name: str) -> None:
