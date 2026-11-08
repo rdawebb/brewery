@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-import shutil
-import subprocess
 import sys
 
 import pytest
-from _repo_helpers import _add_alias, _provider_calls
+from _repo_helpers import _add_alias, _provider_calls, zip_app
 from _rows import cask_dict
 
 import brewery.services.cask as cask_service
@@ -87,29 +84,6 @@ class TestInstall:
         assert failures == []
 
 
-def _zip_app(tmp_path, cache) -> str:
-    """Zip a minimal `Foo.app` into the download cache, as if already fetched.
-
-    Args:
-        tmp_path: The pytest tmp_path fixture.
-        cache: The downloader's cache dir.
-
-    Returns:
-        The zip's sha256, which is its cache key.
-    """
-    macos = tmp_path / "src" / "Foo.app" / "Contents" / "MacOS"
-    macos.mkdir(parents=True)
-    (macos / "foo").write_text("#!/bin/sh\n")
-    archive = tmp_path / "foo.zip"
-    subprocess.run(
-        ["ditto", "-c", "-k", str(tmp_path / "src"), str(archive)], check=True
-    )
-    sha = hashlib.sha256(archive.read_bytes()).hexdigest()
-    cache.mkdir(parents=True, exist_ok=True)
-    shutil.copy(archive, cache / sha)
-    return sha
-
-
 @pytest.mark.skipif(sys.platform != "darwin", reason="native casks are macOS-only")
 class TestInstallCasks:
     """Tests for routing casks between the native installer and brew."""
@@ -141,7 +115,7 @@ class TestInstallCasks:
         Returns:
             A callable writing `{token: (depends_on, artifacts)}` to the catalog.
         """
-        sha = _zip_app(tmp_path, mock_env.bottle_cache)
+        sha = zip_app(tmp_path, mock_env.bottle_cache)
 
         def write(spec: dict) -> None:
             repo.catalog.write_casks(

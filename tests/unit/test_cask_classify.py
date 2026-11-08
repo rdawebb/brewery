@@ -10,6 +10,7 @@ from _rows import cask_row
 from brewery.core.host import Platform
 from brewery.providers.cask import (
     classify,
+    classify_uninstall,
     localise,
     parse_locale,
     pick_language,
@@ -239,3 +240,52 @@ class TestLanguages:
             "brew",
             "`language` variant",
         )
+
+
+class TestClassifyUninstall:
+    """Tests for routing an installed cask's uninstall from its receipt."""
+
+    ARTIFACTS = (
+        {"uninstall": [{"quit": "org.example.foo", "delete": "/tmp/foo"}]},
+        {"app": ["Foo.app"]},
+        {"zap": [{"trash": "~/foo", "pkgutil": "org.example.foo"}]},
+    )
+
+    @pytest.mark.parametrize(
+        ("receipt", "zap", "reason"),
+        [
+            pytest.param({"uninstall_artifacts": [*ARTIFACTS]}, False, "", id="native"),
+            pytest.param(
+                {"uninstall_artifacts": [*ARTIFACTS]},
+                True,
+                "`zap pkgutil`",
+                id="zap_brew",
+            ),
+            pytest.param(
+                {"uninstall_artifacts": [{"pkg": ["Foo.pkg"]}]},
+                False,
+                "`pkg` artifact",
+                id="pkg",
+            ),
+            pytest.param(None, False, "no uninstall receipt", id="no_receipt"),
+            pytest.param({}, False, "no uninstall receipt", id="no_artifacts"),
+            pytest.param(
+                {"uninstall_artifacts": []}, False, "", id="nothing_to_remove"
+            ),
+            pytest.param(
+                {"uninstall_artifacts": [{"uninstall": ["quit"]}]},
+                False,
+                "unrecognised `uninstall` directive",
+                id="directive_not_a_dict",
+            ),
+            pytest.param(
+                {"uninstall_artifacts": [{"uninstall": {"quit": "org.example.foo"}}]},
+                False,
+                "unrecognised `uninstall` directive",
+                id="directives_not_a_list",
+            ),
+        ],
+    )
+    def test_reasons(self, receipt, zap, reason) -> None:
+        """Test that the receipt decides, and `zap` directives count only for --zap."""
+        assert classify_uninstall(receipt, SEQUOIA, zap=zap) == reason

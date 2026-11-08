@@ -11,7 +11,7 @@ from brewery.core.config import BreweryENV, get_brewery_env
 from brewery.core.decorators import log_operation
 from brewery.core.deps import blocking_dependents
 from brewery.core.errors import BrewCommandError, OperationInProgressError
-from brewery.core.fs_state import child_dirs
+from brewery.core.fs_state import child_dirs, pinned_names
 from brewery.core.logging import BreweryLogger, get_logger
 from brewery.core.models import Notes, Package, PackageKind
 from brewery.core.repo import Repository
@@ -32,6 +32,7 @@ async def uninstall_packages(
     env: BreweryENV | None = None,
     formula: UninstallBackend = brew.formula_backend,
     cask: PackageBackend = brew.cask_backend,
+    zap: bool = False,
 ) -> tuple[list[str], Notes]:
     """Uninstall packages and refresh cache on success.
 
@@ -41,7 +42,8 @@ async def uninstall_packages(
         kind: Kind of the package(s) (formula or cask).
         env: Brewery environment (paths), resolved if omitted.
         formula: Formula backend for the per-formula brew fallback.
-        cask: Cask backend, which handles casks wholesale.
+        cask: Cask backend for the casks brewery can't uninstall.
+        zap: Also remove the casks' `zap` files, as brew's `--zap` does.
 
     Returns:
         List of successfully removed package names, and list of (name, reason) failures
@@ -52,18 +54,29 @@ async def uninstall_packages(
     env = env or repo.cache_mgr.env or get_brewery_env()
 
     batch = _partition(repo, names, kind)
-    formula_names, blocked = _drop_blocked(repo, batch.formulae, batch.installed)
-    failures: Notes = [*batch.failures, *blocked]
+
+    # Pinned first, so a held-back pinned formula still blocks its dependencies
+    formula_names, pinned_formulae = _drop_pinned(
+        batch.formulae, pinned_names(env.prefix), "brewery unpin"
+    )
+    formula_names, blocked = _drop_blocked(repo, formula_names, batch.installed)
+    pin_dir = env.prefix / "var/homebrew/pinned_casks"
+    cask_names, pinned_casks = _drop_pinned(
+        batch.casks,
+        {c for c in batch.casks if (pin_dir / c).exists()},
+        "brew unpin --cask",
+    )
+    failures: Notes = [*batch.failures, *pinned_formulae, *blocked, *pinned_casks]
 
     if formula_names:
         await run_uninstall(formula_names, formula=formula, env=env)
 
-    if batch.casks:
-        await uninstall_casks(batch.casks, backend=cask)
+    if cask_names:
+        await uninstall_casks(cask_names, backend=cask, env=env, zap=zap)
 
     repo.cache_mgr.invalidate()
 
-    removed, failed = _verify_batch(formula_names, batch.casks, env=env)
+    removed, failed = _verify_batch(formula_names, cask_names, env=env)
     failures.extend((n, "uninstall failed") for n in failed)
 
     return removed, failures
@@ -124,6 +137,23 @@ def _partition(repo: Repository, names: list[str], kind: PackageKind | None) -> 
     return _Batch(
         formulae=formulae, casks=casks, failures=failures, installed=installed
     )
+
+
+def _drop_pinned(
+    names: list[str], pinned: set[str], unpin: str
+) -> tuple[list[str], Notes]:
+    """Hold back the pinned packages, as brew refuses them without --force.
+
+    Args:
+        names: Canonical names bound for removal.
+        pinned: The names that are pinned.
+        unpin: The command that unpins them, for the note.
+
+    Returns:
+        The names free to remove, and a (name, reason) note for each one held back.
+    """
+    notes: Notes = [(n, f"pinned, unpin with `{unpin}`") for n in names if n in pinned]
+    return [n for n in names if n not in pinned], notes
 
 
 def _drop_blocked(

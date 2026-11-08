@@ -1,6 +1,6 @@
-"""Cask operations: installed natively where brewery can, otherwise by brew.
+"""Cask operations: done natively where brewery can, otherwise by brew.
 
-Uninstall and upgrade still hand every cask to brew.
+Upgrade still hands every cask to brew.
 """
 
 from __future__ import annotations
@@ -28,11 +28,18 @@ from brewery.providers.base import (
 from brewery.providers.cask import (
     CaskOpts,
     classify,
+    classify_uninstall,
     localise,
     read_cask_opts,
     system_languages,
 )
-from brewery.providers.caskroom import install_artifacts, stage, unstage
+from brewery.providers.caskroom import (
+    install_artifacts,
+    read_receipt,
+    stage,
+    uninstall_cask,
+    unstage,
+)
 from brewery.providers.downloader import NO_CHECK, BottleRef, Downloader
 from brewery.providers.orchestrator import _NULL_PROGRESS, Outcome, ProgressPort
 from brewery.providers.pipeline import PIPELINE_TIMEOUT, run_install
@@ -312,18 +319,45 @@ def _stage_and_install(
         )
 
     except BaseException:
-        unstage(row, env.caskroom)
+        unstage(row.token, str(row.version), env.caskroom)
         raise
 
 
-async def uninstall_casks(names: list[str], *, backend: UninstallBackend) -> None:
-    """Uninstall every named cask.
+async def uninstall_casks(
+    names: list[str],
+    *,
+    backend: UninstallBackend,
+    env: BreweryENV | None = None,
+    zap: bool = False,
+) -> None:
+    """Uninstall every named cask, natively where possible, the rest through brew.
+
+    A cask whose native uninstall fails part way goes to brew, which retries it.
 
     Args:
         names: Cask tokens to uninstall.
-        backend: The cask backend to delegate to.
+        backend: The cask backend for the casks brewery can't uninstall.
+        env: Brewery environment (paths), resolved if omitted.
+        zap: Also remove each cask's `zap` files, as `--zap` does.
     """
-    await backend.uninstall(names=names)
+    env = env or get_brewery_env()
+    plat = current_platform()
+    to_brew: list[str] = []
+    for token in names:
+        reason = classify_uninstall(read_receipt(env.caskroom / token), plat, zap=zap)
+        if not reason:
+            try:
+                await asyncio.to_thread(uninstall_cask, token, env, zap=zap)
+                continue
+
+            except (BrewError, OSError) as exc:
+                reason = str(exc)
+
+        log.info(event="cask_to_brew", cask=token, reason=reason)
+        to_brew.append(token)
+
+    if to_brew:
+        await backend.uninstall(names=to_brew, zap=zap)
 
 
 async def upgrade_casks(names: list[str], *, backend: UpgradeBackend) -> None:

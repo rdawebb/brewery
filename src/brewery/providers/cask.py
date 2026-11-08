@@ -36,7 +36,10 @@ NATIVE_ARTIFACTS = frozenset(
     }
 )
 
-NATIVE_UNINSTALL = frozenset({"quit", "delete", "launchctl", "signal"})
+# `uninstall`/`zap` directives `cask_directives` runs
+NATIVE_UNINSTALL = frozenset(
+    {"quit", "delete", "launchctl", "signal", "trash", "rmdir"}
+)
 
 _ARCH_TYPES = {"arm": "arm64", "intel": "amd64"}
 
@@ -230,20 +233,70 @@ def classify(row: CaskRow, plat: Platform | None) -> tuple[Route, str]:
     if row.language_variations:
         return "brew", "`language` variant"  # One `localise` couldn't apply
 
-    for stanza in row.artifacts or []:
+    if reason := _artifact_reason(row.artifacts or [], ("uninstall",)):
+        return "brew", reason
+
+    return _check_depends(row.depends_on or {}, plat.macos_major, plat.arch)
+
+
+def classify_uninstall(
+    receipt: dict[str, Any] | None, plat: Platform | None, *, zap: bool
+) -> str:
+    """Why an installed cask's uninstall goes to brew, judged from its receipt.
+
+    brew uninstalls from the receipt's `uninstall_artifacts`, not the current cask.
+
+    Args:
+        receipt: The cask's `INSTALL_RECEIPT.json`, or None if it has none.
+        plat: The host platform, from `current_platform()`.
+        zap: Whether the `zap` directives run too.
+
+    Returns:
+        The reason, or an empty string for a native uninstall.
+    """
+    if plat is None or plat.os != "macos":
+        return "native casks need macOS"
+
+    artifacts = (receipt or {}).get("uninstall_artifacts")
+    if not isinstance(artifacts, list) or (receipt or {}).get(
+        "uninstall_flight_blocks"
+    ):
+        return "no uninstall receipt"
+
+    return _artifact_reason(artifacts, ("uninstall", "zap") if zap else ("uninstall",))
+
+
+def _artifact_reason(artifacts: list[Any], directives: tuple[str, ...]) -> str:
+    """The first artifact, or directive of those stanzas, brewery can't handle.
+
+    Args:
+        artifacts: The cask's artifacts, or a receipt's `uninstall_artifacts`.
+        directives: The stanzas whose directives must be native.
+
+    Returns:
+        The reason, or an empty string.
+    """
+    for stanza in artifacts:
         if not isinstance(stanza, dict):
-            return "brew", "unrecognised artifact"
+            return "unrecognised artifact"
 
         foreign = sorted(stanza.keys() - NATIVE_ARTIFACTS)
         if foreign:
-            return "brew", f"`{foreign[0]}` artifact"
+            return f"`{foreign[0]}` artifact"
 
-        for directive in stanza.get("uninstall", []):
-            foreign = sorted(directive.keys() - NATIVE_UNINSTALL)
-            if foreign:
-                return "brew", f"`uninstall {foreign[0]}`"
+        for key in directives:
+            stanzas = stanza.get(key, [])
+            if not isinstance(stanzas, list) or not all(
+                isinstance(d, dict) for d in stanzas
+            ):
+                return f"unrecognised `{key}` directive"
 
-    return _check_depends(row.depends_on or {}, plat.macos_major, plat.arch)
+            for directive in stanzas:
+                foreign = sorted(directive.keys() - NATIVE_UNINSTALL)
+                if foreign:
+                    return f"`{key} {foreign[0]}`"
+
+    return ""
 
 
 def _check_depends(
@@ -251,7 +304,7 @@ def _check_depends(
 ) -> tuple[Route, str]:
     """Hand casks this host can't run to brew, which refuses with its own message.
 
-    `formula` and `cask` dependencies are resolved by the installer, not here.
+    `formula` and `cask` dependencies are resolved by the installer.
 
     Args:
         depends_on: The cask's decoded `depends_on`.

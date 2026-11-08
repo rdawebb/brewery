@@ -33,6 +33,10 @@ def uninstall(
     yes: Annotated[
         bool, app.Option("--yes", "-y", help="Skip confirmation prompt")
     ] = False,
+    zap: Annotated[
+        bool,
+        app.Option("--zap", help="Also remove casks' settings, caches and other files"),
+    ] = False,
 ) -> None:
     """Uninstall a package or list of packages.
 
@@ -41,6 +45,7 @@ def uninstall(
         formula: Treat the package(s) as formulae.
         cask: Treat the package(s) as casks. With neither flag, auto-detects.
         yes: If true, skip confirmation prompt.
+        zap: Also remove the files each cask's `zap` stanza lists.
     """
     kind: PackageKind | None = kind_from_flags(formula, cask)
 
@@ -51,7 +56,9 @@ def uninstall(
 
     with _repository() as repo:
         with spinner("Uninstalling..."):
-            removed, failures = run_async(coro=uninstall_packages(repo, names, kind))
+            removed, failures = run_async(
+                coro=uninstall_packages(repo, names, kind, zap=zap)
+            )
 
         print_result(
             f"✓ Uninstalled {len(removed)} package(s)\n", removed, style="bold green"

@@ -25,10 +25,13 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
+import orjson
+
 from brewery.core.catalog import CaskRow
 from brewery.core.config import BreweryENV
 from brewery.core.errors import CellarError, ExtractionError, LinkError
 from brewery.core.logging import BreweryLogger, get_logger
+from brewery.providers.cask_directives import remove, run_directives, undeletable
 from brewery.providers.extractor import extract_tar
 from brewery.providers.receipt import RECEIPT_NAME, current_arch, dumps_bytes
 
@@ -154,16 +157,17 @@ def stage(
     return staged
 
 
-def unstage(row: CaskRow, caskroom: Path) -> None:
-    """Remove what `stage` wrote, and the cask's dir if nothing else is in it.
+def unstage(token: str, version: str, caskroom: Path) -> None:
+    """Remove a staged version, and the cask's dir if nothing else is in it.
 
     Args:
-        row: The cask's catalog row.
+        token: The cask's token.
+        version: The staged version.
         caskroom: The Caskroom directory.
     """
-    token_dir = caskroom / row.token
-    shutil.rmtree(token_dir / str(row.version), ignore_errors=True)
-    shutil.rmtree(token_dir / ".metadata" / str(row.version), ignore_errors=True)
+    token_dir = caskroom / token
+    shutil.rmtree(token_dir / version, ignore_errors=True)
+    shutil.rmtree(token_dir / ".metadata" / version, ignore_errors=True)
     if token_dir.is_dir() and all(p.name == ".metadata" for p in token_dir.iterdir()):
         shutil.rmtree(token_dir)
 
@@ -296,6 +300,95 @@ def install_artifacts(
         "explicit": {},
     }
     (staged.parent / ".metadata" / "config.json").write_bytes(dumps_bytes(config))
+
+
+def read_receipt(token_dir: Path) -> dict[str, Any] | None:
+    """An installed cask's `INSTALL_RECEIPT.json`.
+
+    Args:
+        token_dir: The cask's Caskroom directory.
+
+    Returns:
+        The receipt, or None if it's missing or unreadable.
+    """
+    try:
+        receipt = orjson.loads((token_dir / ".metadata" / RECEIPT_NAME).read_bytes())
+
+    except (OSError, ValueError):
+        return None
+
+    return receipt if isinstance(receipt, dict) else None
+
+
+def uninstall_cask(token: str, env: BreweryENV, *, zap: bool = False) -> None:
+    """Remove an installed cask from its receipt.
+
+    Runs the `uninstall` directives (and `zap`'s), removes the moved and linked
+    artifacts, then the staged version; `--zap` removes the whole Caskroom dir;
+    a step that fails is retried by brew.
+
+    Args:
+        token: The installed cask's token.
+        env: The Homebrew layout.
+        zap: Also run the `zap` directives, as `--zap` does.
+
+    Raises:
+        CellarError: If a step can't be done without root, or the cask isn't installed.
+        OSError: If an artifact can't be removed.
+    """
+    token_dir = env.caskroom / token
+    receipt = read_receipt(token_dir) or {}
+    # Reads the installed version from the newest `.metadata/<version>/<stamp>`
+    stamps = sorted(token_dir.glob(".metadata/*/*"), key=lambda p: p.name)
+    if not stamps:
+        raise CellarError(f"{token} has no installed version", path=token_dir)
+
+    version = stamps[-1].parent.name
+    try:
+        config = orjson.loads((token_dir / ".metadata" / "config.json").read_bytes())
+
+    except (OSError, ValueError):
+        config = {}
+
+    dirs = {**DEFAULT_DIRS}
+    for part in ("default", "env", "explicit"):
+        dirs |= {
+            k: Path(v) for k, v in config.get(part, {}).items() if isinstance(v, str)
+        }
+
+    artifacts = receipt.get("uninstall_artifacts") or []
+    keys = ("uninstall", "zap") if zap else ("uninstall",)
+    directives = [d for stanza in artifacts for k in keys for d in stanza.get(k, [])]
+
+    run_directives(directives, deferred=False)
+    reload = False
+    for stanza in artifacts:
+        for key, args in stanza.items():
+            if key not in _MOVED and key not in _LINKED:
+                continue
+
+            _source, target = _locate(key, args, token_dir / version, env, dirs)
+            if key in _MOVED:
+                if undeletable(target):
+                    raise CellarError(f"{target} can't be removed", path=target)
+
+                remove(target)
+                reload |= key == "qlplugin"
+
+            # Like `_link`, a formula's link is left alone
+            elif target.is_symlink() and not target.resolve().is_relative_to(
+                env.cellar.resolve()
+            ):
+                target.unlink()
+
+    if reload:
+        subprocess.run(["qlmanage", "-r"], capture_output=True, check=False)
+
+    run_directives(directives, deferred=True)
+    if zap:
+        shutil.rmtree(token_dir)
+    else:
+        unstage(token, version, env.caskroom)
 
 
 def _locate(

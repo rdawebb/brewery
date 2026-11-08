@@ -16,8 +16,8 @@ class InstallBackend(Protocol):
 class UninstallBackend(Protocol):
     """Protocol for backends that can uninstall packages."""
 
-    async def uninstall(self, names: list[str]) -> list[str]:
-        """Uninstall package(s) by name."""
+    async def uninstall(self, names: list[str], *, zap: bool = False) -> list[str]:
+        """Uninstall package(s) by name; `zap` also removes a cask's `zap` files."""
         ...
 
 

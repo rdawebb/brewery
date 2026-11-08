@@ -67,8 +67,8 @@ def uninstalls(monkeypatch):
     def _arrange(removed=(), failures=()):
         calls: list[dict] = []
 
-        async def _uninstall(repo, names, kind):
-            calls.append({"names": names, "kind": kind})
+        async def _uninstall(repo, names, kind, *, zap=False):
+            calls.append({"names": names, "kind": kind, "zap": zap})
 
             return list(removed), list(failures)
 
@@ -262,7 +262,15 @@ class TestUninstall:
 
         run(["uninstall", "iina", "--yes"])
 
-        assert calls[0]["kind"] is None
+        assert (calls[0]["kind"], calls[0]["zap"]) == (None, False)
+
+    def test_zap_reaches_the_service(self, run, uninstalls) -> None:
+        """Test that --zap is passed on."""
+        calls = uninstalls(removed=["iina"])
+
+        run(["uninstall", "iina", "--zap", "--yes"])
+
+        assert calls[0]["zap"] is True
 
     @pytest.mark.parametrize("alias", ["rm", "del"])
     def test_the_aliases_reach_the_same_command(self, run, uninstalls, alias) -> None:

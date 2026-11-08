@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import shutil
+import subprocess
 from pathlib import Path
 
 from _layout import full_receipt, write_keg
@@ -56,3 +59,27 @@ def _install_formula(cellar, name, version="1.0", deps=()) -> Path:
             runtime_dependencies=[{"full_name": d} for d in deps],
         ),
     )
+
+
+def zip_app(tmp_path, cache) -> str:
+    """Zip a minimal `Foo.app` into the download cache, as if already fetched.
+
+    Args:
+        tmp_path: The pytest tmp_path fixture.
+        cache: The downloader's cache dir.
+
+    Returns:
+        The zip's sha256, which is its cache key.
+    """
+    macos = tmp_path / "src" / "Foo.app" / "Contents" / "MacOS"
+    macos.mkdir(parents=True)
+    (macos / "foo").write_text("#!/bin/sh\n")
+    archive = tmp_path / "foo.zip"
+    subprocess.run(
+        ["ditto", "-c", "-k", str(tmp_path / "src"), str(archive)], check=True
+    )
+    sha = hashlib.sha256(archive.read_bytes()).hexdigest()
+    cache.mkdir(parents=True, exist_ok=True)
+    shutil.copy(archive, cache / sha)
+
+    return sha
