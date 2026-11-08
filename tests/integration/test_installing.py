@@ -12,6 +12,7 @@ import pytest
 from _repo_helpers import _add_alias, _provider_calls
 from _rows import cask_dict
 
+import brewery.services.cask as cask_service
 from brewery.core.models import PackageKind
 from brewery.services.install import install_packages
 
@@ -257,6 +258,52 @@ class TestInstallCasks:
         assert _provider_calls(mock_brew, "install") == [
             ("brew", "install", "--cask", "foo")
         ]
+
+    async def test_language_variant_is_installed(
+        self, repo, mock_brew, mock_env, casks, appdir, monkeypatch
+    ) -> None:
+        """Test that `--language` picks the variant's download, version and target."""
+        monkeypatch.setenv("HOMEBREW_CASK_OPTS", f"--appdir={appdir} --language=de")
+        monkeypatch.setattr(cask_service, "system_languages", lambda: ["en-GB"])
+        casks({"foo": (None, [{"app": ["Foo.app"]}])})
+        sha = repo.catalog.get_cask("foo").sha256
+        repo.catalog.write_casks(
+            [
+                cask_dict(
+                    "foo",
+                    version="1.0",
+                    url="https://example.org/foo-en.zip",
+                    sha256="0" * 64,  # Not cached: fetching it would hand foo to brew
+                    artifacts=json.dumps([{"app": ["Foo.app"]}]),
+                    language_variations=json.dumps(
+                        [
+                            {"languages": ["en"], "default": True, "value": "en"},
+                            {
+                                "languages": ["de"],
+                                "default": False,
+                                "value": "de",
+                                "url": "https://example.org/foo-de.zip",
+                                "sha256": sha,
+                                "version": "1.0-de",
+                                "artifacts": [
+                                    {"app": ["Foo.app", {"target": "Foo DE.app"}]}
+                                ],
+                            },
+                        ]
+                    ),
+                )
+            ]
+        )
+
+        await install_packages(repo, ["foo"], kind=PackageKind.CASK)
+
+        assert _provider_calls(mock_brew, "install") == []
+        assert (appdir / "Foo DE.app").is_dir()
+        assert (mock_env.caskroom / "foo" / "1.0-de").is_dir()
+        config = json.loads(
+            (mock_env.caskroom / "foo" / ".metadata" / "config.json").read_text()
+        )
+        assert config["env"]["languages"] == ["de"]
 
     @pytest.mark.parametrize(
         ("formula", "brewed"),

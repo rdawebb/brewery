@@ -19,7 +19,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -223,6 +223,7 @@ def install_artifacts(
     *,
     dirs: Mapping[str, Path] | None = None,
     binaries: bool = True,
+    languages: Sequence[str] = (),
 ) -> None:
     """Move and link a staged cask's artifacts into place, as brew does.
 
@@ -238,6 +239,7 @@ def install_artifacts(
         dirs: Overrides for `DEFAULT_DIRS`, from `HOMEBREW_CASK_OPTS`; brew
             reads both back from `.metadata/config.json` to uninstall.
         binaries: False skips `binary` artifacts, as `--no-binaries` does.
+        languages: `--language` values, recorded so `brew upgrade` keeps the variant.
 
     Raises:
         LinkError: If a target is already taken.
@@ -289,7 +291,8 @@ def install_artifacts(
 
     config = {
         "default": {k: str(v) for k, v in DEFAULT_DIRS.items()},
-        "env": {k: str(v) for k, v in overrides.items()},
+        "env": {k: str(v) for k, v in overrides.items()}
+        | ({"languages": list(languages)} if languages else {}),
         "explicit": {},
     }
     (staged.parent / ".metadata" / "config.json").write_bytes(dumps_bytes(config))

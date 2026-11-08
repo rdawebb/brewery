@@ -25,7 +25,13 @@ from brewery.providers.base import (
     UninstallBackend,
     UpgradeBackend,
 )
-from brewery.providers.cask import CaskOpts, classify, read_cask_opts
+from brewery.providers.cask import (
+    CaskOpts,
+    classify,
+    localise,
+    read_cask_opts,
+    system_languages,
+)
 from brewery.providers.caskroom import install_artifacts, stage, unstage
 from brewery.providers.downloader import NO_CHECK, BottleRef, Downloader
 from brewery.providers.orchestrator import _NULL_PROGRESS, Outcome, ProgressPort
@@ -71,13 +77,20 @@ async def install_casks(
 
     rows: dict[str, CaskRow] = {}
     order: list[str] = []  # Dependencies before their dependents
+    languages: list[str] = []  # Read from the system only for a cask that has variants
 
     def visit(token: str) -> None:
+        """Visit a cask and its dependencies, recording the order to install them in."""
+        nonlocal languages
         if token in rows or token in installed:
             return
 
         if (row := repo.catalog.get_cask(token)) is None:
             return  # brew reports the unknown name
+
+        if row.language_variations:
+            languages = languages or [*opts.languages, *system_languages()]
+            row = localise(row, languages)
 
         rows[token] = row
         for dep in _depends(row, "cask"):
@@ -289,7 +302,14 @@ def _stage_and_install(
     """
     staged = stage(row, download, env.caskroom, on_request=on_request)
     try:
-        install_artifacts(row, staged, env, dirs=opts.dirs, binaries=opts.binaries)
+        install_artifacts(
+            row,
+            staged,
+            env,
+            dirs=opts.dirs,
+            binaries=opts.binaries,
+            languages=opts.languages,
+        )
 
     except BaseException:
         unstage(row, env.caskroom)

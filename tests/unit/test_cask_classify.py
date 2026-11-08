@@ -8,7 +8,13 @@ import pytest
 from _rows import cask_row
 
 from brewery.core.host import Platform
-from brewery.providers.cask import classify, read_cask_opts
+from brewery.providers.cask import (
+    classify,
+    localise,
+    parse_locale,
+    pick_language,
+    read_cask_opts,
+)
 
 SEQUOIA = Platform(arch="arm64", os="macos", macos_major=15)
 
@@ -108,7 +114,7 @@ class TestClassify:
             ),
             pytest.param(
                 {"language_variations": [{"languages": ["de"], "default": False}]},
-                "`language` variants",
+                "`language` variant",
                 id="languages",
             ),
         ],
@@ -128,10 +134,7 @@ class TestReadCaskOpts:
     """Tests for read_cask_opts."""
 
     def test_reads_what_brew_reads(self, monkeypatch) -> None:
-        """Test dirs (expanded, hyphens to underscores) and switches.
-
-        `--language` isn't a dir: only `languages` casks read it, and those go to brew.
-        """
+        """Test dirs (expanded, hyphens to underscores), languages and switches."""
         monkeypatch.setenv("HOME", "/Users/me")
         opts = read_cask_opts(
             "--appdir=~/Applications '--input-methoddir=/Library/Input Methods' "
@@ -144,9 +147,95 @@ class TestReadCaskOpts:
             "input_methoddir": Path("/Library/Input Methods"),
         }
         assert (opts.binaries, opts.require_sha) == (False, True)
+        assert opts.languages == ("de", "fr")
 
     def test_empty_means_brew_defaults(self) -> None:
         """Test that an unset variable changes nothing."""
         opts = read_cask_opts("")
 
         assert (opts.dirs, opts.binaries, opts.require_sha) == ({}, True, False)
+
+
+def _variant(*languages: str, default: bool = False, **overrides) -> dict:
+    """A feed `language_variations` entry."""
+    base = {"languages": list(languages), "default": default, "value": languages[0]}
+
+    return base | overrides
+
+
+class TestLanguages:
+    """Tests for choosing a cask's language variant as brew does."""
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("en", ("en", None, None)),
+            ("en-GB", ("en", None, "GB")),
+            ("zh-Hans-CN", ("zh", "Hans", "CN")),
+            ("CN", (None, None, "CN")),
+            ("es-419", ("es", None, "419")),
+            ("en-", None),
+            ("enGB", None),
+            ("ja-JP-mac", None),
+            ("", None),
+        ],
+    )
+    def test_parse_locale(self, text, expected) -> None:
+        """Test brew's `Locale.try_parse` rules."""
+        assert parse_locale(text) == expected
+
+    VARIANTS = (
+        _variant("en", default=True),
+        _variant("en-GB"),
+        _variant("de"),
+        _variant("zh", "CN"),
+    )
+
+    @pytest.mark.parametrize(
+        ("languages", "value"),
+        [
+            pytest.param(["en-GB"], "en-GB", id="exact_beats_include"),
+            pytest.param(["de-AT"], "de", id="region_falls_back"),
+            pytest.param(["fr", "de"], "de", id="next_preference"),
+            pytest.param(["zh-Hans-CN"], "zh", id="any_locale_in_group"),
+            pytest.param(["bad!", "fr"], "en", id="default"),
+        ],
+    )
+    def test_pick_language(self, languages, value) -> None:
+        """Test exact matches first, then included locales, then the default."""
+        assert (pick_language(self.VARIANTS, languages) or {}).get("value") == value
+
+    def test_no_default_keeps_the_row(self) -> None:
+        """Test that with no match and no default the top-level row is used."""
+        row = cask_row(url="https://a/en.dmg", language_variations=[_variant("de")])
+
+        assert localise(row, ["fr"]) == cask_row(url="https://a/en.dmg")
+
+    def test_localise_applies_the_variant(self) -> None:
+        """Test that the variant's fields replace the row's, so the cask is native."""
+        row = cask_row(
+            url="https://a/en.dmg",
+            sha256="a" * 64,
+            artifacts=[{"app": ["Foo.app"]}],
+            language_variations=[
+                _variant("en", default=True),
+                _variant("de", url="https://a/de.dmg", sha256="b" * 64),
+            ],
+        )
+
+        localised = localise(row, ["de-DE"])
+
+        assert (localised.url, localised.sha256) == ("https://a/de.dmg", "b" * 64)
+        assert classify(localised, SEQUOIA) == ("native", "")
+
+    def test_unknown_override_goes_to_brew(self) -> None:
+        """Test that a variant overriding a field brewery doesn't store stays brew's."""
+        row = cask_row(
+            artifacts=[{"app": ["Foo.app"]}],
+            language_variations=[_variant("de", url_specs={"referer": "x"})],
+        )
+
+        assert classify(localise(row, ["de"]), SEQUOIA) == (
+            "brew",
+            "`language` variant",
+        )

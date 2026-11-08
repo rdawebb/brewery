@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import operator
 import os
+import re
 import shlex
-from collections.abc import Callable
-from dataclasses import dataclass, field
+import subprocess
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from brewery.core.catalog import CaskRow
 from brewery.core.host import Platform
@@ -55,11 +57,13 @@ class CaskOpts:
         dirs: `--<name>dir=` overrides, keyed as brew's config keys them.
         binaries: False for `--no-binaries`.
         require_sha: True for `--require-sha`.
+        languages: `--language=` values, preferred over the system's.
     """
 
     dirs: dict[str, Path] = field(default_factory=dict)
     binaries: bool = True
     require_sha: bool = False
+    languages: tuple[str, ...] = ()
 
 
 def read_cask_opts(raw: str) -> CaskOpts:
@@ -73,19 +77,135 @@ def read_cask_opts(raw: str) -> CaskOpts:
     """
     dirs: dict[str, Path] = {}
     binaries = True
+    languages: tuple[str, ...] = ()
     args = shlex.split(raw)
     for arg in args:
         flag, eq, value = arg.partition("=")
         key = flag.removeprefix("--").replace("-", "_")
 
-        # Classify sends 'languages' casks to brew
-        if eq and key != "language":
+        if eq and key == "language":
+            languages = tuple(value.split(","))
+
+        elif eq:
             dirs[key] = Path(os.path.abspath(os.path.expanduser(value)))
 
         elif arg in ("--binaries", "--no-binaries"):
             binaries = arg == "--binaries"  # The last one wins
 
-    return CaskOpts(dirs, binaries, "--require-sha" in args)
+    return CaskOpts(dirs, binaries, "--require-sha" in args, languages)
+
+
+def system_languages() -> list[str]:
+    """The user's preferred languages.
+
+    Returns:
+        The languages in order, empty off macOS or if unset.
+    """
+    for domain in ("-g", "/Library/Preferences/.GlobalPreferences"):
+        try:
+            out = subprocess.run(
+                ["defaults", "read", domain, "AppleLanguages"],
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout
+
+        except OSError:
+            return []
+
+        if out.strip():
+            return re.findall(r'[^ \n"(),]+', out)
+
+    return []
+
+
+# Locale: language, script and region, each optional, `-` between
+_LOCALE = re.compile(
+    r"(?:([a-z]{2,3})(?:-(?=.)|$))?(?:([A-Z][a-z]{3})(?:-(?=.)|$))?([A-Z]{2}|\d{3})?",
+    re.DOTALL,
+)
+
+Locale = tuple[str | None, str | None, str | None]
+
+
+def parse_locale(text: str) -> Locale | None:
+    """Parse a locale.
+
+    Args:
+        text: A locale such as `en`, `en-GB` or `zh-Hans-CN`.
+
+    Returns:
+        (language, script, region), or None if it isn't a locale.
+    """
+    match = _LOCALE.fullmatch(text)
+
+    return cast(Locale, match.groups()) if text and match else None
+
+
+def pick_language(
+    variations: Sequence[dict[str, Any]], languages: Sequence[str]
+) -> dict[str, Any] | None:
+    """Choose a cask's language variant.
+
+    For each language in order, the first variant listing that exact locale wins,
+    then the first listing a locale it includes (`en-GB` includes `en`).
+
+    Args:
+        variations: The cask's `language_variations`.
+        languages: The preferred languages, most preferred first.
+
+    Returns:
+        The chosen variant, else the `default` one, else None.
+    """
+    groups = [
+        (v, [loc for s in v["languages"] if (loc := parse_locale(s))])
+        for v in variations
+    ]
+    for language in languages:
+        if (want := parse_locale(language)) is None:
+            continue
+
+        # A locale includes another whose every part is unset or the same
+        variant = next((v for v, locs in groups if want in locs), None) or next(
+            (
+                v
+                for v, locs in groups
+                if any(all(p in (None, w) for p, w in zip(loc, want)) for loc in locs)
+            ),
+            None,
+        )
+        if variant:
+            return variant
+
+    return next((v for v in variations if v.get("default")), None)
+
+
+# The variant fields a localised row takes over; any other sends the cask to brew
+_VARIANT_FIELDS = frozenset({"url", "sha256", "version", "homepage", "artifacts"})
+
+
+def localise(row: CaskRow, languages: Sequence[str]) -> CaskRow:
+    """Apply the cask's chosen language variant over its row.
+
+    Args:
+        row: The cask's catalog row.
+        languages: The preferred languages, most preferred first.
+
+    Returns:
+        The localised row with no `language_variations`, or the row unchanged if
+        the variant overrides a field brewery doesn't store.
+    """
+    if not row.language_variations:
+        return row
+
+    variant = pick_language(row.language_variations, languages) or {}
+    overrides = {
+        k: v for k, v in variant.items() if k not in ("languages", "default", "value")
+    }
+    if overrides.keys() - _VARIANT_FIELDS:
+        return row
+
+    return replace(row, language_variations=None, **overrides)
 
 
 def classify(row: CaskRow, plat: Platform | None) -> tuple[Route, str]:
@@ -108,7 +228,7 @@ def classify(row: CaskRow, plat: Platform | None) -> tuple[Route, str]:
         return "brew", f"`url {min(row.url_specs)}:`"
 
     if row.language_variations:
-        return "brew", "`language` variants"  # brew picks one from the locale
+        return "brew", "`language` variant"  # One `localise` couldn't apply
 
     for stanza in row.artifacts or []:
         if not isinstance(stanza, dict):
