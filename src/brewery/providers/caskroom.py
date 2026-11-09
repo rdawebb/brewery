@@ -45,6 +45,7 @@ log: BreweryLogger = get_logger(name=__name__)
 
 QUARANTINE = "com.apple.quarantine"
 ALT_NAMES = "com.apple.metadata:kMDItemAlternateNames"
+USER_APPROVED = 0x0040  # The quarantine flag set once the user lets an app open
 
 # brew's defaults for the dirs moved artifacts go to, keyed as its config.json keys them
 DEFAULT_DIRS: Mapping[str, Path] = {
@@ -409,7 +410,9 @@ def upgrade_cask(
     lists it), then its artifacts are set aside in its version dir; an app dir
     the new version also installs is emptied rather than removed, since macOS
     treats a removed app as uninstalled; if staging or installing the new version
-    fails, the old version, its receipt and its artifacts are put back.
+    fails, the old version, its receipt and its artifacts are put back, and any
+    apps it quit are reopened; the user's Gatekeeper approval of the old apps
+    carries over to the new ones when they're signed by the same identity.
 
     Args:
         row: The new version's catalog row, already localised.
@@ -439,6 +442,14 @@ def upgrade_cask(
         if key in _MOVED
     ]
     keep = {target for _key, target in moved}
+    old_apps = [
+        _locate(key, args, old_staged, env, _config_dirs(config))[1]
+        for stanza in old
+        for key, args in stanza.items()
+        if key == "app"
+    ]
+    new_apps = [target for key, target in moved if key == "app"]
+    signers = _approved_signers(old_apps) if len(old_apps) == len(new_apps) else None
     saved = {p: p.read_bytes() for p in meta.iterdir() if p.is_file()}
     backups = [
         (p, p.with_name(f"{p.name}.upgrading")) for p in (old_staged, meta / version)
@@ -492,6 +503,7 @@ def upgrade_cask(
                 p.write_bytes(data)
 
             _put_back(done)
+            reopen(closed, old_apps)
 
         except (OSError, CellarError) as exc:
             log.warning(f"couldn't put back {row.token} {version}: {exc}")
@@ -501,7 +513,107 @@ def upgrade_cask(
     for _path, backup in backups:
         shutil.rmtree(backup, ignore_errors=True)
 
-    reopen(closed, [target for key, target in moved if key == "app"])
+    if signers:
+        _inherit_approval(row.token, signers, new_apps)
+
+    reopen(closed, new_apps)
+
+
+def _approved_signers(apps: Sequence[Path]) -> list[str | None] | None:
+    """The apps' signers, if the user has approved all of them.
+
+    An app with no quarantine already opens without a prompt, so counts as approved.
+
+    Args:
+        apps: The installed version's apps.
+
+    Returns:
+        Each app's designated requirement, None where it isn't validly signed;
+        None instead if any app is missing or unapproved.
+    """
+    for app in apps:
+        status = _xattr("-p", QUARANTINE, str(app))
+        flags = re.match(r"[0-9a-f]+", status, re.IGNORECASE)
+        if not app.exists() or (
+            status and not (flags and int(flags[0], 16) & USER_APPROVED)
+        ):
+            return None
+
+    return [_signer(app) for app in apps]
+
+
+def _inherit_approval(token: str, signers: list[str | None], apps: list[Path]) -> None:
+    """Mark the new apps approved if each is signed as its old version was.
+
+    The quarantine stays, so Gatekeeper still checks them; best-effort: a failure
+    just means macOS asks again.
+
+    Args:
+        token: The cask, for warnings.
+        signers: `_approved_signers` for the old apps, in the same order as `apps`.
+        apps: The new version's apps.
+    """
+    for requirement, app in zip(signers, apps, strict=True):
+        match = _signed_by(app, requirement) if requirement else None
+        if not match:
+            why = "signer changed" if match is False else "signer couldn't be verified"
+            log.warning(f"{token}'s {why}, so macOS may prompt at its next launch")
+            return
+
+    for app in apps:
+        if not (status := _xattr("-p", QUARANTINE, str(app)).strip()):
+            continue  # Not quarantined, so nothing to approve
+
+        approved = re.sub(
+            r"\A[0-9a-f]+",
+            lambda m: f"{int(m[0], 16) | USER_APPROVED:0{len(m[0])}x}",
+            status,
+            flags=re.IGNORECASE,
+        )
+        cmd = ["xattr", "-r", "-s", "-w", QUARANTINE, approved, str(app)]
+
+        if subprocess.run(cmd, capture_output=True, check=False).returncode:
+            log.warning(
+                f"couldn't carry over {token}'s approval, so macOS may prompt at next launch"
+            )
+
+
+def _signer(app: Path) -> str | None:
+    """An app's designated requirement, if it's validly signed.
+
+    Args:
+        app: The app.
+
+    Returns:
+        The requirement's text, or None.
+    """
+    verify = ["codesign", "--verify", "--deep", "--strict", "--", str(app)]
+    if subprocess.run(verify, capture_output=True, check=False).returncode:
+        return None
+
+    cmd = ["codesign", "-d", "-r-", "--", str(app)]
+    out = subprocess.run(cmd, capture_output=True, text=True, check=False).stdout
+
+    return out.partition("designated => ")[2].strip() or None
+
+
+def _signed_by(app: Path, requirement: str) -> bool | None:
+    """Whether an app satisfies a designated requirement.
+
+    Args:
+        app: The app.
+        requirement: The requirement's text.
+
+    Returns:
+        True or False, or None if it couldn't be checked.
+    """
+    cmd = ["codesign", "--verify", "--deep", "--strict"]
+    cmd += ["-R", f"={requirement}", "--", str(app)]
+
+    # codesign exits 3 when the app is validly signed but fails the requirement
+    return {0: True, 3: False}.get(
+        subprocess.run(cmd, capture_output=True, check=False).returncode
+    )
 
 
 def _set_aside(

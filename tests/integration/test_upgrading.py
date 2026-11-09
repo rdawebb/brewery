@@ -15,6 +15,7 @@ from _rows import cask_dict
 import brewery.providers.cask_directives as directives
 from brewery.core.models import PackageKind
 from brewery.core.repo import Repository
+from brewery.providers import caskroom
 from brewery.providers.downloader import Downloader
 from brewery.services.install import install_packages
 from brewery.services.pin import pin_packages, unpin_packages
@@ -389,12 +390,38 @@ class TestUpgradeCasks:
         assert self._version(mock_env) == "2.0"
         assert signalled == []  # Only `on_upgrade` signals on upgrade
 
-    async def test_failed_upgrade_restores_the_old_version(
-        self, repo, mock_brew, mock_env, foo, tmp_path
+    @pytest.mark.parametrize("same_signer", [True, False])
+    async def test_approval_carries_over_when_the_signer_is_the_same(
+        self, repo, mock_env, foo, tmp_path, monkeypatch, same_signer
     ) -> None:
-        """Test that a failed install puts the old version back and hands it to brew."""
+        """Test that an approved app's upgrade is approved too, unless its signer changed."""
         foo("1.0", zip_app(tmp_path, mock_env.bottle_cache, "v1"))
         await install_packages(repo, ["foo"], kind=PackageKind.CASK)
+        app = tmp_path / "apps" / "Foo.app"
+        caskroom._xattr("-w", caskroom.QUARANTINE, "01c1;1;Homebrew Cask;", str(app))
+        monkeypatch.setattr(caskroom, "_signer", lambda app: "identifier foo")
+        monkeypatch.setattr(caskroom, "_signed_by", lambda app, req: same_signer)
+        foo("2.0", zip_app(tmp_path, mock_env.bottle_cache, "v2"))
+
+        await upgrade_packages(repo, ["foo"])
+
+        for path in (app, app / "Contents" / "MacOS" / "foo"):
+            flags = caskroom._xattr("-p", caskroom.QUARANTINE, str(path)).split(";")[0]
+            assert bool(int(flags, 16) & caskroom.USER_APPROVED) is same_signer
+
+    async def test_failed_upgrade_restores_the_old_version(
+        self, repo, mock_brew, mock_env, foo, tmp_path, monkeypatch
+    ) -> None:
+        """Test that a failed install puts the old version back, reopens it, and hands it to brew."""
+        foo("1.0", zip_app(tmp_path, mock_env.bottle_cache, "v1"))
+        await install_packages(repo, ["foo"], kind=PackageKind.CASK)
+        reopened = []
+        monkeypatch.setattr(
+            caskroom, "run_directives", lambda *a, **kw: ["org.example.foo"]
+        )
+        monkeypatch.setattr(
+            caskroom, "reopen", lambda ids, apps: reopened.append((ids, apps))
+        )
         taken = mock_env.prefix / "bin" / "bar"
         taken.write_text("")
         foo(
@@ -413,6 +440,7 @@ class TestUpgradeCasks:
         assert self._staged(mock_env) == [".metadata", "1.0"]
         assert (mock_env.caskroom / "foo" / "1.0" / "Foo.app").is_symlink()
         assert self._version(mock_env) == "1.0"
+        assert reopened == [(["org.example.foo"], [app])]
 
     async def test_no_check_download_is_fetched_again(
         self, repo, mock_env, foo, tmp_path, monkeypatch
