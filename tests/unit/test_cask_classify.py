@@ -9,7 +9,12 @@ from _rows import cask_row
 
 from brewery.core.cask_locale import localise, parse_locale, pick_language
 from brewery.core.host import Platform
-from brewery.providers.cask import classify, classify_uninstall, read_cask_opts
+from brewery.providers.cask import (
+    classify,
+    classify_uninstall,
+    read_cask_opts,
+    url_headers,
+)
 
 SEQUOIA = Platform(arch="arm64", os="macos", macos_major=15)
 
@@ -100,7 +105,14 @@ class TestClassify:
                 id="git",
             ),
             pytest.param(
-                {"url_specs": {"user_agent": ":fake"}}, "`url user_agent:`", id="header"
+                {"url_specs": {"user_agent": ":curl"}},
+                "`url user_agent: :curl`",
+                id="curl_agent",
+            ),
+            pytest.param(
+                {"url_specs": {"referer": "https://a/", "header": "X-A: b"}},
+                "`url header:`",
+                id="header",
             ),
             pytest.param(
                 {"url_specs": {"using": "post", "data": {"a": "b"}}},
@@ -119,10 +131,53 @@ class TestClassify:
         row = cask_row(artifacts=[{"app": ["Foo.app"]}], **fields)
         assert classify(row, SEQUOIA) == ("brew", reason)
 
+    @pytest.mark.parametrize(
+        "specs",
+        [
+            {"user_agent": ":fake", "cookies": {"a": "b"}},
+            {"user_agent": "Foo/1.0", "referer": "https://a/"},
+        ],
+    )
+    def test_header_specs_are_native(self, specs) -> None:
+        """Test that the `url` options sent as headers keep the cask native."""
+        row = cask_row(artifacts=[{"app": ["Foo.app"]}], url_specs=specs)
+        assert classify(row, SEQUOIA) == ("native", "")
+
     def test_off_macos_goes_to_brew(self) -> None:
         """Test that native casks are macOS-only."""
         linux = Platform(arch="amd64", os="linux")
         assert classify(cask_row(artifacts=[{"font": ["a.ttf"]}]), linux)[0] == "brew"
+
+
+class TestUrlHeaders:
+    """Tests for the request headers a cask's `url` options ask for."""
+
+    @pytest.mark.parametrize(
+        ("specs", "expected"),
+        [
+            pytest.param(None, (), id="none"),
+            pytest.param(
+                {"user_agent": "Foo/1.0"}, (("User-Agent", "Foo/1.0"),), id="string"
+            ),
+            pytest.param(
+                {"referer": "https://a/"}, (("Referer", "https://a/"),), id="referer"
+            ),
+            pytest.param(
+                {"cookies": {"a": "1", "b": "2"}},
+                (("Cookie", "a=1;b=2"),),
+                id="cookies",
+            ),
+        ],
+    )
+    def test_headers_per_key(self, specs, expected) -> None:
+        """Test that each `url` option becomes the header brew's curl sends."""
+        assert url_headers(specs) == expected
+
+    @pytest.mark.parametrize("agent", [":fake", ":browser"])
+    def test_fake_agent_is_brews_safari(self, agent) -> None:
+        """Test that `:fake` and `:browser` send brew's Safari agent."""
+        ((name, value),) = url_headers({"user_agent": agent})
+        assert (name, "Safari/" in value) == ("User-Agent", True)
 
 
 class TestReadCaskOpts:

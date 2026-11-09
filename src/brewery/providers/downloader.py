@@ -52,11 +52,13 @@ class BottleRef:
         name: The name of the bottle.
         url: The download URL of the bottle.
         sha256: The expected SHA256 checksum of the bottle, or `NO_CHECK`.
+        headers: Extra (name, value) request headers, such as a cask's referer.
     """
 
     name: str
     url: str
     sha256: str  # Lowercase hex
+    headers: tuple[tuple[str, str], ...] = ()
 
     @property
     def key(self) -> str:
@@ -234,7 +236,7 @@ class Downloader:
                 async with self._client.stream(
                     "GET",
                     ref.url,
-                    headers=self._headers(ref.url),
+                    headers={**self._headers(ref.url), **dict(ref.headers)},
                     follow_redirects=True,
                 ) as resp:
                     if resp.status_code in RETRYABLE_STATUS:

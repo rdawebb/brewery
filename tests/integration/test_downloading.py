@@ -519,3 +519,24 @@ async def test_concurrent_fetches_are_bounded(tmp_path) -> None:
     async with _make(tmp_path, handler, max_concurrency=2) as dl:
         await asyncio.gather(*(dl.fetch(ref) for ref in refs))
     assert live.peak <= 2, f"in-flight peaked at {live.peak}, limit was 2"
+
+
+async def test_ref_headers_are_sent(tmp_path) -> None:
+    """Test that a ref's own headers, such as a cask's referer, reach the host."""
+    blob = _blob(14)
+    seen: list[httpx2.Headers] = []
+
+    def handler(req: httpx2.Request) -> httpx2.Response:
+        seen.append(req.headers)
+        return httpx2.Response(200, content=blob)
+
+    ref = BottleRef(
+        "foo",
+        "https://example.org/Foo.dmg",
+        hashlib.sha256(blob).hexdigest(),
+        (("Referer", "https://example.org/"), ("Cookie", "a=1")),
+    )
+    async with _make(tmp_path, handler) as dl:
+        await dl.fetch(ref)
+
+    assert (seen[0]["referer"], seen[0]["cookie"]) == ("https://example.org/", "a=1")

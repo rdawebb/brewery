@@ -29,6 +29,7 @@ from brewery.providers.cask import (
     classify,
     classify_uninstall,
     read_cask_opts,
+    url_headers,
 )
 from brewery.providers.caskroom import (
     install_artifacts,
@@ -448,7 +449,7 @@ async def _fetch(
         The verified download, or the reason it failed.
     """
     sha = row.sha256 if row.sha256 not in (None, NO_CHECK) else NO_CHECK
-    ref = BottleRef(name=row.token, url=str(row.url), sha256=sha)
+    ref = BottleRef(row.token, str(row.url), sha, url_headers(row.url_specs))
     if fresh and sha == NO_CHECK:
         # Cached under its URL, which a new version may not change
         downloader.cache_path(ref.key).unlink(missing_ok=True)

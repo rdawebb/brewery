@@ -39,6 +39,16 @@ NATIVE_UNINSTALL = frozenset(
     {"quit", "delete", "launchctl", "signal", "trash", "rmdir", "on_upgrade"}
 )
 
+# `url` options brew sends as request headers
+_HEADER_SPECS = frozenset({"user_agent", "referer", "cookies"})
+
+# `HOMEBREW_USER_AGENT_FAKE_SAFARI`, sent for `user_agent: :fake` and `:browser`
+_FAKE_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/27.0 Safari/605.1.15"
+)
+_FAKE_AGENTS = frozenset({":fake", ":browser"})
+
 _ARCH_TYPES = {"arm": "arm64", "intel": "amd64"}
 
 _COMPARE: dict[str, Callable[[int, int], bool]] = {
@@ -112,8 +122,8 @@ def classify(row: CaskRow, plat: Platform | None) -> tuple[Route, str]:
     if row.container:
         return "brew", "`container` unpacking"
 
-    if row.url_specs:  # git checkout, headers or POST: only brew's strategies fetch
-        return "brew", f"`url {min(row.url_specs)}:`"
+    if reason := _url_reason(row.url_specs or {}):
+        return "brew", reason
 
     if row.language_variations:
         return "brew", "`language` variant"  # One `localise` couldn't apply
@@ -122,6 +132,53 @@ def classify(row: CaskRow, plat: Platform | None) -> tuple[Route, str]:
         return "brew", reason
 
     return _check_depends(row.depends_on or {}, plat.macos_major, plat.arch)
+
+
+def url_headers(specs: dict[str, Any] | None) -> tuple[tuple[str, str], ...]:
+    """The request headers a cask's `url` options ask for.
+
+    Args:
+        specs: The cask's decoded `url_specs`, or None.
+
+    Returns:
+        (name, value) header pairs; empty when the cask asks for none.
+    """
+    specs = specs or {}
+    headers: list[tuple[str, str]] = []
+
+    if agent := specs.get("user_agent"):
+        headers.append(
+            ("User-Agent", _FAKE_USER_AGENT if agent in _FAKE_AGENTS else agent)
+        )
+
+    if referer := specs.get("referer"):
+        headers.append(("Referer", referer))
+
+    if cookies := specs.get("cookies"):
+        headers.append(("Cookie", ";".join(f"{k}={v}" for k, v in cookies.items())))
+
+    return tuple(headers)
+
+
+def _url_reason(specs: dict[str, Any]) -> str:
+    """Why a cask's `url` options need brew to fetch it.
+
+    Args:
+        specs: The cask's decoded `url_specs`.
+
+    Returns:
+        The reason, or an empty string when `url_headers` covers them.
+    """
+    # git checkout or POST: only brew's strategies fetch
+    if foreign := sorted(specs.keys() - _HEADER_SPECS):
+        return f"`url {foreign[0]}:`"
+
+    # `:curl` sends curl's own agent, which brewery doesn't have
+    agent = specs.get("user_agent")
+    if isinstance(agent, str) and agent.startswith(":") and agent not in _FAKE_AGENTS:
+        return f"`url user_agent: {agent}`"
+
+    return ""
 
 
 def classify_uninstall(
