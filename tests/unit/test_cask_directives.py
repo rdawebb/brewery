@@ -137,3 +137,25 @@ def test_bad_signal_directive_needs_brew(values) -> None:
     """Test that an unknown or unpaired signal raises, so the cask goes to brew."""
     with pytest.raises(CellarError, match="bad signal directive"):
         directives._signal(values)
+
+
+class TestRunDirectives:
+    """Tests for running directives in brew's order."""
+
+    @pytest.mark.parametrize(
+        ("upgrade", "on_upgrade", "signalled"),
+        [(False, [], True), (True, [], False), (True, ["signal"], True)],
+    )
+    def test_upgrade_skips_signal_unless_on_upgrade(
+        self, monkeypatch, upgrade, on_upgrade, signalled
+    ) -> None:
+        """Test brew's rule: an upgrade only signals what `on_upgrade` lists."""
+        ran: list[str] = []
+        monkeypatch.setitem(directives._RUNNERS, "signal", lambda _: ran.append("s"))
+        monkeypatch.setitem(directives._RUNNERS, "quit", lambda ids: ids)
+        stanza = {"quit": "a.b", "signal": ["TERM", "a.b"], "on_upgrade": on_upgrade}
+
+        closed = directives.run_directives([stanza], deferred=False, upgrade=upgrade)
+
+        assert closed == ["a.b"]
+        assert bool(ran) is signalled

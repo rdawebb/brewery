@@ -256,7 +256,7 @@ async def upgrade_packages(
         greedy: With no names, also upgrade casks that update themselves.
         env: Brewery environment (paths), resolved by the pipeline if omitted.
         formula: Formula backend for the per-formula brew fallback.
-        cask: Cask backend, which handles casks wholesale.
+        cask: Cask backend for the casks brewery can't upgrade.
         progress: Optional progress sink for the native pipeline.
 
     Returns:
@@ -293,7 +293,9 @@ async def upgrade_packages(
         )
 
     if cask_names:
-        await upgrade_casks(cask_names, backend=cask)
+        await upgrade_casks(
+            cask_names, repo=repo, backend=cask, env=env, progress=progress
+        )
 
     # Only invalidate the cache if something actually changed
     if formula_names or cask_names:

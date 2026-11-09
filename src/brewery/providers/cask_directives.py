@@ -53,6 +53,11 @@ function run(argv) {
 }
 """
 
+_LSREGISTER = (
+    "/System/Library/Frameworks/CoreServices.framework"
+    "/Frameworks/LaunchServices.framework/Support/lsregister"
+)
+
 _TRASH_JS = """
 ObjC.import('Foundation')
 function run(argv) {
@@ -66,23 +71,56 @@ function run(argv) {
 """
 
 
-def run_directives(stanzas: Sequence[Mapping[str, Any]], *, deferred: bool) -> None:
+def run_directives(
+    stanzas: Sequence[Mapping[str, Any]], *, deferred: bool, upgrade: bool = False
+) -> list[str]:
     """Run the stanzas' directives, one directive at a time across all of them.
 
     Args:
         stanzas: The `uninstall` (and with `--zap`, `zap`) directive dicts, in order.
         deferred: True for `rmdir`, which runs once the artifacts are removed.
+        upgrade: Skip `signal` unless the stanza's `on_upgrade` lists it.
+
+    Returns:
+        The bundle ids `quit` closed, for an upgrade to reopen.
 
     Raises:
         CellarError: If a step needs root, or a path can't be deleted.
     """
+    closed: list[str] = []
     for name in _ORDER:
         if (name == "rmdir") != deferred:
             continue
 
         for stanza in stanzas:
-            if name in stanza:
-                _RUNNERS[name](_flat(stanza[name]))
+            if name not in stanza or (
+                upgrade
+                and name == "signal"
+                and name not in _flat(stanza.get("on_upgrade", []))
+            ):
+                continue
+
+            closed += _RUNNERS[name](_flat(stanza[name])) or []
+
+    return closed
+
+
+def reopen(bundle_ids: Sequence[str], apps: Iterable[Path]) -> None:
+    """Reopen any apps an upgrade quit.
+
+    Args:
+        bundle_ids: The bundle ids `run_directives` returned.
+        apps: The new version's apps, registered with Launch Services first.
+    """
+    if not bundle_ids:
+        return
+
+    for app in apps:
+        if app.exists():
+            _run(_LSREGISTER, "-f", str(app))
+
+    for bundle_id in bundle_ids:
+        _run("open", "-b", bundle_id)
 
 
 def remove(path: Path) -> None:
@@ -93,6 +131,7 @@ def remove(path: Path) -> None:
     """
     if path.is_dir() and not path.is_symlink():
         shutil.rmtree(path)
+
     else:
         path.unlink(missing_ok=True)
 
@@ -162,6 +201,7 @@ def _expand(bundle_id: str, apps: list[tuple[int, str]]) -> list[str]:
         return [bundle_id]
 
     pattern = _wildcard(bundle_id)
+
     return [bid for _, bid in apps if pattern.fullmatch(bid)]
 
 
@@ -192,6 +232,7 @@ def _gui() -> bool:
         True if `who` lists this user on the console.
     """
     user = getpass.getuser()
+
     return any(
         line.split()[:2] == [user, "console"]
         for line in _run("who").stdout.splitlines()
@@ -210,12 +251,16 @@ def _is_running(bundle_id: str) -> bool:
     return any(b.lower() == bundle_id.lower() for _, b in _running_apps())
 
 
-def _quit(bundle_ids: list[str]) -> None:
-    """Ask each app to quit, waiting up to 10 seconds, as brew's `uninstall_quit` does.
+def _quit(bundle_ids: list[str]) -> list[str]:
+    """Ask each app to quit, waiting up to 10 seconds.
 
     Args:
         bundle_ids: Bundle ids, possibly with `*` wildcards.
+
+    Returns:
+        The bundle ids that quit.
     """
+    closed: list[str] = []
     apps = _running_apps()
     for bundle_id in [b for pattern in bundle_ids for b in _expand(pattern, apps)]:
         if not _is_running(bundle_id):
@@ -237,6 +282,11 @@ def _quit(bundle_ids: list[str]) -> None:
                 log.warning(f"{bundle_id} did not quit")
                 break
 
+        else:
+            closed.append(bundle_id)
+
+    return closed
+
 
 def _launchctl_list() -> list[tuple[int, str]]:
     """launchd's jobs in this user's domain, as (pid, label); pid 0 if not running.
@@ -247,6 +297,7 @@ def _launchctl_list() -> list[tuple[int, str]]:
     rows = (
         line.split("\t") for line in _run("launchctl", "list").stdout.splitlines()[1:]
     )
+
     return [(int(r[0]) if r[0].isdigit() else 0, r[2]) for r in rows if len(r) == 3]
 
 
@@ -348,6 +399,7 @@ def _launchctl(services: list[str]) -> None:
         ) or bool(
             (r := _run("launchctl", "list", label)).stdout.strip() and not r.returncode
         )
+
         if found and not _run("launchctl", "remove", label).returncode:
             time.sleep(1)
 

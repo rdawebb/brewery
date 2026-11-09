@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from _layout import full_receipt, write_keg
@@ -61,23 +62,23 @@ def _install_formula(cellar, name, version="1.0", deps=()) -> Path:
     )
 
 
-def zip_app(tmp_path, cache) -> str:
+def zip_app(tmp_path, cache, body: str = "#!/bin/sh\n") -> str:
     """Zip a minimal `Foo.app` into the download cache, as if already fetched.
 
     Args:
         tmp_path: The pytest tmp_path fixture.
         cache: The downloader's cache dir.
+        body: The app's `foo` executable, to tell versions apart.
 
     Returns:
         The zip's sha256, which is its cache key.
     """
-    macos = tmp_path / "src" / "Foo.app" / "Contents" / "MacOS"
+    work = Path(tempfile.mkdtemp(dir=tmp_path))
+    macos = work / "src" / "Foo.app" / "Contents" / "MacOS"
     macos.mkdir(parents=True)
-    (macos / "foo").write_text("#!/bin/sh\n")
-    archive = tmp_path / "foo.zip"
-    subprocess.run(
-        ["ditto", "-c", "-k", str(tmp_path / "src"), str(archive)], check=True
-    )
+    (macos / "foo").write_text(body)
+    archive = work / "foo.zip"
+    subprocess.run(["ditto", "-c", "-k", str(work / "src"), str(archive)], check=True)
     sha = hashlib.sha256(archive.read_bytes()).hexdigest()
     cache.mkdir(parents=True, exist_ok=True)
     shutil.copy(archive, cache / sha)

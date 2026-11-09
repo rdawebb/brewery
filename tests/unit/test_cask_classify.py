@@ -7,15 +7,9 @@ from pathlib import Path
 import pytest
 from _rows import cask_row
 
+from brewery.core.cask_locale import localise, parse_locale, pick_language
 from brewery.core.host import Platform
-from brewery.providers.cask import (
-    classify,
-    classify_uninstall,
-    localise,
-    parse_locale,
-    pick_language,
-    read_cask_opts,
-)
+from brewery.providers.cask import classify, classify_uninstall, read_cask_opts
 
 SEQUOIA = Platform(arch="arm64", os="macos", macos_major=15)
 

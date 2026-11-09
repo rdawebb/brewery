@@ -12,6 +12,7 @@ macOS-only, like native casks themselves: `classify` sends every other host to b
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
 import plistlib
 import re
@@ -19,7 +20,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -31,7 +32,12 @@ from brewery.core.catalog import CaskRow
 from brewery.core.config import BreweryENV
 from brewery.core.errors import CellarError, ExtractionError, LinkError
 from brewery.core.logging import BreweryLogger, get_logger
-from brewery.providers.cask_directives import remove, run_directives, undeletable
+from brewery.providers.cask_directives import (
+    remove,
+    reopen,
+    run_directives,
+    undeletable,
+)
 from brewery.providers.extractor import extract_tar
 from brewery.providers.receipt import RECEIPT_NAME, current_arch, dumps_bytes
 
@@ -136,6 +142,7 @@ def stage(
         _run(["chmod", "-R", "u+w", str(scratch)])
         # 0x0100 opts the staged app out of App Translocation
         _run(["xattr", "-r", "-s", "-w", QUARANTINE, f"0181;{stamp}", str(scratch)])
+
         try:
             scratch.rename(staged)
 
@@ -149,6 +156,11 @@ def stage(
 
     try:
         _write_metadata(row, token_dir, on_request=on_request)
+        if row.version == "latest":
+            # brew's `save_download_sha`, which its `upgrade --greedy` compares
+            with download.open("rb") as fh:
+                sha = hashlib.file_digest(fh, "sha256").hexdigest()
+            (token_dir / ".metadata" / "LATEST_DOWNLOAD_SHA256").write_text(sha)
 
     except BaseException:
         shutil.rmtree(staged, ignore_errors=True)
@@ -228,6 +240,8 @@ def install_artifacts(
     dirs: Mapping[str, Path] | None = None,
     binaries: bool = True,
     languages: Sequence[str] = (),
+    explicit: Mapping[str, Any] | None = None,
+    reuse: Collection[Path] = (),
 ) -> None:
     """Move and link a staged cask's artifacts into place, as brew does.
 
@@ -244,13 +258,16 @@ def install_artifacts(
             reads both back from `.metadata/config.json` to uninstall.
         binaries: False skips `binary` artifacts, as `--no-binaries` does.
         languages: `--language` values, recorded so `brew upgrade` keeps the variant.
+        explicit: The installed config's `explicit` part, which an upgrade keeps.
+        reuse: Targets an upgrade emptied rather than removed, to move into.
 
     Raises:
         LinkError: If a target is already taken.
         CellarError: If an artifact's source is missing or can't be moved.
     """
     overrides = dict(dirs or {})
-    dirs = {**DEFAULT_DIRS, **overrides}
+    explicit = dict(explicit or {})
+    dirs = {**DEFAULT_DIRS, **overrides, **_dir_values(explicit)}
     done: list[tuple[str, Path, Path]] = []
     try:
         # The feed lists artifacts in brew's install order: apps before binaries into them
@@ -269,7 +286,7 @@ def install_artifacts(
                     )
 
                 if key in _MOVED:
-                    _move_out(source, target)
+                    _move_out(source, target, reuse=target in reuse)
 
                 elif not _link(source, target, env.cellar, binary=key == "binary"):
                     continue
@@ -282,6 +299,7 @@ def install_artifacts(
                 if key in _MOVED:
                     source.unlink()
                     _relocate(target, source)
+
                 else:
                     target.unlink()
 
@@ -297,7 +315,7 @@ def install_artifacts(
         "default": {k: str(v) for k, v in DEFAULT_DIRS.items()},
         "env": {k: str(v) for k, v in overrides.items()}
         | ({"languages": list(languages)} if languages else {}),
-        "explicit": {},
+        "explicit": explicit,
     }
     (staged.parent / ".metadata" / "config.json").write_bytes(dumps_bytes(config))
 
@@ -338,24 +356,8 @@ def uninstall_cask(token: str, env: BreweryENV, *, zap: bool = False) -> None:
     """
     token_dir = env.caskroom / token
     receipt = read_receipt(token_dir) or {}
-    # Reads the installed version from the newest `.metadata/<version>/<stamp>`
-    stamps = sorted(token_dir.glob(".metadata/*/*"), key=lambda p: p.name)
-    if not stamps:
-        raise CellarError(f"{token} has no installed version", path=token_dir)
-
-    version = stamps[-1].parent.name
-    try:
-        config = orjson.loads((token_dir / ".metadata" / "config.json").read_bytes())
-
-    except (OSError, ValueError):
-        config = {}
-
-    dirs = {**DEFAULT_DIRS}
-    for part in ("default", "env", "explicit"):
-        dirs |= {
-            k: Path(v) for k, v in config.get(part, {}).items() if isinstance(v, str)
-        }
-
+    version, config = _installed(token_dir)
+    dirs = _config_dirs(config)
     artifacts = receipt.get("uninstall_artifacts") or []
     keys = ("uninstall", "zap") if zap else ("uninstall",)
     directives = [d for stanza in artifacts for k in keys for d in stanza.get(k, [])]
@@ -387,14 +389,270 @@ def uninstall_cask(token: str, env: BreweryENV, *, zap: bool = False) -> None:
     run_directives(directives, deferred=True)
     if zap:
         shutil.rmtree(token_dir)
+
     else:
         unstage(token, version, env.caskroom)
+
+
+def upgrade_cask(
+    row: CaskRow,
+    download: Path,
+    env: BreweryENV,
+    *,
+    dirs: Mapping[str, Path] | None = None,
+    binaries: bool = True,
+    languages: Sequence[str] = (),
+) -> None:
+    """Replace an installed cask with the version `row` describes.
+
+    The old version's `uninstall` directives run (`signal` only if `on_upgrade`
+    lists it), then its artifacts are set aside in its version dir; an app dir
+    the new version also installs is emptied rather than removed, since macOS
+    treats a removed app as uninstalled; if staging or installing the new version
+    fails, the old version, its receipt and its artifacts are put back.
+
+    Args:
+        row: The new version's catalog row, already localised.
+        download: The new version's verified download.
+        env: The Homebrew layout.
+        dirs: `HOMEBREW_CASK_OPTS` dir overrides; the installed config's
+            `explicit` part is kept over them.
+        binaries: False skips `binary` artifacts, as `--no-binaries` does.
+        languages: `--language` values, recorded as on install.
+
+    Raises:
+        CellarError: If a step can't be done without root, or the cask isn't installed.
+        OSError: If an artifact can't be moved.
+    """
+    token_dir = env.caskroom / row.token
+    meta = token_dir / ".metadata"
+    receipt = read_receipt(token_dir) or {}
+    version, config = _installed(token_dir)
+    old = receipt.get("uninstall_artifacts") or []
+    old_staged = token_dir / version
+    explicit = config.get("explicit") or {}
+    new_dirs = {**DEFAULT_DIRS, **(dirs or {}), **_dir_values(explicit)}
+    moved = [
+        (key, _locate(key, args, old_staged, env, new_dirs)[1])
+        for stanza in row.artifacts or []
+        for key, args in stanza.items()
+        if key in _MOVED
+    ]
+    keep = {target for _key, target in moved}
+    saved = {p: p.read_bytes() for p in meta.iterdir() if p.is_file()}
+    backups = [
+        (p, p.with_name(f"{p.name}.upgrading")) for p in (old_staged, meta / version)
+    ]
+    directives = [d for stanza in old for d in stanza.get("uninstall", [])]
+
+    closed = run_directives(directives, deferred=False, upgrade=True)
+    done: list[tuple[str, Path, Path]] = []
+    backed_up = False
+
+    try:
+        _set_aside(old, old_staged, env, _config_dirs(config), keep, done)
+        run_directives(directives, deferred=True)
+        for path, backup in backups:
+            if path.exists():
+                path.rename(backup)
+        backed_up = True
+
+        staged = stage(
+            row,
+            download,
+            env.caskroom,
+            on_request=receipt.get("installed_on_request") is not False,
+        )
+        install_artifacts(
+            row,
+            staged,
+            env,
+            dirs=dirs,
+            binaries=binaries,
+            languages=languages,
+            explicit=explicit,
+            reuse=keep,
+        )
+
+    except BaseException:
+        try:
+            if backed_up:
+                shutil.rmtree(token_dir / str(row.version), ignore_errors=True)
+                shutil.rmtree(meta / str(row.version), ignore_errors=True)
+
+            for path, backup in backups:
+                if backup.exists():
+                    backup.rename(path)
+
+            for p in meta.iterdir():
+                if p.is_file() and p not in saved:
+                    p.unlink()
+
+            for p, data in saved.items():
+                p.write_bytes(data)
+
+            _put_back(done)
+
+        except (OSError, CellarError) as exc:
+            log.warning(f"couldn't put back {row.token} {version}: {exc}")
+
+        raise
+
+    for _path, backup in backups:
+        shutil.rmtree(backup, ignore_errors=True)
+
+    reopen(closed, [target for key, target in moved if key == "app"])
+
+
+def _set_aside(
+    artifacts: list[dict[str, Any]],
+    staged: Path,
+    env: BreweryENV,
+    dirs: Mapping[str, Path],
+    keep: Collection[Path],
+    done: list[tuple[str, Path, Path]],
+) -> None:
+    """Move an installed version's artifacts back into its version dir, and unlink its links.
+
+    Args:
+        artifacts: The receipt's `uninstall_artifacts`.
+        staged: The installed version dir.
+        env: The Homebrew layout.
+        dirs: The installed config's dirs.
+        keep: Targets to empty rather than move, so the new version reuses the dir.
+        done: Appended with each artifact set aside, for `_put_back`.
+
+    Raises:
+        CellarError: If a target is protected, or something else is at a source.
+    """
+    for stanza in artifacts:
+        for key, args in stanza.items():
+            if key not in _MOVED and key not in _LINKED:
+                continue
+
+            source, target = _locate(key, args, staged, env, dirs)
+            if key in _LINKED:
+                # Like `_link`, a formula's link is left alone
+                if target.is_symlink() and not target.resolve().is_relative_to(
+                    env.cellar.resolve()
+                ):
+                    target.unlink()
+                    done.append((key, source, target))
+                continue
+
+            if not os.path.lexists(target):
+                continue  # Gone already, so nothing to set aside
+
+            if undeletable(target):
+                raise CellarError(f"{target} can't be removed", path=target)
+
+            if source.is_symlink():
+                source.unlink()
+
+            elif os.path.lexists(source):
+                raise CellarError(f"{source} is in the way", path=source)
+
+            source.parent.mkdir(parents=True, exist_ok=True)
+            if target in keep and target.is_dir() and not target.is_symlink():
+                source.mkdir()
+                done.append((key, source, target))  # First, so a partial move goes back
+                _fill(target, source)
+
+            else:
+                _relocate(target, source)
+                done.append((key, source, target))
+
+
+def _put_back(done: list[tuple[str, Path, Path]]) -> None:
+    """Undo `_set_aside`, moving and linking each artifact back to its target.
+
+    Args:
+        done: The artifacts `_set_aside` handled.
+    """
+    for key, source, target in reversed(done):
+        if key in _LINKED:
+            if not os.path.lexists(target):
+                target.symlink_to(source)
+            continue
+
+        if target.is_dir() and not target.is_symlink():
+            _fill(source, target)
+            source.rmdir()
+
+        else:
+            _relocate(source, target)
+        source.symlink_to(target)
+
+
+def _fill(source: Path, target: Path) -> None:
+    """Move a dir's contents into another, existing dir.
+
+    Args:
+        source: The dir to empty.
+        target: The dir to move them into.
+    """
+    for child in list(source.iterdir()):
+        _relocate(child, target / child.name)
+
+
+def _installed(token_dir: Path) -> tuple[str, dict[str, Any]]:
+    """An installed cask's version and `config.json`.
+
+    Args:
+        token_dir: The cask's Caskroom directory.
+
+    Returns:
+        The version, read from the newest `.metadata/<version>/<stamp>` as brew
+        does, and the config, empty if it's missing or unreadable.
+
+    Raises:
+        CellarError: If the cask has no installed version.
+    """
+    stamps = sorted(token_dir.glob(".metadata/*/*"), key=lambda p: p.name)
+    if not stamps:
+        raise CellarError(f"{token_dir.name} has no installed version", path=token_dir)
+
+    try:
+        config = orjson.loads((token_dir / ".metadata" / "config.json").read_bytes())
+
+    except (OSError, ValueError):
+        config = {}
+
+    return stamps[-1].parent.name, config if isinstance(config, dict) else {}
+
+
+def _config_dirs(config: Mapping[str, Any]) -> dict[str, Path]:
+    """The dirs an installed config moved artifacts to.
+
+    Args:
+        config: The installed `config.json`.
+
+    Returns:
+        `DEFAULT_DIRS`, overridden by the config's `default`, `env` and `explicit` parts.
+    """
+    dirs = {**DEFAULT_DIRS}
+    for part in ("default", "env", "explicit"):
+        dirs |= _dir_values(config.get(part) or {})
+
+    return dirs
+
+
+def _dir_values(part: Mapping[str, Any]) -> dict[str, Path]:
+    """A config part's dirs, the keys whose values are strings.
+
+    Args:
+        part: One of a config's `default`, `env` or `explicit` parts.
+
+    Returns:
+        The dirs, as paths.
+    """
+    return {k: Path(v) for k, v in part.items() if isinstance(v, str)}
 
 
 def _locate(
     key: str, args: list[Any], staged: Path, env: BreweryENV, dirs: Mapping[str, Path]
 ) -> tuple[Path, Path]:
-    """Resolve an artifact's source and target the way brew's `Relocated` does.
+    """Resolve an artifact's source and target.
 
     The feed's sibling `target` is computed before placeholders are expanded, so
     it is wrong for absolute targets; the target is worked out from `args` instead.
@@ -433,8 +691,10 @@ def _locate(
 
     if key == "bash_completion":
         name = Path(name).stem
+
     elif key == "zsh_completion" and not name.startswith("_"):
         name = f"_{Path(name).stem}"
+
     elif key == "fish_completion" and not name.endswith(".fish"):
         name = f"{Path(name).stem}.fish"
 
@@ -451,16 +711,31 @@ def _locate(
     raise CellarError(f"{key} {args[0]} has no absolute target", path=source)
 
 
-def _move_out(source: Path, target: Path) -> None:
+def _move_out(source: Path, target: Path, *, reuse: bool = False) -> None:
     """Move an artifact to its target, leaving a symlink to it at the source.
 
     Args:
         source: The artifact in the version dir.
         target: Where it goes.
+        reuse: Whether an upgrade left the target as an empty dir to move into.
 
     Raises:
         LinkError: If the target is already taken.
     """
+    empty = reuse and target.is_dir() and not any(target.iterdir())
+    if empty and not source.is_dir():
+        target.rmdir()
+
+    elif empty:
+        _fill(source, target)
+        # The kept dir has the old version's quarantine; brew's `copy_xattrs`
+        if quarantine := _xattr("-p", QUARANTINE, str(source)).strip():
+            _xattr("-w", QUARANTINE, quarantine, str(target))
+        source.rmdir()
+        source.symlink_to(target)
+        _add_alt_name(target, source.name)
+        return
+
     if os.path.lexists(target):
         raise LinkError([(str(target), "an existing file")])
 
@@ -482,11 +757,7 @@ def _add_alt_name(target: Path, name: str) -> None:
     if name.casefold() == target.name.casefold():
         return
 
-    def xattr(*args: str) -> str:
-        cmd = ["xattr", *args, str(target)]
-        return subprocess.run(cmd, capture_output=True, text=True, check=False).stdout
-
-    names = xattr("-p", ALT_NAMES).strip()
+    names = _xattr("-p", ALT_NAMES, str(target)).strip()
     if names.startswith("(") and names.endswith(")"):
         names = names[1:-1]
 
@@ -496,7 +767,21 @@ def _add_alt_name(target: Path, name: str) -> None:
         capture_output=True,
         check=False,
     )
-    xattr("-w", ALT_NAMES, f'({names}{", " if names else ""}"{name}")')
+    _xattr("-w", ALT_NAMES, f'({names}{", " if names else ""}"{name}")', str(target))
+
+
+def _xattr(*args: str) -> str:
+    """Run `xattr`, best-effort.
+
+    Args:
+        *args: Its arguments.
+
+    Returns:
+        Its stdout, empty if it failed.
+    """
+    cmd = ["xattr", *args]
+
+    return subprocess.run(cmd, capture_output=True, text=True, check=False).stdout
 
 
 def _link(source: Path, target: Path, cellar: Path, *, binary: bool) -> bool:
@@ -563,6 +848,7 @@ def _relocate(source: Path, target: Path) -> None:
 
         if source.is_dir() and not source.is_symlink():
             shutil.rmtree(source)
+
         else:
             source.unlink()
 
@@ -622,6 +908,7 @@ def _unpack_dmg(dmg: Path, dest: Path) -> None:
             for e in plistlib.loads(out.encode())["system-entities"]
             if "mount-point" in e
         ]
+
         try:
             for mount in mounts:
                 for entry in mount.iterdir():

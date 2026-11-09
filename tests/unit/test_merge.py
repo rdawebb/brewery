@@ -465,6 +465,30 @@ class TestMergeCask:
         catalog = mock_catalog(casks={"firefox": cask_row("firefox", version=latest)})
         assert (PackageStatus.OUTDATED in merge_one(record, catalog).status) is expected
 
+    def test_language_variant_compares_its_own_version(self, tmp_path) -> None:
+        """Test that the installed config's language picks the variant compared against."""
+        from dataclasses import replace
+
+        import orjson
+
+        meta = tmp_path / "cave-story" / ".metadata"
+        meta.mkdir(parents=True)
+        (meta / "config.json").write_bytes(orjson.dumps({"env": {"languages": ["ja"]}}))
+        record = replace(
+            make_record("cave-story", kind=PackageKind.CASK, version="1.0"),
+            path=str(tmp_path / "cave-story" / "1.0"),
+        )
+        variants = [
+            {"languages": ["en"], "default": True, "value": "en"},
+            {"languages": ["ja"], "default": False, "value": "ja", "version": "1.0"},
+        ]
+        row = cask_row("cave-story", version="2.0", language_variations=variants)
+
+        pkg = merge_one(record, mock_catalog(casks={"cave-story": row}))
+
+        assert pkg.metadata["latest_version"] == "1.0"
+        assert PackageStatus.OUTDATED not in pkg.status
+
     def test_auto_updates_is_flagged_but_still_outdated(self) -> None:
         """Test that auto_updates sets its flag; filtering it is get_outdated's job."""
         record = make_record("firefox", kind=PackageKind.CASK, version="119.0")

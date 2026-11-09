@@ -1,7 +1,4 @@
-"""Cask operations: done natively where brewery can, otherwise by brew.
-
-Upgrade still hands every cask to brew.
-"""
+"""Cask operations: handled natively where possible, otherwise by brew."""
 
 from __future__ import annotations
 
@@ -12,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import httpx2
 
+from brewery.core.cask_locale import config_languages, localise, system_languages
 from brewery.core.catalog import CaskRow
 from brewery.core.config import BreweryENV, get_brewery_env
 from brewery.core.errors import BrewError
@@ -29,9 +27,7 @@ from brewery.providers.cask import (
     CaskOpts,
     classify,
     classify_uninstall,
-    localise,
     read_cask_opts,
-    system_languages,
 )
 from brewery.providers.caskroom import (
     install_artifacts,
@@ -39,6 +35,7 @@ from brewery.providers.caskroom import (
     stage,
     uninstall_cask,
     unstage,
+    upgrade_cask,
 )
 from brewery.providers.downloader import NO_CHECK, BottleRef, Downloader
 from brewery.providers.orchestrator import _NULL_PROGRESS, Outcome, ProgressPort
@@ -189,6 +186,7 @@ def _brew_reason(row: CaskRow, opts: CaskOpts) -> str:
         return "--require-sha"
 
     _route, reason = classify(row, current_platform())
+
     return reason
 
 
@@ -278,12 +276,11 @@ async def _install_one(
     Returns:
         The reason it failed, or an empty string once it's installed.
     """
-    sha = row.sha256 if row.sha256 not in (None, NO_CHECK) else NO_CHECK
-    ref = BottleRef(name=row.token, url=str(row.url), sha256=sha)
+    download = await _fetch(row, downloader, progress)
+    if isinstance(download, str):
+        return download
+
     try:
-        download = await downloader.fetch(
-            ref, on_progress=functools.partial(progress.update, row.token, "download")
-        )
         progress.update(row.token, "install")
         await asyncio.to_thread(
             _stage_and_install, row, download, env, opts, on_request
@@ -360,11 +357,127 @@ async def uninstall_casks(
         await backend.uninstall(names=to_brew, zap=zap)
 
 
-async def upgrade_casks(names: list[str], *, backend: UpgradeBackend) -> None:
-    """Upgrade every named cask.
+async def _fetch(
+    row: CaskRow, downloader: Downloader, progress: ProgressPort, *, fresh: bool = False
+) -> Path | str:
+    """Fetch a cask's download.
 
     Args:
-        names: Cask tokens to upgrade.
-        backend: The cask backend to delegate to.
+        row: The cask's catalog row.
+        downloader: The open downloader.
+        progress: The progress sink.
+        fresh: Re-download a `no_check` download, as an upgrade must.
+
+    Returns:
+        The verified download, or the reason it failed.
     """
-    await backend.upgrade(names=names)
+    sha = row.sha256 if row.sha256 not in (None, NO_CHECK) else NO_CHECK
+    ref = BottleRef(name=row.token, url=str(row.url), sha256=sha)
+    if fresh and sha == NO_CHECK:
+        # Cached under its URL, which a new version may not change
+        downloader.cache_path(ref.key).unlink(missing_ok=True)
+
+    try:
+        return await downloader.fetch(
+            ref, on_progress=functools.partial(progress.update, row.token, "download")
+        )
+
+    except (BrewError, OSError) as exc:
+        return str(exc)
+
+
+async def upgrade_casks(
+    names: list[str],
+    *,
+    repo: Repository,
+    backend: UpgradeBackend,
+    env: BreweryENV | None = None,
+    progress: ProgressPort | None = None,
+) -> None:
+    """Upgrade every named cask, natively where possible, the rest through brew.
+
+    The downloads overlap and the upgrades run one at a time; a cask whose native
+    upgrade fails is restored as it was, and falls back to brew.
+
+    Args:
+        names: Installed cask tokens to upgrade.
+        repo: The data facade to read the catalog and installed state through.
+        backend: The cask backend for the casks brewery can't upgrade.
+        env: Brewery environment (paths), resolved if omitted.
+        progress: Optional progress sink for the native upgrades.
+    """
+    env = env or get_brewery_env()
+    progress = progress or _NULL_PROGRESS
+    opts = read_cask_opts(os.environ.get("HOMEBREW_CASK_OPTS", ""))
+    plat = current_platform()
+    installed = repo.cache_mgr.installed_packages()
+    casks = {p.name for p in installed if p.kind == PackageKind.CASK}
+    formulae = {p.name for p in installed if p.kind == PackageKind.FORMULA}
+
+    rows: dict[str, CaskRow] = {}
+    reasons: dict[str, str] = {}
+    for token in dict.fromkeys(names):
+        token_dir = env.caskroom / token
+        reasons[token] = classify_uninstall(read_receipt(token_dir), plat, zap=False)
+        if (row := repo.catalog.get_cask(token)) is None:
+            reasons[token] = reasons[token] or "not in the catalog"
+            continue
+
+        if row.language_variations:
+            # Upgrade keeps the old config's `explicit` part, over the env's
+            languages = [*config_languages(token_dir, ["explicit"]), *opts.languages]
+            row = localise(row, [*languages, *system_languages()])
+
+        rows[token] = row
+        missing = {f for f in _depends(row, "formula") if f not in formulae}
+        reasons[token] = (
+            reasons[token] or _brew_reason(row, opts) or _blocked(row, casks, missing)
+        )
+
+    native = [t for t, reason in reasons.items() if not reason]
+    if native:
+        progress.begin(len(native))
+        try:
+            async with httpx2.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
+                downloader = Downloader(cache_dir=env.bottle_cache, client=client)
+                downloads = await asyncio.gather(
+                    *(_fetch(rows[t], downloader, progress, fresh=True) for t in native)
+                )
+
+            for token, download in zip(native, downloads, strict=True):
+                if isinstance(download, str):
+                    reasons[token] = download
+
+                else:
+                    progress.update(token, "install")
+                    try:
+                        await asyncio.to_thread(
+                            upgrade_cask,
+                            rows[token],
+                            download,
+                            env,
+                            dirs=opts.dirs,
+                            binaries=opts.binaries,
+                            languages=opts.languages,
+                        )
+
+                    except (BrewError, OSError) as exc:
+                        reasons[token] = str(exc)
+
+                if not reasons[token]:
+                    progress.finish(token, Outcome.NATIVE.value)
+
+                else:
+                    progress.update(token, "brew")
+                    progress.finish(token, Outcome.BREW_UPGRADE.value)
+
+        finally:
+            progress.end()
+
+    for token, reason in reasons.items():
+        if reason:
+            log.info(event="cask_to_brew", cask=token, reason=reason)
+
+    if to_brew := [t for t, reason in reasons.items() if reason]:
+        # After the live display ends: a pkg cask may prompt for a sudo password
+        await backend.upgrade(names=to_brew)

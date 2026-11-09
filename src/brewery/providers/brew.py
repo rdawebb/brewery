@@ -111,7 +111,7 @@ class BrewBackend:  # Implements base.PackageBackend
         Returns:
             The same list of names on success.
         """
-        return await _run("upgrade", names, [])
+        return await _run("upgrade", names, [self._kind_flag])
 
 
 # Static assertion that the backend satisfies the protocol

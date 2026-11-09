@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
-from _mocks import _NullSink
-from _repo_helpers import _provider_calls
+import hashlib
+import shutil
+import sys
 
+import orjson
+import pytest
+from _mocks import _NullSink
+from _repo_helpers import _provider_calls, zip_app
+from _rows import cask_dict
+
+import brewery.providers.cask_directives as directives
 from brewery.core.models import PackageKind
 from brewery.core.repo import Repository
+from brewery.providers.downloader import Downloader
+from brewery.services.install import install_packages
 from brewery.services.pin import pin_packages, unpin_packages
 from brewery.services.upgrade import upgrade_packages
 
@@ -151,8 +161,6 @@ class TestUpgrade:
         """Test that a native upgrade links the new version and keeps the old as a stamped stale keg."""
         from pathlib import Path
 
-        import orjson
-
         import brewery.providers.orchestrator as orch_mod
         import brewery.providers.pipeline as install_svc
         from brewery.core import config
@@ -296,3 +304,135 @@ class TestUpgrade:
         # The rescan resolves the active version to 2.0 (1.0 is now a stale version)
         pkg = next(p for p in repo.get_all_installed() if p.name == "wget")
         assert pkg.versions[0] == "2.0"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="native casks are macOS-only")
+class TestUpgradeCasks:
+    """Tests for upgrading casks natively, from a native install."""
+
+    @pytest.fixture
+    def foo(self, repo, mock_env, tmp_path, monkeypatch):
+        """Write `foo` to the catalog: an app and a binary in it, into a temp appdir.
+
+        Args:
+            repo: The repository fixture.
+            mock_env: The mock environment fixture.
+            tmp_path: The pytest tmp_path fixture.
+            monkeypatch: The pytest monkeypatch fixture.
+
+        Returns:
+            A callable taking the version, its download's sha256 and extra stanzas.
+        """
+        monkeypatch.setenv("HOMEBREW_CASK_OPTS", f"--appdir={tmp_path / 'apps'}")
+        monkeypatch.setattr(directives, "_running_apps", list)  # Nothing to quit
+
+        def write(version: str, sha: str, *stanzas: dict) -> None:
+            artifacts = [
+                {"app": ["Foo.app"]},
+                {"binary": ["$APPDIR/Foo.app/Contents/MacOS/foo"]},
+                *stanzas,
+            ]
+            repo.catalog.write_casks(
+                [
+                    cask_dict(
+                        "foo",
+                        version=version,
+                        url="https://example.org/foo.zip",
+                        sha256=sha,
+                        artifacts=orjson.dumps(artifacts),
+                    )
+                ]
+            )
+
+        return write
+
+    @staticmethod
+    def _staged(env) -> list[str]:
+        """The names in foo's Caskroom dir."""
+        return sorted(p.name for p in (env.caskroom / "foo").iterdir())
+
+    @staticmethod
+    def _version(env) -> str:
+        """The version foo's receipt records."""
+        receipt = env.caskroom / "foo" / ".metadata" / "INSTALL_RECEIPT.json"
+        data = orjson.loads(receipt.read_bytes())
+
+        return data["source"]["version"]
+
+    async def test_native_upgrade(
+        self, repo, mock_brew, mock_env, foo, tmp_path, monkeypatch
+    ) -> None:
+        """Test that the new version replaces the old in the same app dir, without brew."""
+        signalled: list[list[str]] = []
+        monkeypatch.setitem(directives._RUNNERS, "signal", signalled.append)
+        foo(
+            "1.0",
+            zip_app(tmp_path, mock_env.bottle_cache, "v1"),
+            {"uninstall": [{"signal": ["TERM", "org.example.foo"]}]},
+        )
+        await install_packages(repo, ["foo"], kind=PackageKind.CASK)
+        app = tmp_path / "apps" / "Foo.app"
+        inode = app.stat().st_ino
+        foo("2.0", zip_app(tmp_path, mock_env.bottle_cache, "v2"))
+
+        upgraded, _current, _advisories, failures = await upgrade_packages(
+            repo, ["foo"]
+        )
+
+        assert ([p.name for p in upgraded], failures) == (["foo"], [])
+        assert _provider_calls(mock_brew, "upgrade") == []
+        assert app.stat().st_ino == inode  # Emptied and refilled, not replaced
+        assert (app / "Contents" / "MacOS" / "foo").read_text() == "v2"
+        link = mock_env.prefix / "bin" / "foo"
+        assert link.resolve() == (app / "Contents" / "MacOS" / "foo").resolve()
+        assert self._staged(mock_env) == [".metadata", "2.0"]
+        assert self._version(mock_env) == "2.0"
+        assert signalled == []  # Only `on_upgrade` signals on upgrade
+
+    async def test_failed_upgrade_restores_the_old_version(
+        self, repo, mock_brew, mock_env, foo, tmp_path
+    ) -> None:
+        """Test that a failed install puts the old version back and hands it to brew."""
+        foo("1.0", zip_app(tmp_path, mock_env.bottle_cache, "v1"))
+        await install_packages(repo, ["foo"], kind=PackageKind.CASK)
+        taken = mock_env.prefix / "bin" / "bar"
+        taken.write_text("")
+        foo(
+            "2.0",
+            zip_app(tmp_path, mock_env.bottle_cache, "v2"),
+            {"binary": ["$APPDIR/Foo.app/Contents/MacOS/foo", {"target": "bar"}]},
+        )
+
+        await upgrade_packages(repo, ["foo"])
+
+        assert ("brew", "upgrade", "--cask", "foo") in mock_brew
+        app = tmp_path / "apps" / "Foo.app"
+        assert (app / "Contents" / "MacOS" / "foo").read_text() == "v1"
+        assert (mock_env.prefix / "bin" / "foo").resolve().is_relative_to(app.resolve())
+        assert not taken.is_symlink()
+        assert self._staged(mock_env) == [".metadata", "1.0"]
+        assert (mock_env.caskroom / "foo" / "1.0" / "Foo.app").is_symlink()
+        assert self._version(mock_env) == "1.0"
+
+    async def test_no_check_download_is_fetched_again(
+        self, repo, mock_env, foo, tmp_path, monkeypatch
+    ) -> None:
+        """Test that a cached `no_check` download, keyed by URL, isn't reused."""
+        v1 = mock_env.bottle_cache / zip_app(tmp_path, mock_env.bottle_cache, "v1")
+        foo("1.0", v1.name)
+        await install_packages(repo, ["foo"], kind=PackageKind.CASK)
+        v2 = mock_env.bottle_cache / zip_app(tmp_path, mock_env.bottle_cache, "v2")
+        by_url = hashlib.sha256(b"https://example.org/foo.zip").hexdigest()
+        shutil.copy(v1, mock_env.bottle_cache / by_url)  # The stale download
+
+        async def download(self, ref, dest, on_progress):
+            shutil.copy(v2, dest)
+            return dest
+
+        monkeypatch.setattr(Downloader, "_download", download)
+        foo("2.0", "no_check")
+
+        await upgrade_packages(repo, ["foo"])
+
+        app = tmp_path / "apps" / "Foo.app"
+        assert (app / "Contents" / "MacOS" / "foo").read_text() == "v2"

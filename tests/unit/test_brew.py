@@ -69,11 +69,15 @@ async def test_cask_install_passes_cask_flag(monkeypatch) -> None:
     assert calls[0]["args"] == ["install", "--cask", "firefox"]
 
 
-async def test_upgrade_passes_no_kind_flag(monkeypatch) -> None:
-    """Test that upgrade passes no kind flag, as brew infers the package type."""
+async def test_upgrade_passes_kind_flag(monkeypatch) -> None:
+    """Test that upgrade passes the kind flag, so a name both kinds share isn't ambiguous."""
     calls = _mock_run(monkeypatch, BrewResult("", "", 0))
     await formula_backend.upgrade(["wget"])
-    assert calls[0]["args"] == ["upgrade", "wget"]
+    await cask_backend.upgrade(["firefox"])
+    assert [c["args"] for c in calls] == [
+        ["upgrade", "--formula", "wget"],
+        ["upgrade", "--cask", "firefox"],
+    ]
 
 
 async def test_already_installed_maps_to_warning(monkeypatch) -> None:

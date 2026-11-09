@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from brewery.core.cask_locale import config_languages, localise, system_languages
 from brewery.core.catalog import CaskRow, Catalog, FormulaRow
 from brewery.core.fs_state import InstalledRecord
 from brewery.core.models import (
@@ -154,6 +157,11 @@ def _merge_cask(record: InstalledRecord, row: CaskRow | None) -> Package:
         linked=record.linked,
         pinned=record.pinned,
     )
+
+    if row is not None and row.language_variations and record.path:
+        # The installed variant, which may have its own version
+        languages = config_languages(Path(record.path).parent)
+        row = localise(row, [*languages, *system_languages()])
 
     desc: str | None = row.desc if row else None
     latest: str | None = row.version if row else None
