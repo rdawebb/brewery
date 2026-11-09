@@ -55,9 +55,12 @@ def uninstall(
         return
 
     with _repository() as repo:
-        with spinner("Uninstalling..."):
+        with spinner("Uninstalling...") as status:
+            # Stopped before brew, so any sudo prompts aren't hidden
             removed, failures = run_async(
-                coro=uninstall_packages(repo, names, kind, zap=zap)
+                coro=uninstall_packages(
+                    repo, names, kind, zap=zap, before_brew=status.stop
+                )
             )
 
         print_result(

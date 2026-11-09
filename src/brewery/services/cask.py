@@ -42,6 +42,7 @@ from brewery.providers.orchestrator import _NULL_PROGRESS, Outcome, ProgressPort
 from brewery.providers.pipeline import PIPELINE_TIMEOUT, run_install
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from brewery.core.repo import Repository
@@ -326,6 +327,7 @@ async def uninstall_casks(
     backend: UninstallBackend,
     env: BreweryENV | None = None,
     zap: bool = False,
+    before_brew: Callable[[], object] | None = None,
 ) -> None:
     """Uninstall every named cask, natively where possible, the rest through brew.
 
@@ -336,12 +338,15 @@ async def uninstall_casks(
         backend: The cask backend for the casks brewery can't uninstall.
         env: Brewery environment (paths), resolved if omitted.
         zap: Also remove each cask's `zap` files, as `--zap` does.
+        before_brew: Called before brew runs, to end a live display and allow any
+            sudo prompts.
     """
     env = env or get_brewery_env()
     plat = current_platform()
     to_brew: list[str] = []
     for token in names:
         reason = classify_uninstall(read_receipt(env.caskroom / token), plat, zap=zap)
+
         if not reason:
             try:
                 await asyncio.to_thread(uninstall_cask, token, env, zap=zap)
@@ -354,6 +359,8 @@ async def uninstall_casks(
         to_brew.append(token)
 
     if to_brew:
+        if before_brew:
+            before_brew()
         await backend.uninstall(names=to_brew, zap=zap)
 
 

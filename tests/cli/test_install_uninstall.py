@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Self
+
 import pytest
 
 from brewery.cli.commands import install as install_mod
@@ -67,8 +69,10 @@ def uninstalls(monkeypatch):
     def _arrange(removed=(), failures=()):
         calls: list[dict] = []
 
-        async def _uninstall(repo, names, kind, *, zap=False):
+        async def _uninstall(repo, names, kind, *, zap=False, before_brew=None):
             calls.append({"names": names, "kind": kind, "zap": zap})
+            if before_brew:
+                before_brew()
 
             return list(removed), list(failures)
 
@@ -271,6 +275,32 @@ class TestUninstall:
         run(["uninstall", "iina", "--zap", "--yes"])
 
         assert calls[0]["zap"] is True
+
+    def test_the_spinner_stops_before_brew(self, run, uninstalls, monkeypatch) -> None:
+        """Test that the service is handed the spinner's stop, so brew's sudo prompt shows."""
+        events: list[str] = []
+
+        class Spinner:
+            """A fake spinner that records its stop and exit."""
+
+            def __enter__(self) -> Self:
+                """Pretend to start the spinner."""
+                return self
+
+            def __exit__(self, *exc) -> None:
+                """Pretend to stop the spinner."""
+                events.append("exit")
+
+            def stop(self) -> None:
+                """Record that the spinner was stopped."""
+                events.append("stop")
+
+        monkeypatch.setattr(uninstall_mod, "spinner", lambda message: Spinner())
+        uninstalls(removed=["iina"])
+
+        run(["uninstall", "iina", "--yes"])
+
+        assert events == ["stop", "exit"]
 
     @pytest.mark.parametrize("alias", ["rm", "del"])
     def test_the_aliases_reach_the_same_command(self, run, uninstalls, alias) -> None:
