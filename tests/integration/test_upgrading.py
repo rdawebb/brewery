@@ -13,6 +13,7 @@ from _repo_helpers import _provider_calls, zip_app
 from _rows import cask_dict
 
 import brewery.providers.cask_directives as directives
+from brewery.core.locks import cask_lock
 from brewery.core.models import PackageKind
 from brewery.core.repo import Repository
 from brewery.providers import caskroom
@@ -441,6 +442,22 @@ class TestUpgradeCasks:
         assert (mock_env.caskroom / "foo" / "1.0" / "Foo.app").is_symlink()
         assert self._version(mock_env) == "1.0"
         assert reopened == [(["org.example.foo"], [app])]
+
+    async def test_locked_cask_is_reported_not_current(
+        self, repo, mock_brew, mock_env, foo, tmp_path
+    ) -> None:
+        """Test that a locked cask is left on its version, reported as locked."""
+        foo("1.0", zip_app(tmp_path, mock_env.bottle_cache, "v1"))
+        await install_packages(repo, ["foo"], kind=PackageKind.CASK)
+        foo("2.0", zip_app(tmp_path, mock_env.bottle_cache, "v2"))
+
+        with cask_lock("foo", prefix=mock_env.prefix):
+            upgraded, current, _, failures = await upgrade_packages(repo, ["foo"])
+
+        assert (upgraded, current) == ([], [])
+        assert [(n, "locked" in why) for n, why in failures] == [("foo", True)]
+        assert _provider_calls(mock_brew, "upgrade") == []
+        assert self._version(mock_env) == "1.0"
 
     async def test_no_check_download_is_fetched_again(
         self, repo, mock_env, foo, tmp_path, monkeypatch

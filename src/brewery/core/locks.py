@@ -3,6 +3,9 @@
 `formula_lock` is wire-compatible with brew's own per-rack lock, so a brewery
 and a `brew` write operation of the same formula exclude each other.
 
+`cask_lock` is compatible with brew's `CaskLock`: it excludes peer brewery processes
+and `brew cleanup`, but not `brew install --cask`.
+
 `structure_lock` is brewery-only: it guards the shared-directory ownership
 changes in `providers.linker`, which are per-prefix rather than per-rack and which
 brew does not lock at all.
@@ -279,6 +282,26 @@ def formula_lock(
     return file_lock(
         lock_path(prefix, name),
         subject=str(prefix / "Cellar" / name),
+        timeout=timeout,
+    )
+
+
+def cask_lock(
+    token: str, *, prefix: Path, timeout: float = 0.0
+) -> AbstractContextManager[None]:
+    """Lock one cask's Caskroom directory and artifacts.
+
+    Args:
+        token: The cask token.
+        prefix: The Homebrew prefix.
+        timeout: Seconds to wait; the default fails fast, as `formula_lock` does.
+
+    Returns:
+        A context manager holding the cask lock.
+    """
+    return file_lock(
+        lock_path(prefix, token, kind="cask"),
+        subject=str(prefix / "Caskroom" / token),
         timeout=timeout,
     )
 

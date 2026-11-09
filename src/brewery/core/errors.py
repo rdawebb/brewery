@@ -19,8 +19,8 @@ EXIT_TRANSIENT_ERROR = 3
 class BrewError(Exception):
     """Base exception class with context propagation.
 
-    All exceptions in the Brewery should inherit from this class.
-    Context is a dictionary that accumulates relevant information
+    All exceptions in the Brewery should inherit from this class;
+    context is a dictionary that accumulates relevant information
     as the exception propagates up the call stack.
 
     Example:
@@ -34,8 +34,15 @@ class BrewError(Exception):
     """
 
     def __init__(self, message: str, context: dict[str, Any] | None = None) -> None:
+        """Initialise the exception with a message and context.
+
+        Args:
+            message: A descriptive error message.
+            context: Optional dictionary containing additional context information.
+        """
         self.message: str = message
         self.context: dict[str, Any] = context or {}
+
         super().__init__(message)
 
     def with_context(self, **new_context: Any) -> Self:
@@ -48,13 +55,19 @@ class BrewError(Exception):
             A new instance of the exception with merged context.
         """
         self.context.update(new_context)
+
         return self
 
     def __str__(self) -> str:
-        """String representation of the exception including context."""
+        """String representation of the exception including context.
+
+        Returns:
+            A string that includes the message and context information.
+        """
         if self.context:
             context_str: str = ", ".join(f"{k}={v}" for k, v in self.context.items())
             return f"{self.message} [{context_str}]"
+
         return self.message
 
 
@@ -178,6 +191,7 @@ class CellarError(SysError):
         if message is None:
             ver_str = f" {version}" if version else ""
             message = f"Failed to install {name or 'unknown'}{ver_str} into Cellar"
+
         super().__init__(message, context=ctx)
 
 
@@ -216,6 +230,7 @@ class DownloadError(SysError):
             ctx["url"] = url
         if message is None:
             message = f"Failed to download {name or 'unknown'}"
+
         super().__init__(message, context=ctx)
 
 
@@ -249,6 +264,7 @@ class ExtractionError(SysError):
             ctx["archive"] = archive
         if dest is not None:
             ctx["dest"] = dest
+
         super().__init__(message, context=ctx)
 
 
@@ -292,6 +308,7 @@ class ManifestFetchError(ManifestError):
             ctx["tag"] = tag
         if message is None:
             message = f"manifest fetch failed for {name or 'unknown'} {tag or ''}"
+
         super().__init__(message, context=ctx)
 
 
@@ -328,15 +345,20 @@ class ManifestParseError(ManifestError):
             ctx["tag"] = tag
         if message is None:
             message = f"manifest parse error for {name or 'unknown'} {tag or ''}"
+
         super().__init__(message, context=ctx)
 
 
 class OperationInProgressError(SysError):
-    """Another process holds the lock for a path we need to mutate.
+    """A lock under `<prefix>/var/homebrew/locks/` is held by another process.
 
-    Raised when `flock` on `<prefix>/var/homebrew/locks/<rack>.formula.lock` is contended.
-    Retrying is pointless while the holder lives, so callers report it per-formula rather
-    than falling back to `brew`, which would contend on the same lock.
+    Typically indicates:
+        - A concurrent brew or brewery run on the same formula or cask
+        - Another brewery process holding the prefix-wide structure lock
+        - A lock file that kept changing under repeated retries
+
+    Retrying is pointless while the holder lives, and falling back to `brew`
+    would contend on the same lock, so callers report it per-package instead.
     """
 
     def __init__(
@@ -384,6 +406,7 @@ class RelocationError(SysError):
         """
         self.path = path
         self.reason = reason
+
         super().__init__(f"{path}: {reason}")
 
 
@@ -562,6 +585,7 @@ class LinkError(UserError):
         listing = "\n".join(
             f"  {dst} -> already {existing}" for dst, existing in conflicts
         )
+
         super().__init__(f"link conflicts:\n{listing}")
 
 
@@ -666,4 +690,5 @@ class SettingsError(UserError):
             ctx["value"] = value
         if path is not None:
             ctx["path"] = path
+
         super().__init__(message, context=ctx)

@@ -74,15 +74,18 @@ async def uninstall_packages(
     if formula_names:
         await run_uninstall(formula_names, formula=formula, env=env)
 
+    locked: dict[str, str] = {}
     if cask_names:
-        await uninstall_casks(
-            cask_names, backend=cask, env=env, zap=zap, before_brew=before_brew
+        locked = dict(
+            await uninstall_casks(
+                cask_names, backend=cask, env=env, zap=zap, before_brew=before_brew
+            )
         )
 
     repo.cache_mgr.invalidate()
 
     removed, failed = _verify_batch(formula_names, cask_names, env=env)
-    failures.extend((n, "uninstall failed") for n in failed)
+    failures.extend((n, locked.get(n, "uninstall failed")) for n in failed)
 
     return removed, failures
 

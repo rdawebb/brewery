@@ -12,10 +12,11 @@ import httpx2
 from brewery.core.cask_locale import config_languages, localise, system_languages
 from brewery.core.catalog import CaskRow
 from brewery.core.config import BreweryENV, get_brewery_env
-from brewery.core.errors import BrewError
+from brewery.core.errors import BrewError, OperationInProgressError
 from brewery.core.host import current_platform
+from brewery.core.locks import cask_lock
 from brewery.core.logging import BreweryLogger, get_logger
-from brewery.core.models import PackageKind
+from brewery.core.models import Notes, PackageKind
 from brewery.core.shell import run_brew
 from brewery.providers.base import (
     InstallBackend,
@@ -58,13 +59,13 @@ async def install_casks(
     formula: PackageBackend,
     env: BreweryENV | None = None,
     progress: ProgressPort | None = None,
-) -> None:
+) -> Notes:
     """Install every named cask, natively where possible, the rest through brew.
 
     Casks already installed are skipped. A cask's `depends_on cask` is installed
     natively first, and its `depends_on formula` through the formula pipeline; a
     cask whose native install or dependencies fail goes to brew, which then installs
-    those dependencies.
+    those dependencies; a cask another process has locked is left alone.
 
     Args:
         names: Cask tokens to install.
@@ -73,10 +74,14 @@ async def install_casks(
         formula: Formula backend for the formula pipeline's brew fallback.
         env: Brewery environment (paths), resolved if omitted.
         progress: Optional progress sink for the native installs.
+
+    Returns:
+        A (token, reason) note per cask left alone because it was locked.
     """
     env = env or get_brewery_env()
     progress = progress or _NULL_PROGRESS
     opts = read_cask_opts(os.environ.get("HOMEBREW_CASK_OPTS", ""))
+    locked: Notes = []
     installed = {p.name for p in repo.cache_mgr.installed_packages(PackageKind.CASK)}
     requested = [n for n in dict.fromkeys(names) if n not in installed]
 
@@ -124,16 +129,21 @@ async def install_casks(
 
                 for token in native:
                     row = rows[token]
-                    reasons[token] = _blocked(row, done, failed_formulae) or (
-                        await _install_one(
-                            row,
-                            downloader,
-                            env,
-                            opts,
-                            progress,
-                            on_request=token in requested,
+                    try:
+                        reasons[token] = _blocked(row, done, failed_formulae) or (
+                            await _install_one(
+                                row,
+                                downloader,
+                                env,
+                                opts,
+                                progress,
+                                on_request=token in requested,
+                            )
                         )
-                    )
+
+                    except OperationInProgressError as exc:
+                        _note_locked(token, exc, locked, progress)
+                        continue
 
                     if not reasons[token]:
                         done.add(token)
@@ -151,10 +161,44 @@ async def install_casks(
             log.info(event="cask_to_brew", cask=token, reason=reason)
 
     # brew installs a dependency of a cask it's given, so only requested casks go
-    to_brew = [t for t in requested if t not in done]
+    held = {t for t, _ in locked}
+    to_brew = [t for t in requested if t not in done and t not in held]
     if to_brew:
         # After the live display ends: a pkg cask may prompt for a sudo password
         await backend.install(names=to_brew)
+
+    return locked
+
+
+def _note_locked(
+    token: str, exc: OperationInProgressError, locked: Notes, progress: ProgressPort
+) -> None:
+    """Record a cask another process has locked.
+
+    Args:
+        token: The cask token.
+        exc: The contended lock's error.
+        locked: The notes to add it to.
+        progress: The progress sink.
+    """
+    log.warning(event="cask_locked", cask=token, error=str(exc))
+    locked.append((token, str(exc)))
+    progress.finish(token, Outcome.FAILED.value)
+
+
+def _locked(token: str, env: BreweryENV, change: Callable[[], None]) -> None:
+    """Make one cask's Caskroom and artifact changes under its lock.
+
+    Args:
+        token: The cask token.
+        env: Brewery environment.
+        change: The changes.
+
+    Raises:
+        OperationInProgressError: Another brewery or `brew cleanup` holds the lock.
+    """
+    with cask_lock(token, prefix=env.prefix):
+        change()
 
 
 def _depends(row: CaskRow, kind: str) -> list[str]:
@@ -276,6 +320,9 @@ async def _install_one(
 
     Returns:
         The reason it failed, or an empty string once it's installed.
+
+    Raises:
+        OperationInProgressError: Another process has locked the cask.
     """
     download = await _fetch(row, downloader, progress)
     if isinstance(download, str):
@@ -284,8 +331,14 @@ async def _install_one(
     try:
         progress.update(row.token, "install")
         await asyncio.to_thread(
-            _stage_and_install, row, download, env, opts, on_request
+            _locked,
+            row.token,
+            env,
+            functools.partial(_stage_and_install, row, download, env, opts, on_request),
         )
+
+    except OperationInProgressError:
+        raise
 
     except (BrewError, OSError) as exc:
         return str(exc)
@@ -328,10 +381,11 @@ async def uninstall_casks(
     env: BreweryENV | None = None,
     zap: bool = False,
     before_brew: Callable[[], object] | None = None,
-) -> None:
+) -> Notes:
     """Uninstall every named cask, natively where possible, the rest through brew.
 
-    A cask whose native uninstall fails part way goes to brew, which retries it.
+    A cask whose native uninstall fails part way goes to brew, which retries it; a
+    cask another process has locked is left alone.
 
     Args:
         names: Cask tokens to uninstall.
@@ -340,16 +394,29 @@ async def uninstall_casks(
         zap: Also remove each cask's `zap` files, as `--zap` does.
         before_brew: Called before brew runs, to end a live display and allow any
             sudo prompts.
+
+    Returns:
+        A (token, reason) note per cask left alone because it was locked.
     """
     env = env or get_brewery_env()
     plat = current_platform()
     to_brew: list[str] = []
+    locked: Notes = []
     for token in names:
         reason = classify_uninstall(read_receipt(env.caskroom / token), plat, zap=zap)
 
         if not reason:
             try:
-                await asyncio.to_thread(uninstall_cask, token, env, zap=zap)
+                await asyncio.to_thread(
+                    _locked,
+                    token,
+                    env,
+                    functools.partial(uninstall_cask, token, env, zap=zap),
+                )
+                continue
+
+            except OperationInProgressError as exc:
+                _note_locked(token, exc, locked, _NULL_PROGRESS)
                 continue
 
             except (BrewError, OSError) as exc:
@@ -362,6 +429,8 @@ async def uninstall_casks(
         if before_brew:
             before_brew()
         await backend.uninstall(names=to_brew, zap=zap)
+
+    return locked
 
 
 async def _fetch(
@@ -400,11 +469,12 @@ async def upgrade_casks(
     backend: UpgradeBackend,
     env: BreweryENV | None = None,
     progress: ProgressPort | None = None,
-) -> None:
+) -> Notes:
     """Upgrade every named cask, natively where possible, the rest through brew.
 
     The downloads overlap and the upgrades run one at a time; a cask whose native
-    upgrade fails is restored as it was, and falls back to brew.
+    upgrade fails is restored as it was, and falls back to brew; a cask another
+    process has locked is left alone.
 
     Args:
         names: Installed cask tokens to upgrade.
@@ -412,11 +482,15 @@ async def upgrade_casks(
         backend: The cask backend for the casks brewery can't upgrade.
         env: Brewery environment (paths), resolved if omitted.
         progress: Optional progress sink for the native upgrades.
+
+    Returns:
+        A (token, reason) note per cask left alone because it was locked.
     """
     env = env or get_brewery_env()
     progress = progress or _NULL_PROGRESS
     opts = read_cask_opts(os.environ.get("HOMEBREW_CASK_OPTS", ""))
     plat = current_platform()
+    locked: Notes = []
     installed = repo.cache_mgr.installed_packages()
     casks = {p.name for p in installed if p.kind == PackageKind.CASK}
     formulae = {p.name for p in installed if p.kind == PackageKind.FORMULA}
@@ -459,14 +533,23 @@ async def upgrade_casks(
                     progress.update(token, "install")
                     try:
                         await asyncio.to_thread(
-                            upgrade_cask,
-                            rows[token],
-                            download,
+                            _locked,
+                            token,
                             env,
-                            dirs=opts.dirs,
-                            binaries=opts.binaries,
-                            languages=opts.languages,
+                            functools.partial(
+                                upgrade_cask,
+                                rows[token],
+                                download,
+                                env,
+                                dirs=opts.dirs,
+                                binaries=opts.binaries,
+                                languages=opts.languages,
+                            ),
                         )
+
+                    except OperationInProgressError as exc:
+                        _note_locked(token, exc, locked, progress)
+                        continue
 
                     except (BrewError, OSError) as exc:
                         reasons[token] = str(exc)
@@ -488,3 +571,5 @@ async def upgrade_casks(
     if to_brew := [t for t, reason in reasons.items() if reason]:
         # After the live display ends: a pkg cask may prompt for a sudo password
         await backend.upgrade(names=to_brew)
+
+    return locked

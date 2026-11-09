@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import sys
 
 import pytest
@@ -10,6 +12,7 @@ from _repo_helpers import _add_alias, _provider_calls, zip_app
 from _rows import cask_dict
 
 import brewery.services.cask as cask_service
+from brewery.core.locks import lock_path
 from brewery.core.models import PackageKind
 from brewery.services.install import install_packages
 
@@ -193,6 +196,28 @@ class TestInstallCasks:
         ]
         assert not (mock_env.caskroom / "foo").exists()
         assert list((appdir / "Foo.app").iterdir()) == []
+
+    async def test_locked_cask_is_reported_not_handed_to_brew(
+        self, repo, mock_brew, mock_env, casks, appdir
+    ) -> None:
+        """Test that a cask a peer has locked is left alone and reported as locked."""
+        casks({"foo": (None, [{"app": ["Foo.app"]}])})
+        path = lock_path(mock_env.prefix, "foo", kind="cask")
+        path.parent.mkdir(parents=True)
+
+        # Held as a peer process or `brew cleanup` would hold it
+        fd = os.open(path, os.O_RDWR | os.O_CREAT)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            _, failures = await install_packages(repo, ["foo"], kind=PackageKind.CASK)
+
+        finally:
+            os.close(fd)
+
+        assert [(n, "locked" in why) for n, why in failures] == [("foo", True)]
+        assert _provider_calls(mock_brew, "install") == []
+        assert not (mock_env.caskroom / "foo").exists()
+        assert not (appdir / "Foo.app").exists()
 
     async def test_cask_dependency_is_installed_first(
         self, repo, mock_brew, mock_env, casks, appdir

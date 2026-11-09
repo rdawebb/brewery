@@ -292,8 +292,9 @@ async def upgrade_packages(
             progress=progress,
         )
 
+    locked: Notes = []
     if cask_names:
-        await upgrade_casks(
+        locked = await upgrade_casks(
             cask_names, repo=repo, backend=cask, env=env, progress=progress
         )
 
@@ -305,7 +306,7 @@ async def upgrade_packages(
 
     # A failed upgrade keeps its old version, so by version alone it would look
     # "already current": exclude pipeline failures before classifying
-    pipeline_failures = _pipeline_failures(report)
+    pipeline_failures = [*_pipeline_failures(report), *locked]
     failed = {name for name, _ in pipeline_failures}
     touched = [
         n
