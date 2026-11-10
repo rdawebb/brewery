@@ -15,6 +15,7 @@ import errno
 import hashlib
 import os
 import plistlib
+import posixpath
 import re
 import shutil
 import subprocess
@@ -22,7 +23,7 @@ import tempfile
 import time
 from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
@@ -101,6 +102,8 @@ _DMG_METADATA = frozenset(
 # Archives brewery can't open; raising falls back to brew
 _UNSUPPORTED = {b"7z\xbc\xaf": "7z", b"Rar!": "rar", b"xar!": "xar"}
 
+_VERSION_TAIL = re.compile(r"\b\d+\.\d+[^.]*\Z")
+
 _TAR_MAGIC = (b"\x1f\x8b", b"BZh", b"\xfd7zXZ", b"\x28\xb5\x2f\xfd")
 
 
@@ -139,7 +142,13 @@ def stage(
     # Hidden, so `_scan_casks` never reports a half-staged version
     scratch = Path(tempfile.mkdtemp(prefix=".stage-", dir=token_dir))
     try:
-        _unpack(download, scratch, name=_url_name(row.url) or row.token)
+        name = _url_name(row.url) or row.token
+        if row.container == {"type": "naked"}:
+            shutil.copy2(download, scratch / name)  # A jar stays a jar
+
+        else:
+            _unpack(download, scratch, name=name)
+
         _run(["chmod", "-R", "u+w", str(scratch)])
         # 0x0100 opts the staged app out of App Translocation
         _run(["xattr", "-r", "-s", "-w", QUARANTINE, f"0181;{stamp}", str(scratch)])
@@ -1042,15 +1051,23 @@ def _unpack_dmg(dmg: Path, dest: Path) -> None:
 
 
 def _url_name(url: str) -> str:
-    """The download's filename, as the URL names it.
+    """The download's filename.
 
     Args:
         url: The cask's download URL.
 
     Returns:
-        The decoded last path segment, or an empty string if there is none.
+        The last path segment with an extension, else the last one, else "".
     """
-    return unquote(PurePosixPath(urlsplit(url).path).name)
+    parts = [unquote(p) for p in urlsplit(url).path.split("/") if p]
+    for part in reversed(parts):
+        # brew's `Pathname#extname`: a trailing version number isn't one
+        if posixpath.splitext(part)[1] and (
+            not _VERSION_TAIL.search(part) or part.endswith(".7z")
+        ):
+            return part
+
+    return parts[-1] if parts else ""
 
 
 def _run(cmd: list[str], *, stdin: str | None = None) -> str:

@@ -119,7 +119,7 @@ def classify(row: CaskRow, plat: Platform | None) -> tuple[Route, str]:
     if plat is None or plat.os != "macos" or plat.macos_major is None:
         return "brew", "native casks need macOS"
 
-    if row.container:
+    if row.container and row.container != {"type": "naked"}:
         return "brew", "`container` unpacking"
 
     if reason := _url_reason(row.url_specs or {}):

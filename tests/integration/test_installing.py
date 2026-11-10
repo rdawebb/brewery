@@ -163,6 +163,43 @@ class TestInstallCasks:
         assert config["env"] == {"appdir": str(appdir)}
         assert self._receipt(mock_env, "foo")["installed_on_request"] is True
 
+    @pytest.mark.parametrize(
+        ("url", "name"),
+        [
+            pytest.param(
+                "https://example.org/r26.1/bin.macosx1015x86_64/p4",
+                "bin.macosx1015x86_64",
+                id="last_with_extension",
+            ),
+            pytest.param(
+                "https://example.org/cli/1.0.2115+e16833f2/osx-devtunnel",
+                "osx-devtunnel",
+                id="version_isnt_extension",
+            ),
+        ],
+    )
+    async def test_naked_cask_is_copied_as_is(
+        self, repo, mock_brew, mock_env, casks, url, name
+    ) -> None:
+        """Test that a naked download, a zip here, is staged unopened under brew's name."""
+        casks({"foo": (None, [])})
+        row = cask_dict(
+            "foo",
+            version="1.0",
+            url=url,
+            sha256=repo.catalog.get_cask("foo").sha256,
+            container=json.dumps({"type": "naked"}),
+            artifacts=json.dumps([{"binary": [name, {"target": "foo"}]}]),
+        )
+        repo.catalog.write_casks([row])
+
+        await install_packages(repo, ["foo"], kind=PackageKind.CASK)
+
+        assert _provider_calls(mock_brew, "install") == []
+        staged = mock_env.caskroom / "foo" / "1.0" / name
+        assert staged.read_bytes()[:4] == b"PK\x03\x04"
+        assert (mock_env.prefix / "bin" / "foo").resolve() == staged.resolve()
+
     async def test_only_unsupported_casks_go_to_brew(
         self, repo, mock_brew, casks
     ) -> None:

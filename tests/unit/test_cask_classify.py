@@ -97,9 +97,6 @@ class TestClassify:
                 id="nested",
             ),
             pytest.param(
-                {"container": {"type": "naked"}}, "`container` unpacking", id="naked"
-            ),
-            pytest.param(
                 {"url_specs": {"branch": "main", "only_path": "fonts"}},
                 "`url branch:`",
                 id="git",
@@ -141,6 +138,11 @@ class TestClassify:
     def test_header_specs_are_native(self, specs) -> None:
         """Test that the `url` options sent as headers keep the cask native."""
         row = cask_row(artifacts=[{"app": ["Foo.app"]}], url_specs=specs)
+        assert classify(row, SEQUOIA) == ("native", "")
+
+    def test_naked_container_is_native(self) -> None:
+        """Test that a download staged as-is keeps the cask native."""
+        row = cask_row(artifacts=[{"binary": ["p4"]}], container={"type": "naked"})
         assert classify(row, SEQUOIA) == ("native", "")
 
     def test_off_macos_goes_to_brew(self) -> None:
