@@ -201,6 +201,26 @@ class TestInstallCasks:
         assert staged.read_bytes()[:4] == b"PK\x03\x04"
         assert (mock_env.prefix / "bin" / "foo").resolve() == staged.resolve()
 
+    async def test_zip_container_is_unpacked(
+        self, repo, mock_brew, mock_env, casks, appdir
+    ) -> None:
+        """Test that a `type: zip` download whose URL has no extension is unpacked."""
+        casks({"foo": (None, [])})
+        row = cask_dict(
+            "foo",
+            version="1.0",
+            url="https://example.org/download-version?v=1.0",
+            sha256=repo.catalog.get_cask("foo").sha256,
+            container=json.dumps({"type": "zip"}),
+            artifacts=json.dumps([{"app": ["Foo.app"]}]),
+        )
+        repo.catalog.write_casks([row])
+
+        await install_packages(repo, ["foo"], kind=PackageKind.CASK)
+
+        assert _provider_calls(mock_brew, "install") == []
+        assert (appdir / "Foo.app" / "Contents" / "MacOS" / "foo").is_file()
+
     async def test_git_font_cask_fetches_each_font(
         self, repo, mock_brew, mock_env, tmp_path, monkeypatch
     ) -> None:

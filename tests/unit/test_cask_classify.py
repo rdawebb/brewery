@@ -98,6 +98,11 @@ class TestClassify:
                 id="nested",
             ),
             pytest.param(
+                {"container": {"nested": "Foo.tar.gz", "type": "zip"}},
+                "`container` unpacking",
+                id="nested_zip",
+            ),
+            pytest.param(
                 {"url_specs": {"branch": "main", "only_path": "fonts"}},
                 "`url` git checkout",
                 id="git",
@@ -141,9 +146,10 @@ class TestClassify:
         row = cask_row(artifacts=[{"app": ["Foo.app"]}], url_specs=specs)
         assert classify(row, SEQUOIA) == ("native", "")
 
-    def test_naked_container_is_native(self) -> None:
-        """Test that a download staged as-is keeps the cask native."""
-        row = cask_row(artifacts=[{"binary": ["p4"]}], container={"type": "naked"})
+    @pytest.mark.parametrize("kind", ["naked", "dmg", "zip"])
+    def test_container_type_is_native(self, kind) -> None:
+        """Test that a container `stage` copies or sniffs keeps the cask native."""
+        row = cask_row(artifacts=[{"binary": ["p4"]}], container={"type": kind})
         assert classify(row, SEQUOIA) == ("native", "")
 
     def test_github_font_checkout_is_native(self) -> None:

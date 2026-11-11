@@ -41,6 +41,9 @@ NATIVE_UNINSTALL = frozenset(
     {"quit", "delete", "launchctl", "signal", "trash", "rmdir", "on_upgrade"}
 )
 
+# `container` stanzas `stage` handles: `_unpack` sniffs a dmg or zip whatever the URL
+_NATIVE_CONTAINERS = ({"type": "naked"}, {"type": "dmg"}, {"type": "zip"})
+
 # `url` options brew sends as request headers
 _HEADER_SPECS = frozenset({"user_agent", "referer", "cookies"})
 
@@ -125,7 +128,7 @@ def classify(row: CaskRow, plat: Platform | None) -> tuple[Route, str]:
     if plat is None or plat.os != "macos" or plat.macos_major is None:
         return "brew", "native casks need macOS"
 
-    if row.container and row.container != {"type": "naked"}:
+    if row.container and row.container not in _NATIVE_CONTAINERS:
         return "brew", "`container` unpacking"
 
     if (row.url_specs or {}).keys() & _GIT_SPECS and not git_files(row):
