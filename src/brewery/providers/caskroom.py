@@ -106,9 +106,12 @@ _VERSION_TAIL = re.compile(r"\b\d+\.\d+[^.]*\Z")
 
 _TAR_MAGIC = (b"\x1f\x8b", b"BZh", b"\xfd7zXZ", b"\x28\xb5\x2f\xfd")
 
+# One downloaded file, or a git checkout's files by their path in it
+Download = Path | Mapping[str, Path]
+
 
 def stage(
-    row: CaskRow, download: Path, caskroom: Path, *, on_request: bool = True
+    row: CaskRow, download: Download, caskroom: Path, *, on_request: bool = True
 ) -> Path:
     """Unpack `download` into `Caskroom/<token>/<version>/` and record it as brew does.
 
@@ -118,7 +121,8 @@ def stage(
 
     Args:
         row: The cask's catalog row.
-        download: The verified download, from the downloader's cache.
+        download: The verified download, from the downloader's cache, or a git
+            checkout's files, each copied to its path in the version dir.
         caskroom: The Caskroom directory.
         on_request: False when it's installed for another cask's `depends_on`.
 
@@ -130,21 +134,30 @@ def stage(
             already staged.
     """
     if not row.version or not row.url:
-        raise ExtractionError(f"{row.token} has no version or url", archive=download)
+        raise ExtractionError(
+            f"{row.token} has no version or url",
+            archive=download if isinstance(download, Path) else None,
+        )
 
     token_dir = caskroom / row.token
     staged = token_dir / row.version
     token_dir.mkdir(parents=True, exist_ok=True)
 
+    files = download.values() if isinstance(download, Mapping) else [download]
     stamp = f"{int(time.time()):x};brewery;"
-    _run(["xattr", "-w", QUARANTINE, f"0081;{stamp}", str(download)])
+    _run(["xattr", "-w", QUARANTINE, f"0081;{stamp}", *map(str, files)])
 
     # Hidden, so `_scan_casks` never reports a half-staged version
     scratch = Path(tempfile.mkdtemp(prefix=".stage-", dir=token_dir))
     try:
         name = _url_name(row.url) or row.token
-        if row.container == {"type": "naked"}:
-            shutil.copy2(download, scratch / name)  # A jar stays a jar
+        if isinstance(download, Mapping):
+            for path, file in download.items():
+                (scratch / path).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(file, scratch / path)
+
+        elif row.container == {"type": "naked"}:
+            shutil.copy2(download, scratch / name)
 
         else:
             _unpack(download, scratch, name=name)
@@ -166,7 +179,7 @@ def stage(
 
     try:
         _write_metadata(row, token_dir, on_request=on_request)
-        if row.version == "latest":
+        if row.version == "latest" and isinstance(download, Path):
             # brew's `save_download_sha`, which its `upgrade --greedy` compares
             with download.open("rb") as fh:
                 sha = hashlib.file_digest(fh, "sha256").hexdigest()
@@ -215,10 +228,15 @@ def _write_metadata(row: CaskRow, token_dir: Path, *, on_request: bool) -> None:
     stamp = datetime.now(UTC).strftime(_TIMESTAMP_FORMAT)[:-3]
     casks = token_dir / ".metadata" / version / stamp / "Casks"
     casks.mkdir(parents=True)
-    # brew writes `{}`, and pins an empty list so it never looks the artifacts up
-    (casks / f"{row.token}.json").write_bytes(
-        dumps_bytes({} if artifacts else {"artifacts": []})
-    )
+
+    # brew's `to_installed_json_hash`, plus an empty list so it never looks them up
+    caskfile: dict[str, Any] = {}
+    if only_path := (row.url_specs or {}).get("only_path"):
+        caskfile["url_specs"] = {"only_path": only_path}
+
+    if not artifacts:
+        caskfile["artifacts"] = []
+    (casks / f"{row.token}.json").write_bytes(dumps_bytes(caskfile))
 
     receipt = {
         "homebrew_version": None,
@@ -278,6 +296,7 @@ def install_artifacts(
     overrides = dict(dirs or {})
     explicit = dict(explicit or {})
     dirs = {**DEFAULT_DIRS, **overrides, **_dir_values(explicit)}
+    sources = _sources(row.url_specs, staged)
     done: list[tuple[str, Path, Path]] = []
     try:
         # The feed lists artifacts in brew's install order: apps before binaries into them
@@ -289,7 +308,7 @@ def install_artifacts(
                 if key == "binary" and not binaries:
                     continue
 
-                source, target = _locate(key, args, staged, env, dirs)
+                source, target = _locate(key, args, sources, env, dirs)
                 if not source.exists():
                     raise CellarError(
                         f"{row.token}: {source} is not there", path=source
@@ -406,7 +425,7 @@ def uninstall_cask(token: str, env: BreweryENV, *, zap: bool = False) -> None:
 
 def upgrade_cask(
     row: CaskRow,
-    download: Path,
+    download: Download,
     env: BreweryENV,
     *,
     dirs: Mapping[str, Path] | None = None,
@@ -440,6 +459,9 @@ def upgrade_cask(
     meta = token_dir / ".metadata"
     receipt = read_receipt(token_dir) or {}
     version, config = _installed(token_dir)
+    old_specs = _installed_specs(token_dir, version)
+    if old_specs is None:  # A tap's .rb caskfile, or none: assume it hasn't changed
+        old_specs = row.url_specs
     old = receipt.get("uninstall_artifacts") or []
     old_staged = token_dir / version
     explicit = config.get("explicit") or {}
@@ -470,7 +492,9 @@ def upgrade_cask(
     backed_up = False
 
     try:
-        _set_aside(old, old_staged, env, _config_dirs(config), keep, done)
+        _set_aside(
+            old, _sources(old_specs, old_staged), env, _config_dirs(config), keep, done
+        )
         run_directives(directives, deferred=True)
         for path, backup in backups:
             if path.exists():
@@ -768,6 +792,44 @@ def _dir_values(part: Mapping[str, Any]) -> dict[str, Path]:
         The dirs, as paths.
     """
     return {k: Path(v) for k, v in part.items() if isinstance(v, str)}
+
+
+def _sources(url_specs: Mapping[str, Any] | None, staged: Path) -> Path:
+    """Where a staged cask's artifact sources are: under a git checkout's `only_path`.
+
+    Args:
+        url_specs: The cask's `url_specs`.
+        staged: The version dir.
+
+    Returns:
+        The dir artifact sources are relative to.
+    """
+    only_path = (url_specs or {}).get("only_path")
+
+    return staged / only_path if only_path else staged
+
+
+def _installed_specs(token_dir: Path, version: str) -> Mapping[str, Any] | None:
+    """The `url_specs` an installed version's caskfile recorded.
+
+    Args:
+        token_dir: The cask's Caskroom directory.
+        version: The installed version.
+
+    Returns:
+        The specs, empty if it has none; None if there's no readable JSON caskfile.
+    """
+    # Only the stamp varies, so the newest sorts last
+    caskfiles = sorted(
+        token_dir.glob(f".metadata/{version}/*/Casks/{token_dir.name}.json")
+    )
+    try:
+        caskfile = orjson.loads(caskfiles[-1].read_bytes())
+
+    except (IndexError, OSError, ValueError):
+        return None
+
+    return (caskfile.get("url_specs") or {}) if isinstance(caskfile, dict) else None
 
 
 def _locate(

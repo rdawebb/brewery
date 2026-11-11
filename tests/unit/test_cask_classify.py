@@ -12,6 +12,7 @@ from brewery.core.host import Platform
 from brewery.providers.cask import (
     classify,
     classify_uninstall,
+    git_files,
     read_cask_opts,
     url_headers,
 )
@@ -98,7 +99,7 @@ class TestClassify:
             ),
             pytest.param(
                 {"url_specs": {"branch": "main", "only_path": "fonts"}},
-                "`url branch:`",
+                "`url` git checkout",
                 id="git",
             ),
             pytest.param(
@@ -145,10 +146,67 @@ class TestClassify:
         row = cask_row(artifacts=[{"binary": ["p4"]}], container={"type": "naked"})
         assert classify(row, SEQUOIA) == ("native", "")
 
+    def test_github_font_checkout_is_native(self) -> None:
+        """Test that fonts sparse-checked-out of a GitHub repo keep the cask native."""
+        row = cask_row(
+            url="https://github.com/google/fonts.git",
+            url_specs={"branch": "main", "only_path": "ofl/abeezee"},
+            artifacts=[{"font": ["ABeeZee-Regular.ttf"], "target": "x"}, {"zap": []}],
+        )
+        assert classify(row, SEQUOIA) == ("native", "")
+
     def test_off_macos_goes_to_brew(self) -> None:
         """Test that native casks are macOS-only."""
         linux = Platform(arch="amd64", os="linux")
         assert classify(cask_row(artifacts=[{"font": ["a.ttf"]}]), linux)[0] == "brew"
+
+
+class TestGitFiles:
+    """Tests for git_files."""
+
+    def test_raw_url_per_font(self) -> None:
+        """Test that each font maps from brew's checkout path to its quoted raw URL."""
+        row = cask_row(
+            url="https://github.com/google/fonts.git",
+            url_specs={"branch": "main", "only_path": "ofl/advent pro"},
+            artifacts=[{"font": ["AdventPro[wdth,wght].ttf"]}, {"zap": []}],
+        )
+        assert git_files(row) == {
+            "ofl/advent pro/AdventPro[wdth,wght].ttf": "https://raw.githubusercontent.com"
+            "/google/fonts/main/ofl/advent%20pro/AdventPro%5Bwdth%2Cwght%5D.ttf"
+        }
+
+    def test_branch_defaults_to_master(self) -> None:
+        """Test that brew's default ref is used when only `only_path` is given."""
+        row = cask_row(
+            url="https://github.com/powerline/fonts",
+            url_specs={"only_path": "FiraMono"},
+            artifacts=[{"font": ["a.otf"]}],
+        )
+        assert git_files(row) == {
+            "FiraMono/a.otf": "https://raw.githubusercontent.com/powerline/fonts/master/FiraMono/a.otf"
+        }
+
+    @pytest.mark.parametrize(
+        ("url", "artifacts"),
+        [
+            pytest.param(
+                "https://gitlab.com/a/b.git", [{"font": ["a.ttf"]}], id="not_github"
+            ),
+            pytest.param(
+                "https://github.com/a/b.git", [{"app": ["A.app"]}], id="not_a_font"
+            ),
+            pytest.param(
+                "https://github.com/a/b.git", [{"font": ["../a.ttf"]}], id="escapes"
+            ),
+            pytest.param("https://github.com/a/b.git", [{"zap": []}], id="no_fonts"),
+        ],
+    )
+    def test_brew_checks_out_the_rest(self, url, artifacts) -> None:
+        """Test that a checkout brewery can't fetch file by file goes to brew."""
+        row = cask_row(url=url, url_specs={"only_path": "x"}, artifacts=artifacts)
+        assert git_files(row) == {}
+        assert classify(row, SEQUOIA) == ("brew", "`url` git checkout")
 
 
 class TestUrlHeaders:

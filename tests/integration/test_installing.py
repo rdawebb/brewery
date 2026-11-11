@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import sys
@@ -199,6 +200,50 @@ class TestInstallCasks:
         staged = mock_env.caskroom / "foo" / "1.0" / name
         assert staged.read_bytes()[:4] == b"PK\x03\x04"
         assert (mock_env.prefix / "bin" / "foo").resolve() == staged.resolve()
+
+    async def test_git_font_cask_fetches_each_font(
+        self, repo, mock_brew, mock_env, tmp_path, monkeypatch
+    ) -> None:
+        """Test that a GitHub font checkout is fetched font by font."""
+        fontdir = tmp_path / "fonts"
+        monkeypatch.setenv("HOMEBREW_CASK_OPTS", f"--fontdir={fontdir}")
+        raw = "https://raw.githubusercontent.com/google/fonts/main/ofl/foo"
+        mock_env.bottle_cache.mkdir(parents=True, exist_ok=True)
+        for name in ("Foo-Regular.ttf", "Foo%5Bwght%5D.ttf"):
+            key = hashlib.sha256(f"{raw}/{name}".encode()).hexdigest()
+            (mock_env.bottle_cache / key).write_bytes(name.encode())
+
+        repo.catalog.write_casks(
+            [
+                cask_dict(
+                    "font-foo",
+                    version="latest",
+                    sha256="no_check",
+                    url="https://github.com/google/fonts.git",
+                    url_specs=json.dumps({"branch": "main", "only_path": "ofl/foo"}),
+                    artifacts=json.dumps(
+                        [
+                            {"font": ["Foo-Regular.ttf"]},
+                            {"font": ["Foo[wght].ttf"]},
+                            {"zap": []},
+                        ]
+                    ),
+                )
+            ]
+        )
+
+        await install_packages(repo, ["font-foo"], kind=PackageKind.CASK)
+
+        assert _provider_calls(mock_brew, "install") == []
+        assert (fontdir / "Foo[wght].ttf").read_bytes() == b"Foo%5Bwght%5D.ttf"
+        token_dir = mock_env.caskroom / "font-foo"
+        staged = token_dir / "latest" / "ofl" / "foo" / "Foo-Regular.ttf"
+        assert staged.resolve() == (fontdir / "Foo-Regular.ttf").resolve()
+        (caskfile,) = (token_dir / ".metadata").glob("latest/*/Casks/font-foo.json")
+        assert json.loads(caskfile.read_text()) == {
+            "url_specs": {"only_path": "ofl/foo"}
+        }
+        assert not (token_dir / ".metadata" / "LATEST_DOWNLOAD_SHA256").exists()
 
     async def test_only_unsupported_casks_go_to_brew(
         self, repo, mock_brew, casks

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import operator
 import os
+import re
 import shlex
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
+from urllib.parse import quote
 
 from brewery.core.catalog import CaskRow
 from brewery.core.host import Platform
@@ -41,6 +43,10 @@ NATIVE_UNINSTALL = frozenset(
 
 # `url` options brew sends as request headers
 _HEADER_SPECS = frozenset({"user_agent", "referer", "cookies"})
+
+# `url` options of a sparse git checkout, which `git_files` fetches file by file
+_GIT_SPECS = frozenset({"branch", "only_path"})
+_GITHUB_REPO = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+?)(?:\.git)?/?")
 
 # `HOMEBREW_USER_AGENT_FAKE_SAFARI`, sent for `user_agent: :fake` and `:browser`
 _FAKE_USER_AGENT = (
@@ -122,6 +128,9 @@ def classify(row: CaskRow, plat: Platform | None) -> tuple[Route, str]:
     if row.container and row.container != {"type": "naked"}:
         return "brew", "`container` unpacking"
 
+    if (row.url_specs or {}).keys() & _GIT_SPECS and not git_files(row):
+        return "brew", "`url` git checkout"
+
     if reason := _url_reason(row.url_specs or {}):
         return "brew", reason
 
@@ -160,6 +169,39 @@ def url_headers(specs: dict[str, Any] | None) -> tuple[tuple[str, str], ...]:
     return tuple(headers)
 
 
+def git_files(row: CaskRow) -> dict[str, str]:
+    """The raw GitHub URL of each font a git-checkout cask installs.
+
+    Skips git and the rest of the repo by fetching just the files the `font` artifacts name.
+
+    Args:
+        row: The cask's catalog row.
+
+    Returns:
+        `{staged path: url}`, the path as brew's checkout lays it out; empty
+        unless the cask is a GitHub checkout of fonts alone.
+    """
+    specs = row.url_specs or {}
+    repo = _GITHUB_REPO.fullmatch(row.url or "")
+    if not specs.keys() & _GIT_SPECS or not repo:
+        return {}
+
+    base = f"https://raw.githubusercontent.com/{repo[1]}/{quote(specs.get('branch') or 'master')}"
+    files: dict[str, str] = {}
+    for stanza in row.artifacts or []:
+        for key, args in stanza.items():
+            if key in ("target", "zap"):
+                continue
+
+            path = PurePosixPath(specs.get("only_path") or "", args[0])
+            if key != "font" or path.is_absolute() or ".." in path.parts:
+                return {}  # A dir or app needs the checkout itself
+
+            files[str(path)] = f"{base}/{quote(str(path))}"
+
+    return files
+
+
 def _url_reason(specs: dict[str, Any]) -> str:
     """Why a cask's `url` options need brew to fetch it.
 
@@ -169,8 +211,8 @@ def _url_reason(specs: dict[str, Any]) -> str:
     Returns:
         The reason, or an empty string when `url_headers` covers them.
     """
-    # git checkout or POST: only brew's strategies fetch
-    if foreign := sorted(specs.keys() - _HEADER_SPECS):
+    # A tag/revision checkout or POST: only brew's strategies fetch
+    if foreign := sorted(specs.keys() - _HEADER_SPECS - _GIT_SPECS):
         return f"`url {foreign[0]}:`"
 
     # `:curl` sends curl's own agent, which brewery doesn't have

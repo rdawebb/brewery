@@ -18,8 +18,10 @@ from brewery.core.models import PackageKind
 from brewery.providers.caskroom import (
     ALT_NAMES,
     QUARANTINE,
+    _installed_specs,
     install_artifacts,
     stage,
+    upgrade_cask,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -125,6 +127,22 @@ class TestStage:
 
         casks = [r for r in scan_installed(brew.env) if r.kind is PackageKind.CASK]
         assert [(r.name, r.version) for r in casks] == [("foo", "1.0")]
+
+    def test_caskfile_keeps_only_path_for_upgrades(self, brew, zipped) -> None:
+        """Test that the installed `only_path` is read back, not the catalog's."""
+        token_dir = brew.caskroom / "foo"
+        assert _installed_specs(token_dir, "1.0") is None
+
+        row = cask_row(
+            "foo",
+            version="1.0",
+            url="https://example.org/Foo-1.0.zip",
+            url_specs={"branch": "main", "only_path": "ofl/foo"},
+            artifacts=ARTIFACTS,
+        )
+        stage(row, zipped, brew.caskroom)
+
+        assert _installed_specs(token_dir, "1.0") == {"only_path": "ofl/foo"}
 
     def test_tar_stages(self, brew, tmp_path) -> None:
         """Test that a gzipped tarball unpacks through the bottle extractor."""
@@ -361,3 +379,45 @@ class TestInstallArtifacts:
             install_artifacts(row, staged, brew.env, dirs=dirs)
 
         assert os.readlink(found) == str(staged / "bin" / "foo-cli")
+
+
+class TestUpgradeCask:
+    """Tests for upgrade_cask."""
+
+    def test_failed_upgrade_restores_old_only_path(self, brew, tmp_path) -> None:
+        """Test that a rollback puts the old font back under the old `only_path`."""
+
+        def font_row(version: str, only_path: str, artifacts: list):
+            return cask_row(
+                "foo",
+                version=version,
+                url="https://github.com/example/fonts",
+                url_specs={"only_path": only_path},
+                artifacts=artifacts,
+            )
+
+        old_font, new_font, cli = (tmp_path / n for n in ("old", "new", "cli"))
+        old_font.write_bytes(b"old")
+        new_font.write_bytes(b"new")
+        cli.write_text("#!/bin/sh\n")
+        dirs = {"fontdir": tmp_path / "fonts"}
+        font = {"font": ["Foo.ttf"]}
+
+        old = font_row("1.0", "a", [font])
+        staged = stage(old, {"a/Foo.ttf": old_font}, brew.caskroom)
+        install_artifacts(old, staged, brew.env, dirs=dirs)
+
+        taken = brew.prefix / "bin" / "foo-cli"
+        taken.parent.mkdir()
+        taken.write_text("mine")
+        new = font_row("2.0", "b", [font, {"binary": ["foo-cli"]}])
+        download = {"b/Foo.ttf": new_font, "b/foo-cli": cli}
+
+        with pytest.raises(LinkError, match="foo-cli"):
+            upgrade_cask(new, download, brew.env, dirs=dirs)
+
+        target = dirs["fontdir"] / "Foo.ttf"
+        assert target.read_bytes() == b"old"
+        assert os.readlink(staged / "a" / "Foo.ttf") == str(target)
+        assert not (staged / "b").exists()
+        assert not (brew.caskroom / "foo" / "2.0").exists()

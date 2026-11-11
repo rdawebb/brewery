@@ -28,10 +28,12 @@ from brewery.providers.cask import (
     CaskOpts,
     classify,
     classify_uninstall,
+    git_files,
     read_cask_opts,
     url_headers,
 )
 from brewery.providers.caskroom import (
+    Download,
     install_artifacts,
     read_receipt,
     stage,
@@ -348,7 +350,7 @@ async def _install_one(
 
 
 def _stage_and_install(
-    row: CaskRow, download: Path, env: BreweryENV, opts: CaskOpts, on_request: bool
+    row: CaskRow, download: Download, env: BreweryENV, opts: CaskOpts, on_request: bool
 ) -> None:
     """Stage a download and install its artifacts, or leave no trace of it.
 
@@ -436,8 +438,8 @@ async def uninstall_casks(
 
 async def _fetch(
     row: CaskRow, downloader: Downloader, progress: ProgressPort, *, fresh: bool = False
-) -> Path | str:
-    """Fetch a cask's download.
+) -> Download | str:
+    """Fetch a cask's download, or each file of its git checkout.
 
     Args:
         row: The cask's catalog row.
@@ -448,15 +450,46 @@ async def _fetch(
     Returns:
         The verified download, or the reason it failed.
     """
+    if files := git_files(row):
+        checkout: dict[str, Path] = {}
+        for path, url in files.items():
+            got = await _fetch_one(
+                BottleRef(row.token, url, NO_CHECK), downloader, progress, fresh=fresh
+            )
+            if isinstance(got, str):
+                return got
+
+            checkout[path] = got
+
+        return checkout
+
     sha = row.sha256 if row.sha256 not in (None, NO_CHECK) else NO_CHECK
     ref = BottleRef(row.token, str(row.url), sha, url_headers(row.url_specs))
-    if fresh and sha == NO_CHECK:
+
+    return await _fetch_one(ref, downloader, progress, fresh=fresh)
+
+
+async def _fetch_one(
+    ref: BottleRef, downloader: Downloader, progress: ProgressPort, *, fresh: bool
+) -> Path | str:
+    """Fetch one file.
+
+    Args:
+        ref: The file, named for the cask.
+        downloader: The open downloader.
+        progress: The progress sink.
+        fresh: Re-download it if it's `no_check`.
+
+    Returns:
+        The verified file, or the reason it failed.
+    """
+    if fresh and ref.sha256 == NO_CHECK:
         # Cached under its URL, which a new version may not change
         downloader.cache_path(ref.key).unlink(missing_ok=True)
 
     try:
         return await downloader.fetch(
-            ref, on_progress=functools.partial(progress.update, row.token, "download")
+            ref, on_progress=functools.partial(progress.update, ref.name, "download")
         )
 
     except (BrewError, OSError) as exc:
