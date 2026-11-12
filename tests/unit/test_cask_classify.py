@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
 from _rows import cask_row
 
+from brewery import __version__
 from brewery.core.cask_locale import localise, parse_locale, pick_language
 from brewery.core.host import Platform
+from brewery.providers import cask
 from brewery.providers.cask import (
     classify,
     classify_uninstall,
@@ -108,11 +111,6 @@ class TestClassify:
                 id="git",
             ),
             pytest.param(
-                {"url_specs": {"user_agent": ":curl"}},
-                "`url user_agent: :curl`",
-                id="curl_agent",
-            ),
-            pytest.param(
                 {"url_specs": {"referer": "https://a/", "header": "X-A: b"}},
                 "`url header:`",
                 id="header",
@@ -139,6 +137,8 @@ class TestClassify:
         [
             {"user_agent": ":fake", "cookies": {"a": "b"}},
             {"user_agent": "Foo/1.0", "referer": "https://a/"},
+            {"user_agent": ":curl"},
+            {"user_agent": ":default"},
         ],
     )
     def test_header_specs_are_native(self, specs) -> None:
@@ -215,22 +215,43 @@ class TestGitFiles:
         assert classify(row, SEQUOIA) == ("brew", "`url` git checkout")
 
 
+_LANG = ("Accept-Language", "en")
+_DEFAULT_AGENT = ("User-Agent", f"brewery/{__version__} curl/8.7.1")
+
+
 class TestUrlHeaders:
     """Tests for the request headers a cask's `url` options ask for."""
+
+    @pytest.fixture(autouse=True)
+    def _curl(self, monkeypatch) -> None:
+        """Patch the curl agent to a known value so tests don't depend on the host."""
+        monkeypatch.setattr(cask, "_curl_agent", lambda: "curl/8.7.1")
 
     @pytest.mark.parametrize(
         ("specs", "expected"),
         [
-            pytest.param(None, (), id="none"),
+            pytest.param(None, (_LANG, _DEFAULT_AGENT), id="none"),
             pytest.param(
-                {"user_agent": "Foo/1.0"}, (("User-Agent", "Foo/1.0"),), id="string"
+                {"user_agent": ":default"}, (_LANG, _DEFAULT_AGENT), id="default"
             ),
             pytest.param(
-                {"referer": "https://a/"}, (("Referer", "https://a/"),), id="referer"
+                {"user_agent": ":curl"},
+                (_LANG, ("User-Agent", "curl/8.7.1")),
+                id="curl",
+            ),
+            pytest.param(
+                {"user_agent": "Foo/1.0"},
+                (_LANG, ("User-Agent", "Foo/1.0")),
+                id="string",
+            ),
+            pytest.param(
+                {"referer": "https://a/"},
+                (_LANG, _DEFAULT_AGENT, ("Referer", "https://a/")),
+                id="referer",
             ),
             pytest.param(
                 {"cookies": {"a": "1", "b": "2"}},
-                (("Cookie", "a=1;b=2"),),
+                (_LANG, _DEFAULT_AGENT, ("Cookie", "a=1;b=2")),
                 id="cookies",
             ),
         ],
@@ -242,8 +263,31 @@ class TestUrlHeaders:
     @pytest.mark.parametrize("agent", [":fake", ":browser"])
     def test_fake_agent_is_brews_safari(self, agent) -> None:
         """Test that `:fake` and `:browser` send brew's Safari agent."""
-        ((name, value),) = url_headers({"user_agent": agent})
+        _, (name, value) = url_headers({"user_agent": agent})
         assert (name, "Safari/" in value) == ("User-Agent", True)
+
+
+class TestCurlAgent:
+    """Tests for curl's own User-Agent, which `:curl` and the default agent send."""
+
+    def test_curl_agent_from_version(self, monkeypatch) -> None:
+        """Test that curl's agent is the `curl --version` text before ` (`."""
+        out = "curl 8.7.1 (x86_64-apple-darwin24.0) libcurl/8.7.1\nRelease-Date: x\n"
+        monkeypatch.setattr(
+            cask.subprocess,
+            "run",
+            lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=out),
+        )
+        assert cask._curl_agent.__wrapped__() == "curl/8.7.1"
+
+    def test_curl_agent_without_curl(self, monkeypatch) -> None:
+        """Test that the agent falls back to `curl` when curl can't run."""
+
+        def missing(*args, **kwargs) -> subprocess.CompletedProcess:
+            raise FileNotFoundError("curl")
+
+        monkeypatch.setattr(cask.subprocess, "run", missing)
+        assert cask._curl_agent.__wrapped__() == "curl"
 
 
 class TestReadCaskOpts:

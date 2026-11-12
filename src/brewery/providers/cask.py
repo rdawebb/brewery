@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import functools
 import operator
 import os
 import re
 import shlex
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 from urllib.parse import quote
 
+from brewery import __version__
 from brewery.core.catalog import CaskRow
 from brewery.core.host import Platform
 
@@ -57,6 +60,9 @@ _FAKE_USER_AGENT = (
     "(KHTML, like Gecko) Version/27.0 Safari/605.1.15"
 )
 _FAKE_AGENTS = frozenset({":fake", ":browser"})
+
+# The symbol agents `url_headers` sends
+_NATIVE_AGENTS = _FAKE_AGENTS | {":default", ":curl"}
 
 _ARCH_TYPES = {"arm": "arm64", "intel": "amd64"}
 
@@ -153,15 +159,21 @@ def url_headers(specs: dict[str, Any] | None) -> tuple[tuple[str, str], ...]:
         specs: The cask's decoded `url_specs`, or None.
 
     Returns:
-        (name, value) header pairs; empty when the cask asks for none.
+        (name, value) header pairs: `Accept-Language` and `User-Agent` always,
+        then any `Referer` and `Cookie`.
     """
     specs = specs or {}
-    headers: list[tuple[str, str]] = []
+    agent = specs.get("user_agent") or ":default"
+    if agent in _FAKE_AGENTS:
+        agent = _FAKE_USER_AGENT
 
-    if agent := specs.get("user_agent"):
-        headers.append(
-            ("User-Agent", _FAKE_USER_AGENT if agent in _FAKE_AGENTS else agent)
-        )
+    elif agent == ":curl":
+        agent = _curl_agent()
+
+    elif agent == ":default":
+        agent = f"brewery/{__version__} {_curl_agent()}"
+
+    headers = [("Accept-Language", "en"), ("User-Agent", agent)]
 
     if referer := specs.get("referer"):
         headers.append(("Referer", referer))
@@ -170,6 +182,24 @@ def url_headers(specs: dict[str, Any] | None) -> tuple[tuple[str, str], ...]:
         headers.append(("Cookie", ";".join(f"{k}={v}" for k, v in cookies.items())))
 
     return tuple(headers)
+
+
+@functools.cache
+def _curl_agent() -> str:
+    """curl's own User-Agent, built from `curl --version`.
+
+    Returns:
+        `curl/<version>`, or `curl` if curl can't be run.
+    """
+    try:
+        out = subprocess.run(
+            ["curl", "--version"], capture_output=True, text=True, check=True
+        ).stdout
+
+    except (OSError, subprocess.CalledProcessError):
+        return "curl"
+
+    return out.partition("\n")[0].partition(" (")[0].replace(" ", "/") or "curl"
 
 
 def git_files(row: CaskRow) -> dict[str, str]:
@@ -218,9 +248,9 @@ def _url_reason(specs: dict[str, Any]) -> str:
     if foreign := sorted(specs.keys() - _HEADER_SPECS - _GIT_SPECS):
         return f"`url {foreign[0]}:`"
 
-    # `:curl` sends curl's own agent, which brewery doesn't have
     agent = specs.get("user_agent")
-    if isinstance(agent, str) and agent.startswith(":") and agent not in _FAKE_AGENTS:
+
+    if isinstance(agent, str) and agent.startswith(":") and agent not in _NATIVE_AGENTS:
         return f"`url user_agent: {agent}`"
 
     return ""
