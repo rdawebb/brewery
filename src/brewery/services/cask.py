@@ -129,32 +129,40 @@ async def install_casks(
         try:
             async with httpx2.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
                 downloader = Downloader(cache_dir=env.bottle_cache, client=client)
-
-                for token in native:
-                    row = rows[token]
-                    try:
-                        reasons[token] = _blocked(row, done, failed_formulae) or (
-                            await _install_one(
-                                row,
-                                downloader,
-                                env,
-                                opts,
-                                progress,
-                                on_request=token in requested,
+                fetches = [
+                    asyncio.create_task(_fetch(rows[t], downloader, progress))
+                    for t in native
+                ]
+                try:
+                    # In dependency order, each as soon as its download lands
+                    for token, fetch in zip(native, fetches, strict=True):
+                        row = rows[token]
+                        try:
+                            reasons[token] = _blocked(row, done, failed_formulae) or (
+                                await _install_one(
+                                    row,
+                                    await fetch,
+                                    env,
+                                    opts,
+                                    progress,
+                                    on_request=token in requested,
+                                )
                             )
-                        )
 
-                    except OperationInProgressError as exc:
-                        _note_locked(token, exc, locked, progress)
-                        continue
+                        except OperationInProgressError as exc:
+                            _note_locked(token, exc, locked, progress)
+                            continue
 
-                    if not reasons[token]:
-                        done.add(token)
-                        progress.finish(token, Outcome.NATIVE.value)
+                        if not reasons[token]:
+                            done.add(token)
+                            progress.finish(token, Outcome.NATIVE.value)
 
-                    else:
-                        progress.update(token, "brew")
-                        progress.finish(token, Outcome.BREW_INSTALL.value)
+                        else:
+                            progress.update(token, "brew")
+                            progress.finish(token, Outcome.BREW_INSTALL.value)
+
+                finally:
+                    await _cancel(fetches)
 
         finally:
             progress.end()
@@ -171,6 +179,18 @@ async def install_casks(
         await backend.install(names=to_brew)
 
     return locked
+
+
+async def _cancel(tasks: list[asyncio.Task]) -> None:
+    """Cancel the fetches still running, and wait for them to wind down.
+
+    Args:
+        tasks: The fetch tasks.
+    """
+    for t in tasks:
+        t.cancel()
+
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _note_locked(
@@ -304,18 +324,18 @@ async def _install_formulae(
 
 async def _install_one(
     row: CaskRow,
-    downloader: Downloader,
+    download: Download | str,
     env: BreweryENV,
     opts: CaskOpts,
     progress: ProgressPort,
     *,
     on_request: bool,
 ) -> str:
-    """Download, stage and install one cask, unstaging it if any step fails.
+    """Stage and install one cask's download, unstaging it if any step fails.
 
     Args:
         row: The cask's catalog row.
-        downloader: The open downloader.
+        download: Its download, or the reason the fetch failed.
         env: Brewery environment.
         opts: The parsed `HOMEBREW_CASK_OPTS`.
         progress: The progress sink.
@@ -327,7 +347,6 @@ async def _install_one(
     Raises:
         OperationInProgressError: Another process has locked the cask.
     """
-    download = await _fetch(row, downloader, progress)
     if isinstance(download, str):
         return download
 
@@ -451,17 +470,21 @@ async def _fetch(
         The verified download, or the reason it failed.
     """
     if files := git_files(row):
-        checkout: dict[str, Path] = {}
-        for path, url in files.items():
-            got = await _fetch_one(
-                BottleRef(row.token, url, NO_CHECK), downloader, progress, fresh=fresh
+        got = await asyncio.gather(
+            *(
+                _fetch_one(
+                    BottleRef(row.token, url, NO_CHECK),
+                    downloader,
+                    progress,
+                    fresh=fresh,
+                )
+                for url in files.values()
             )
-            if isinstance(got, str):
-                return got
+        )
+        if (failed := next((g for g in got if isinstance(g, str)), None)) is not None:
+            return failed
 
-            checkout[path] = got
-
-        return checkout
+        return {p: g for p, g in zip(files, got, strict=True) if not isinstance(g, str)}
 
     sha = row.sha256 if row.sha256 not in (None, NO_CHECK) else NO_CHECK
     ref = BottleRef(row.token, str(row.url), sha, url_headers(row.url_specs))
@@ -506,9 +529,9 @@ async def upgrade_casks(
 ) -> Notes:
     """Upgrade every named cask, natively where possible, the rest through brew.
 
-    The downloads overlap and the upgrades run one at a time; a cask whose native
-    upgrade fails is restored as it was, and falls back to brew; a cask another
-    process has locked is left alone.
+    The downloads overlap and the upgrades run one at a time, in the order the
+    downloads finish; a cask whose native upgrade fails is restored as it was, and
+    falls back to brew; a cask another process has locked is left alone.
 
     Args:
         names: Installed cask tokens to upgrade.
@@ -555,45 +578,55 @@ async def upgrade_casks(
         try:
             async with httpx2.AsyncClient(timeout=PIPELINE_TIMEOUT) as client:
                 downloader = Downloader(cache_dir=env.bottle_cache, client=client)
-                downloads = await asyncio.gather(
-                    *(_fetch(rows[t], downloader, progress, fresh=True) for t in native)
-                )
 
-            for token, download in zip(native, downloads, strict=True):
-                if isinstance(download, str):
-                    reasons[token] = download
+                async def tagged(token: str) -> tuple[str, Download | str]:
+                    """Fetch a cask's download, returning its token with it."""
+                    return token, await _fetch(
+                        rows[token], downloader, progress, fresh=True
+                    )
 
-                else:
-                    progress.update(token, "install")
-                    try:
-                        await asyncio.to_thread(
-                            _locked,
-                            token,
-                            env,
-                            functools.partial(
-                                upgrade_cask,
-                                rows[token],
-                                download,
-                                env,
-                                dirs=opts.dirs,
-                                binaries=opts.binaries,
-                                languages=opts.languages,
-                            ),
-                        )
+                fetches = [asyncio.create_task(tagged(t)) for t in native]
+                try:
+                    # No order between upgrades, so each as soon as its download lands
+                    for next_done in asyncio.as_completed(fetches):
+                        token, download = await next_done
+                        if isinstance(download, str):
+                            reasons[token] = download
 
-                    except OperationInProgressError as exc:
-                        _note_locked(token, exc, locked, progress)
-                        continue
+                        else:
+                            progress.update(token, "install")
+                            try:
+                                await asyncio.to_thread(
+                                    _locked,
+                                    token,
+                                    env,
+                                    functools.partial(
+                                        upgrade_cask,
+                                        rows[token],
+                                        download,
+                                        env,
+                                        dirs=opts.dirs,
+                                        binaries=opts.binaries,
+                                        languages=opts.languages,
+                                    ),
+                                )
 
-                    except (BrewError, OSError) as exc:
-                        reasons[token] = str(exc)
+                            except OperationInProgressError as exc:
+                                _note_locked(token, exc, locked, progress)
+                                continue
 
-                if not reasons[token]:
-                    progress.finish(token, Outcome.NATIVE.value)
+                            except (BrewError, OSError) as exc:
+                                reasons[token] = str(exc)
 
-                else:
-                    progress.update(token, "brew")
-                    progress.finish(token, Outcome.BREW_UPGRADE.value)
+                        if not reasons[token]:
+                            progress.finish(token, Outcome.NATIVE.value)
+
+                        else:
+                            progress.update(token, "brew")
+                            progress.finish(token, Outcome.BREW_UPGRADE.value)
+
+                finally:
+                    await _cancel(fetches)
 
         finally:
             progress.end()

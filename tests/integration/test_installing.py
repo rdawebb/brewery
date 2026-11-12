@@ -164,6 +164,40 @@ class TestInstallCasks:
         assert config["env"] == {"appdir": str(appdir)}
         assert self._receipt(mock_env, "foo")["installed_on_request"] is True
 
+    async def test_downloads_overlap_before_installs(
+        self, repo, mock_brew, casks, monkeypatch
+    ) -> None:
+        """Test that every native cask's download starts before the first one stages."""
+        casks(
+            {
+                "foo": (None, [{"app": ["Foo.app"]}]),
+                "bar": (None, [{"binary": ["Foo.app/Contents/MacOS/foo"]}]),
+            }
+        )
+        calls: list[tuple[str, str]] = []
+        fetch, stage = cask_service.Downloader.fetch, cask_service.stage
+
+        async def recording_fetch(self, ref, **kwargs):
+            calls.append(("fetch", ref.name))
+            return await fetch(self, ref, **kwargs)
+
+        def recording_stage(row, *args, **kwargs):
+            calls.append(("stage", row.token))
+            return stage(row, *args, **kwargs)
+
+        monkeypatch.setattr(cask_service.Downloader, "fetch", recording_fetch)
+        monkeypatch.setattr(cask_service, "stage", recording_stage)
+
+        await install_packages(repo, ["foo", "bar"], kind=PackageKind.CASK)
+
+        assert _provider_calls(mock_brew, "install") == []
+        assert calls == [
+            ("fetch", "foo"),
+            ("fetch", "bar"),
+            ("stage", "foo"),
+            ("stage", "bar"),
+        ]
+
     @pytest.mark.parametrize(
         ("url", "name"),
         [
