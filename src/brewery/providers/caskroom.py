@@ -11,6 +11,7 @@ macOS-only, like native casks themselves: `classify` sends every other host to b
 
 from __future__ import annotations
 
+import ctypes
 import errno
 import hashlib
 import os
@@ -18,10 +19,12 @@ import plistlib
 import posixpath
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -47,6 +50,17 @@ log: BreweryLogger = get_logger(name=__name__)
 QUARANTINE = "com.apple.quarantine"
 ALT_NAMES = "com.apple.metadata:kMDItemAlternateNames"
 USER_APPROVED = 0x0040  # The quarantine flag set once the user lets an app open
+
+# xattrs go through libc; os.getxattr/setxattr are Linux-only
+_libc = ctypes.CDLL(None, use_errno=True)
+_XATTR_ARGS = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t]
+_libc.getxattr.argtypes = _libc.setxattr.argtypes = [
+    *_XATTR_ARGS,
+    ctypes.c_uint32,
+    ctypes.c_int,
+]
+_libc.getxattr.restype = ctypes.c_ssize_t
+_XATTR_NOFOLLOW = 0x0001
 
 # brew's defaults for the dirs moved artifacts go to, keyed as its config.json keys them
 DEFAULT_DIRS: Mapping[str, Path] = {
@@ -145,7 +159,12 @@ def stage(
 
     files = download.values() if isinstance(download, Mapping) else [download]
     stamp = f"{int(time.time()):x};brewery;"
-    _run(["xattr", "-w", QUARANTINE, f"0081;{stamp}", *map(str, files)])
+    try:
+        for file in files:
+            _set_xattr(file, QUARANTINE, f"0081;{stamp}")
+
+    except OSError as exc:
+        raise ExtractionError(f"couldn't quarantine {row.token}: {exc}") from exc
 
     # Hidden, so `_scan_casks` never reports a half-staged version
     scratch = Path(tempfile.mkdtemp(prefix=".stage-", dir=token_dir))
@@ -162,9 +181,15 @@ def stage(
         else:
             _unpack(download, scratch, name=name)
 
-        _run(["chmod", "-R", "u+w", str(scratch)])
-        # 0x0100 opts the staged app out of App Translocation
-        _run(["xattr", "-r", "-s", "-w", QUARANTINE, f"0181;{stamp}", str(scratch)])
+        try:
+            for path in _tree(scratch):
+                if not stat.S_ISLNK(mode := os.lstat(path).st_mode):
+                    os.chmod(path, mode | stat.S_IWUSR)
+                # 0x0100 opts the staged app out of App Translocation
+                _set_xattr(path, QUARANTINE, f"0181;{stamp}", follow=False)
+
+        except OSError as exc:
+            raise ExtractionError(f"couldn't quarantine {row.token}: {exc}") from exc
 
         try:
             scratch.rename(staged)
@@ -565,7 +590,7 @@ def _approved_signers(apps: Sequence[Path]) -> list[str | None] | None:
         None instead if any app is missing or unapproved.
     """
     for app in apps:
-        status = _xattr("-p", QUARANTINE, str(app))
+        status = _get_xattr(app, QUARANTINE)
         flags = re.match(r"[0-9a-f]+", status, re.IGNORECASE)
         if not app.exists() or (
             status and not (flags and int(flags[0], 16) & USER_APPROVED)
@@ -594,7 +619,7 @@ def _inherit_approval(token: str, signers: list[str | None], apps: list[Path]) -
             return
 
     for app in apps:
-        if not (status := _xattr("-p", QUARANTINE, str(app)).strip()):
+        if not (status := _get_xattr(app, QUARANTINE)):
             continue  # Not quarantined, so nothing to approve
 
         approved = re.sub(
@@ -603,9 +628,11 @@ def _inherit_approval(token: str, signers: list[str | None], apps: list[Path]) -
             status,
             flags=re.IGNORECASE,
         )
-        cmd = ["xattr", "-r", "-s", "-w", QUARANTINE, approved, str(app)]
+        try:
+            for path in _tree(app):
+                _set_xattr(path, QUARANTINE, approved, follow=False)
 
-        if subprocess.run(cmd, capture_output=True, check=False).returncode:
+        except OSError:
             log.warning(
                 f"couldn't carry over {token}'s approval, so macOS may prompt at next launch"
             )
@@ -912,8 +939,10 @@ def _move_out(source: Path, target: Path, *, reuse: bool = False) -> None:
     elif empty:
         _fill(source, target)
         # The kept dir has the old version's quarantine; brew's `copy_xattrs`
-        if quarantine := _xattr("-p", QUARANTINE, str(source)).strip():
-            _xattr("-w", QUARANTINE, quarantine, str(target))
+        if quarantine := _get_xattr(source, QUARANTINE):
+            with suppress(OSError):
+                _set_xattr(target, QUARANTINE, quarantine)
+
         source.rmdir()
         source.symlink_to(target)
         _add_alt_name(target, source.name)
@@ -940,31 +969,72 @@ def _add_alt_name(target: Path, name: str) -> None:
     if name.casefold() == target.name.casefold():
         return
 
-    names = _xattr("-p", ALT_NAMES, str(target)).strip()
+    names = _get_xattr(target, ALT_NAMES)
     if names.startswith("(") and names.endswith(")"):
         names = names[1:-1]
 
     # Some apps ship read-only, so make the top level writable first
-    subprocess.run(
-        ["chmod", "--", "u+rw", str(target), str(target.resolve())],
-        capture_output=True,
-        check=False,
-    )
-    _xattr("-w", ALT_NAMES, f'({names}{", " if names else ""}"{name}")', str(target))
+    for path in (target, target.resolve()):
+        with suppress(OSError):
+            os.chmod(path, os.stat(path).st_mode | stat.S_IRUSR | stat.S_IWUSR)
+
+    with suppress(OSError):
+        _set_xattr(target, ALT_NAMES, f'({names}{", " if names else ""}"{name}")')
 
 
-def _xattr(*args: str) -> str:
-    """Run `xattr`, best-effort.
+def _get_xattr(path: str | Path, name: str) -> str:
+    """Read an xattr, following a symlink, best-effort.
 
     Args:
-        *args: Its arguments.
+        path: The path to read.
+        name: The xattr.
 
     Returns:
-        Its stdout, empty if it failed.
+        Its value, empty if it has none or can't be read.
     """
-    cmd = ["xattr", *args]
+    args = os.fsencode(path), name.encode()
+    if (size := _libc.getxattr(*args, None, 0, 0, 0)) <= 0:
+        return ""
 
-    return subprocess.run(cmd, capture_output=True, text=True, check=False).stdout
+    buf = ctypes.create_string_buffer(size)
+    size = _libc.getxattr(*args, buf, size, 0, 0)
+
+    return buf.raw[: max(size, 0)].decode(errors="replace")
+
+
+def _set_xattr(path: str | Path, name: str, value: str, *, follow: bool = True) -> None:
+    """Write an xattr.
+
+    Args:
+        path: The path to write.
+        name: The xattr.
+        value: Its value.
+        follow: Whether to write a symlink's target rather than the link.
+
+    Raises:
+        OSError: If it can't be written.
+    """
+    data = value.encode()
+    options = 0 if follow else _XATTR_NOFOLLOW
+
+    if _libc.setxattr(os.fsencode(path), name.encode(), data, len(data), 0, options):
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err), str(path))
+
+
+def _tree(root: Path) -> Iterator[str]:
+    """A dir and everything under it, without following symlinks.
+
+    Args:
+        root: The dir.
+
+    Yields:
+        Each path, the dir first.
+    """
+    yield str(root)
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in (*dirnames, *filenames):
+            yield os.path.join(dirpath, name)
 
 
 def _link(source: Path, target: Path, cellar: Path, *, binary: bool) -> bool:

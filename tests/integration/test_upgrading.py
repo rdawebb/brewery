@@ -399,7 +399,7 @@ class TestUpgradeCasks:
         foo("1.0", zip_app(tmp_path, mock_env.bottle_cache, "v1"))
         await install_packages(repo, ["foo"], kind=PackageKind.CASK)
         app = tmp_path / "apps" / "Foo.app"
-        caskroom._xattr("-w", caskroom.QUARANTINE, "01c1;1;Homebrew Cask;", str(app))
+        caskroom._set_xattr(app, caskroom.QUARANTINE, "01c1;1;Homebrew Cask;")
         monkeypatch.setattr(caskroom, "_signer", lambda app: "identifier foo")
         monkeypatch.setattr(caskroom, "_signed_by", lambda app, req: same_signer)
         foo("2.0", zip_app(tmp_path, mock_env.bottle_cache, "v2"))
@@ -407,7 +407,7 @@ class TestUpgradeCasks:
         await upgrade_packages(repo, ["foo"])
 
         for path in (app, app / "Contents" / "MacOS" / "foo"):
-            flags = caskroom._xattr("-p", caskroom.QUARANTINE, str(path)).split(";")[0]
+            flags = caskroom._get_xattr(path, caskroom.QUARANTINE).split(";")[0]
             assert bool(int(flags, 16) & caskroom.USER_APPROVED) is same_signer
 
     async def test_failed_upgrade_restores_the_old_version(
