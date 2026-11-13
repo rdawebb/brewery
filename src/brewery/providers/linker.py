@@ -674,7 +674,7 @@ def _try_symlink(dst: str, src: str) -> bool:
     return True
 
 
-def _describe_existing(dst: str) -> str:
+def describe_existing(dst: str) -> str:
     """The conflict reason for whatever now occupies `dst`, as `consider_link` words it.
 
     Args:
@@ -719,7 +719,7 @@ def _link_leaf(
             return
 
         try:
-            existing = _describe_existing(dst)
+            existing = describe_existing(dst)
 
         except FileNotFoundError:
             continue  # Removed again mid-arbitration; the create is retried

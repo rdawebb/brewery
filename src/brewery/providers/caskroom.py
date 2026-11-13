@@ -43,6 +43,7 @@ from brewery.providers.cask_directives import (
     undeletable,
 )
 from brewery.providers.extractor import extract_tar
+from brewery.providers.linker import describe_existing
 from brewery.providers.receipt import RECEIPT_NAME, current_arch, dumps_bytes
 
 log: BreweryLogger = get_logger(name=__name__)
@@ -949,7 +950,7 @@ def _move_out(source: Path, target: Path, *, reuse: bool = False) -> None:
         return
 
     if os.path.lexists(target):
-        raise LinkError([(str(target), "an existing file")])
+        raise LinkError([(str(target), describe_existing(str(target)))])
 
     target.parent.mkdir(parents=True, exist_ok=True)
     _relocate(source, target)
@@ -1062,7 +1063,7 @@ def _link(source: Path, target: Path, cellar: Path, *, binary: bool) -> bool:
             log.warning(f"{target} is from a formula; skipping link")
             return False
 
-        raise LinkError([(str(target), "an existing file")])
+        raise LinkError([(str(target), describe_existing(str(target)))])
 
     target.parent.mkdir(parents=True, exist_ok=True)
     target.unlink(missing_ok=True)  # brew's `ln -sfn` replaces a dangling link
