@@ -417,26 +417,27 @@ def uninstall_cask(token: str, env: BreweryENV, *, zap: bool = False) -> None:
     keys = ("uninstall", "zap") if zap else ("uninstall",)
     directives = [d for stanza in artifacts for k in keys for d in stanza.get(k, [])]
 
+    # Before any directive runs, so a bad artifact quits no app
+    placed = [
+        (key, _locate(key, args, token_dir / version, env, dirs)[1])
+        for stanza in artifacts
+        for key, args in stanza.items()
+        if key in _MOVED or key in _LINKED
+    ]
+
     run_directives(directives, deferred=False)
     reload = False
-    for stanza in artifacts:
-        for key, args in stanza.items():
-            if key not in _MOVED and key not in _LINKED:
-                continue
+    cellar = env.cellar.resolve()
+    for key, target in placed:
+        if key in _MOVED:
+            if undeletable(target):
+                raise CellarError(f"{target} can't be removed", path=target)
 
-            _source, target = _locate(key, args, token_dir / version, env, dirs)
-            if key in _MOVED:
-                if undeletable(target):
-                    raise CellarError(f"{target} can't be removed", path=target)
+            remove(target)
+            reload |= key == "qlplugin"
 
-                remove(target)
-                reload |= key == "qlplugin"
-
-            # Like `_link`, a formula's link is left alone
-            elif target.is_symlink() and not target.resolve().is_relative_to(
-                env.cellar.resolve()
-            ):
-                target.unlink()
+        elif _cask_link(target, cellar):
+            target.unlink()
 
     if reload:
         subprocess.run(["qlmanage", "-r"], capture_output=True, check=False)
@@ -698,6 +699,7 @@ def _set_aside(
     Raises:
         CellarError: If a target is protected, or something else is at a source.
     """
+    cellar = env.cellar.resolve()
     for stanza in artifacts:
         for key, args in stanza.items():
             if key not in _MOVED and key not in _LINKED:
@@ -705,10 +707,7 @@ def _set_aside(
 
             source, target = _locate(key, args, staged, env, dirs)
             if key in _LINKED:
-                # Like `_link`, a formula's link is left alone
-                if target.is_symlink() and not target.resolve().is_relative_to(
-                    env.cellar.resolve()
-                ):
+                if _cask_link(target, cellar):
                     target.unlink()
                     done.append((key, source, target))
                 continue
@@ -858,6 +857,21 @@ def _installed_specs(token_dir: Path, version: str) -> Mapping[str, Any] | None:
         return None
 
     return (caskfile.get("url_specs") or {}) if isinstance(caskfile, dict) else None
+
+
+def _cask_link(target: Path, cellar: Path) -> bool:
+    """Whether a linked artifact's target is the cask's link to remove.
+
+    Like `_link`, a formula's link is left alone.
+
+    Args:
+        target: The link's path.
+        cellar: The resolved Cellar.
+
+    Returns:
+        True if it's a symlink that doesn't point into the Cellar.
+    """
+    return target.is_symlink() and not target.resolve().is_relative_to(cellar)
 
 
 def _locate(
