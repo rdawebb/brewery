@@ -60,6 +60,11 @@ class TestClassify:
         """Test that anything outside the native artifact set goes to brew."""
         assert classify(cask_row(artifacts=artifacts), SEQUOIA) == ("brew", reason)
 
+    def test_login_item_is_native(self) -> None:
+        """Test that an `uninstall login_item` keeps the cask native."""
+        artifacts = [{"app": ["Foo.app"]}, {"uninstall": [{"login_item": "Foo"}]}]
+        assert classify(cask_row(artifacts=artifacts), SEQUOIA) == ("native", "")
+
     @pytest.mark.parametrize(
         ("depends_on", "expected"),
         [

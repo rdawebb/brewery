@@ -30,7 +30,7 @@ from brewery.core.logging import BreweryLogger, get_logger
 log: BreweryLogger = get_logger(name=__name__)
 
 # `ORDERED_DIRECTIVES`, less those `classify_uninstall` sends to brew
-_ORDER = ("launchctl", "quit", "signal", "delete", "trash", "rmdir")
+_ORDER = ("launchctl", "quit", "signal", "login_item", "delete", "trash", "rmdir")
 
 _RUNNING_APPS_JS = """
 ObjC.import('AppKit')
@@ -72,14 +72,20 @@ function run(argv) {
 
 
 def run_directives(
-    stanzas: Sequence[Mapping[str, Any]], *, deferred: bool, upgrade: bool = False
+    stanzas: Sequence[Mapping[str, Any]],
+    *,
+    deferred: bool,
+    upgrade: bool = False,
+    apps: Sequence[Path] = (),
 ) -> list[str]:
     """Run the stanzas' directives, one directive at a time across all of them.
 
     Args:
         stanzas: The `uninstall` (and with `--zap`, `zap`) directive dicts, in order.
         deferred: True for `rmdir`, which runs once the artifacts are removed.
-        upgrade: Skip `signal` unless the stanza's `on_upgrade` lists it.
+        upgrade: Skip `login_item`, and `signal` unless the stanza's `on_upgrade`
+            lists it.
+        apps: The cask's installed apps, whose login items `login_item` removes too.
 
     Returns:
         The bundle ids `quit` closed, for an upgrade to reopen.
@@ -93,14 +99,23 @@ def run_directives(
             continue
 
         for stanza in stanzas:
-            if name not in stanza or (
-                upgrade
-                and name == "signal"
-                and name not in _flat(stanza.get("on_upgrade", []))
+            if name not in stanza:
+                continue
+
+            # `on_upgrade` only takes quit and signal
+            if upgrade and (
+                name == "login_item"
+                or (
+                    name == "signal" and name not in _flat(stanza.get("on_upgrade", []))
+                )
             ):
                 continue
 
-            closed += _RUNNERS[name](_flat(stanza[name])) or []
+            if name == "login_item":
+                _login_item(_flat(stanza[name]), apps)
+
+            else:
+                closed += _RUNNERS[name](_flat(stanza[name])) or []
 
     return closed
 
@@ -357,6 +372,29 @@ def _signal(values: list[str]) -> None:
                     log.warning(f"Failed to signal {bundle_id} ({pid}): {exc}")
 
             time.sleep(3)
+
+
+def _login_item(names: list[str], apps: Sequence[Path]) -> None:
+    """Remove the login items for the cask's apps, then those it names.
+
+    Best-effort: a failure just warns.
+
+    Args:
+        names: The login items' names.
+        apps: The cask's installed apps.
+    """
+    items = [*(("path", str(app)) for app in apps), *(("name", n) for n in names)]
+    for kind, item in items:
+        quoted = item.replace("\\", "\\\\").replace('"', '\\"')
+        result = _run(
+            "osascript",
+            "-e",
+            'tell application "System Events" to delete every login item '
+            f'whose {kind} is "{quoted}"',
+        )
+
+        if result.returncode:
+            log.warning(f"Removal of login item {item} failed. {result.stderr.strip()}")
 
 
 def _launchctl(services: list[str]) -> None:

@@ -41,10 +41,19 @@ NATIVE_ARTIFACTS = frozenset(
 
 # `uninstall`/`zap` directives `cask_directives` runs, and its `on_upgrade` option
 NATIVE_UNINSTALL = frozenset(
-    {"quit", "delete", "launchctl", "signal", "trash", "rmdir", "on_upgrade"}
+    {
+        "quit",
+        "delete",
+        "launchctl",
+        "signal",
+        "login_item",
+        "trash",
+        "rmdir",
+        "on_upgrade",
+    }
 )
 
-# `container` stanzas `stage` handles: `_unpack` sniffs a dmg or zip whatever the URL
+# `container` stanzas `stage` handles
 _NATIVE_CONTAINERS = ({"type": "naked"}, {"type": "dmg"}, {"type": "zip"})
 
 # `url` options brew sends as request headers

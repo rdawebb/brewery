@@ -159,3 +159,60 @@ class TestRunDirectives:
 
         assert closed == ["a.b"]
         assert bool(ran) is signalled
+
+
+class TestLoginItem:
+    """Tests for removing login items."""
+
+    @staticmethod
+    def _osascript(monkeypatch, code: int = 0) -> list[tuple[str, ...]]:
+        """Fake `osascript`, exiting with `code`.
+
+        Returns:
+            The commands run.
+        """
+        calls: list[tuple[str, ...]] = []
+
+        def run(*args: str) -> subprocess.CompletedProcess[str]:
+            calls.append(args)
+            return subprocess.CompletedProcess(args, code, "", "denied")
+
+        monkeypatch.setattr(directives, "_run", run)
+        return calls
+
+    def test_removes_app_paths_then_names(self, monkeypatch) -> None:
+        """Test that each app's path, then each name, is deleted, quoted for AppleScript."""
+        calls = self._osascript(monkeypatch)
+
+        directives.run_directives(
+            [{"login_item": 'Foo "Helper"'}],
+            deferred=False,
+            apps=[Path("/Applications/Foo.app")],
+        )
+
+        tell = 'tell application "System Events" to delete every login item whose '
+        assert calls == [
+            ("osascript", "-e", tell + 'path is "/Applications/Foo.app"'),
+            ("osascript", "-e", tell + 'name is "Foo \\"Helper\\""'),
+        ]
+
+    def test_upgrade_skips_login_items(self, monkeypatch) -> None:
+        """Test that an upgrade leaves login items alone."""
+        calls = self._osascript(monkeypatch)
+
+        directives.run_directives(
+            [{"login_item": "Foo"}],
+            deferred=False,
+            upgrade=True,
+            apps=[Path("/Applications/Foo.app")],
+        )
+
+        assert calls == []
+
+    def test_failure_only_warns(self, monkeypatch) -> None:
+        """Test that a failed removal doesn't raise, so the uninstall carries on."""
+        calls = self._osascript(monkeypatch, code=1)
+
+        directives._login_item(["Foo", "Bar"], [])
+
+        assert len(calls) == 2

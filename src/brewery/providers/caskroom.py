@@ -425,7 +425,8 @@ def uninstall_cask(token: str, env: BreweryENV, *, zap: bool = False) -> None:
         if key in _MOVED or key in _LINKED
     ]
 
-    run_directives(directives, deferred=False)
+    apps = [target for key, target in placed if key == "app"]
+    run_directives(directives, deferred=False, apps=apps)
     reload = False
     cellar = env.cellar.resolve()
     for key, target in placed:
