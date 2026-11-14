@@ -12,6 +12,7 @@ need root here, it raises instead, and the cask goes to brew.
 
 from __future__ import annotations
 
+import functools
 import getpass
 import glob
 import os
@@ -230,6 +231,18 @@ def _hosting(bundle_id: str, apps: list[tuple[int, str]]) -> bool:
     Returns:
         True if this process is a descendant of one of the app's processes.
     """
+    ancestors = _ancestors()
+
+    return any(p in ancestors and b.lower() == bundle_id.lower() for p, b in apps)
+
+
+@functools.cache
+def _ancestors() -> frozenset[int]:
+    """This process and its ancestors, which don't change during a run.
+
+    Returns:
+        The pids of the process and its ancestors.
+    """
     out = _run("ps", "-A", "-o", "pid=,ppid=").stdout
     parent = {int(p): int(pp) for p, pp in (line.split() for line in out.splitlines())}
     ancestors, pid = set(), os.getpid()
@@ -237,7 +250,7 @@ def _hosting(bundle_id: str, apps: list[tuple[int, str]]) -> bool:
         ancestors.add(pid)
         pid = parent.get(pid, 0)
 
-    return any(p in ancestors and b.lower() == bundle_id.lower() for p, b in apps)
+    return frozenset(ancestors)
 
 
 def _gui() -> bool:
@@ -277,11 +290,16 @@ def _quit(bundle_ids: list[str]) -> list[str]:
     """
     closed: list[str] = []
     apps = _running_apps()
+    running = {b.lower() for _, b in apps}
+    gui: bool | None = None  # `who`, run for the first running app
     for bundle_id in [b for pattern in bundle_ids for b in _expand(pattern, apps)]:
-        if not _is_running(bundle_id):
+        if bundle_id.lower() not in running:
             continue
 
-        if not _gui():
+        if gui is None:
+            gui = _gui()
+
+        if not gui:
             log.warning(f"Not logged into a GUI; skipping quitting {bundle_id}")
             continue
 
@@ -299,6 +317,7 @@ def _quit(bundle_ids: list[str]) -> list[str]:
 
         else:
             closed.append(bundle_id)
+            running.discard(bundle_id.lower())  # Listed twice: don't quit it again
 
     return closed
 
@@ -341,15 +360,14 @@ def _signal(values: list[str]) -> None:
     except (KeyError, ValueError) as exc:
         raise CellarError(f"bad signal directive {values}: {exc}") from exc
 
-    apps = _running_apps()
+    apps, jobs = _running_apps(), _launchctl_list()
+    uid = str(os.getuid())
     for signum, pattern in pairs:
         for bundle_id in _expand(pattern, apps):
             label = re.compile(
                 rf"(?:application\.)?{re.escape(bundle_id)}(?:\.\d+){{0,2}}"
             )
-            pids = [
-                pid for pid, job in _launchctl_list() if pid and label.fullmatch(job)
-            ]
+            pids = [pid for pid, job in jobs if pid and label.fullmatch(job)]
             if not pids:
                 continue
 
@@ -359,12 +377,10 @@ def _signal(values: list[str]) -> None:
                 )
                 continue
 
-            for pid in pids:
-                if _run("ps", "-o", "uid=", "-p", str(pid)).stdout.strip() != str(
-                    os.getuid()
-                ):
-                    continue
-
+            # brewery may run as root, so only this user's own processes
+            out = _run("ps", "-o", "pid=,uid=", "-p", ",".join(map(str, pids))).stdout
+            rows = (line.split() for line in out.splitlines())
+            for pid in [int(row[0]) for row in rows if row[1:] == [uid]]:
                 try:
                     os.kill(pid, signum)
 
@@ -406,19 +422,17 @@ def _launchctl(services: list[str]) -> None:
     Raises:
         CellarError: If a service is in the system domain, which needs root.
     """
-    labels = [
-        label
-        for service in services
-        for label in (
-            [
-                job
-                for pid, job in _launchctl_list()
-                if pid and _wildcard(service).fullmatch(job)
-            ]
-            if "*" in service
-            else [service]
-        )
-    ]
+    jobs = _launchctl_list() if any("*" in s for s in services) else []
+    labels: list[str] = []
+
+    for service in services:
+        if "*" not in service:
+            labels.append(service)
+            continue
+
+        pattern = _wildcard(service)
+        labels += [job for pid, job in jobs if pid and pattern.fullmatch(job)]
+
     uid = os.getuid()
     for label in labels:
         system = [
@@ -489,10 +503,16 @@ def _resolve(action: str, paths: Iterable[str]) -> Iterator[list[Path]]:
         matches = [
             Path(m) for p in _braces(path) for m in sorted(glob.glob(p, recursive=True))
         ]
-        for m in [m for m in matches if undeletable(m)]:
-            log.warning(f"Skipping {action} for undeletable path {m}")
 
-        yield [m for m in matches if not undeletable(m)]
+        kept: list[Path] = []
+        for m in matches:
+            if undeletable(m):
+                log.warning(f"Skipping {action} for undeletable path {m}")
+
+            else:
+                kept.append(m)
+
+        yield kept
 
 
 def _delete(paths: list[str]) -> None:

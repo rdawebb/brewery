@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+import getpass
+import os
+import signal
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 import pytest
 
@@ -216,3 +223,80 @@ class TestLoginItem:
         directives._login_item(["Foo", "Bar"], [])
 
         assert len(calls) == 2
+
+
+class TestProcessCalls:
+    """Tests that `quit` and `signal` don't re-run their lookups per bundle id."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_ancestors(self) -> Generator:
+        """Forget the cached ancestry, which the faked `ps` stands in for."""
+        directives._ancestors.cache_clear()
+        yield
+        directives._ancestors.cache_clear()
+
+    @staticmethod
+    def _fake(monkeypatch) -> list[tuple[str, ...]]:
+        """Fake the commands for two running apps, `a.one` (pid 100) and `a.two` (200).
+
+        Returns:
+            The commands run.
+        """
+        calls: list[tuple[str, ...]] = []
+        running = {"a.one": 100, "a.two": 200}
+        uid = os.getuid()
+
+        def run(*args: str) -> subprocess.CompletedProcess[str]:
+            calls.append(args)
+            out = ""
+            if args[-1] == directives._RUNNING_APPS_JS:
+                out = "\n".join(f"{pid}\t{bid}" for bid, pid in running.items())
+
+            elif directives._QUIT_JS in args:
+                running.pop(args[-1], None)
+
+            elif args[0] == "who":
+                out = f"{getpass.getuser()} console Jan  1 00:00"
+
+            elif args[:2] == ("launchctl", "list"):
+                out = "PID\tStatus\tLabel\n100\t0\ta.one\n200\t0\ta.two"
+
+            elif args[:3] == ("ps", "-o", "pid=,uid="):
+                out = "\n".join(f"{pid} {uid}" for pid in args[-1].split(","))
+
+            return subprocess.CompletedProcess(args, 0, out, "")
+
+        monkeypatch.setattr(directives, "_run", run)
+        monkeypatch.setattr(directives.time, "sleep", lambda _: None)
+        return calls
+
+    def test_quit_lists_running_apps_and_checks_gui_once(self, monkeypatch) -> None:
+        """Test that the running apps and `who` are read once, not per bundle id."""
+        calls = self._fake(monkeypatch)
+
+        assert directives._quit(["a.one", "a.two"]) == ["a.one", "a.two"]
+
+        first_quit = next(i for i, c in enumerate(calls) if directives._QUIT_JS in c)
+        before = calls[:first_quit]
+        assert (
+            before.count(
+                ("osascript", "-l", "JavaScript", "-e", directives._RUNNING_APPS_JS)
+            )
+            == 1
+        )
+        assert [c for c in calls if c == ("who",)] == [("who",)]
+
+    def test_signal_lists_launchd_jobs_once(self, monkeypatch) -> None:
+        """Test that `launchctl list` runs once for every bundle id signalled."""
+        calls = self._fake(monkeypatch)
+        killed: list[tuple[int, int]] = []
+        monkeypatch.setattr(
+            directives.os, "kill", lambda pid, sig: killed.append((pid, sig))
+        )
+
+        directives._signal(["TERM", "a.one", "TERM", "a.two"])
+
+        assert [c for c in calls if c[:2] == ("launchctl", "list")] == [
+            ("launchctl", "list")
+        ]
+        assert killed == [(100, signal.SIGTERM), (200, signal.SIGTERM)]
