@@ -106,7 +106,7 @@ class TestStage:
         assert staged == brew.caskroom / "foo" / "1.0"
         assert (staged / "Foo.app" / "Contents" / "MacOS" / "foo").is_file()
         assert (staged / "Foo.app" / "Contents" / "Current").is_symlink()
-        assert _quarantine(zipped).startswith("0081;")
+        assert _quarantine(zipped) == ""  # The cache is left untouched
         assert _quarantine(staged / "Foo.app").startswith("0181;")
         assert _quarantine(staged / "Foo.app" / "Contents" / "MacOS" / "foo")
 

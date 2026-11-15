@@ -131,9 +131,9 @@ def stage(
 ) -> Path:
     """Unpack `download` into `Caskroom/<token>/<version>/` and record it as brew does.
 
-    The download is quarantined, and the quarantine copied onto everything
-    staged from it; brew reads the version from `.metadata/<version>/` and the
-    artifacts to uninstall from `.metadata/INSTALL_RECEIPT.json`.
+    Everything staged is quarantined, the cached download left as it is; brew
+    reads the version from `.metadata/<version>/` and the artifacts to uninstall
+    from `.metadata/INSTALL_RECEIPT.json`.
 
     Args:
         row: The cask's catalog row.
@@ -159,15 +159,7 @@ def stage(
     staged = token_dir / row.version
     token_dir.mkdir(parents=True, exist_ok=True)
 
-    files = download.values() if isinstance(download, Mapping) else [download]
     stamp = f"{int(time.time()):x};brewery;"
-    try:
-        for file in files:
-            _set_xattr(file, QUARANTINE, f"0081;{stamp}")
-
-    except OSError as exc:
-        raise ExtractionError(f"couldn't quarantine {row.token}: {exc}") from exc
-
     # Hidden, so `_scan_casks` never reports a half-staged version
     scratch = Path(tempfile.mkdtemp(prefix=".stage-", dir=token_dir))
     try:
