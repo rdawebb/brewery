@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import functools
 import re
 import subprocess
 from collections.abc import Sequence
@@ -44,8 +45,9 @@ def config_languages(
     return [lang for lang in dict.fromkeys(found) if isinstance(lang, str)]
 
 
-def system_languages() -> list[str]:
-    """The user's preferred languages.
+@functools.cache
+def system_languages() -> tuple[str, ...]:
+    """The user's preferred languages, read once per process.
 
     Returns:
         The languages in order, empty off macOS or if unset.
@@ -60,12 +62,12 @@ def system_languages() -> list[str]:
             ).stdout
 
         except OSError:
-            return []
+            return ()
 
         if out.strip():
-            return re.findall(r'[^ \n"(),]+', out)
+            return tuple(re.findall(r'[^ \n"(),]+', out))
 
-    return []
+    return ()
 
 
 # Locale: language, script and region, each optional, `-` between

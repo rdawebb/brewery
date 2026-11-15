@@ -90,11 +90,9 @@ async def install_casks(
 
     rows: dict[str, CaskRow] = {}
     order: list[str] = []  # Dependencies before their dependents
-    languages: list[str] = []  # Read from the system only for a cask that has variants
 
     def visit(token: str) -> None:
         """Visit a cask and its dependencies, recording the order to install them in."""
-        nonlocal languages
         if token in rows or token in installed:
             return
 
@@ -102,8 +100,7 @@ async def install_casks(
             return  # brew reports the unknown name
 
         if row.language_variations:
-            languages = languages or [*opts.languages, *system_languages()]
-            row = localise(row, languages)
+            row = localise(row, [*opts.languages, *system_languages()])
 
         rows[token] = row
         for dep in _depends(row, "cask"):
