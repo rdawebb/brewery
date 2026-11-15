@@ -74,6 +74,17 @@ def clonefile_fails(monkeypatch):
 class TestCloneTree:
     """Tests the tree copier, including the clonefile fast path and its fallback."""
 
+    def test_a_file_is_copied(self, tmp_path) -> None:
+        """Test that a single file, as a cask stages, copies with its mode."""
+        src = tmp_path / "file"
+        src.write_bytes(b"data")
+        src.chmod(0o640)
+
+        clone_tree(src, tmp_path / "out", use_clonefile=False)
+
+        out = tmp_path / "out"
+        assert (out.read_bytes(), out.stat().st_mode & 0o777) == (b"data", 0o640)
+
     def test_modes_and_symlinks_are_preserved(self, staged_keg, tmp_path) -> None:
         """Test that a copied keg keeps its permissions and relative symlinks."""
         dst = tmp_path / "out"

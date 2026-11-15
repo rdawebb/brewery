@@ -42,6 +42,7 @@ from brewery.providers.cask_directives import (
     run_directives,
     undeletable,
 )
+from brewery.providers.cellar import clone_tree
 from brewery.providers.extractor import extract_tar
 from brewery.providers.linker import describe_existing
 from brewery.providers.receipt import RECEIPT_NAME, current_arch, dumps_bytes
@@ -174,17 +175,18 @@ def stage(
         if isinstance(download, Mapping):
             for path, file in download.items():
                 (scratch / path).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(file, scratch / path)
+                clone_tree(file, scratch / path)
 
         elif row.container == {"type": "naked"}:
-            shutil.copy2(download, scratch / name)
+            clone_tree(download, scratch / name)
 
         else:
             _unpack(download, scratch, name=name)
 
         try:
             for path in _tree(scratch):
-                if not stat.S_ISLNK(mode := os.lstat(path).st_mode):
+                mode = os.lstat(path).st_mode
+                if not stat.S_ISLNK(mode) and not mode & stat.S_IWUSR:
                     os.chmod(path, mode | stat.S_IWUSR)
                 # 0x0100 opts the staged app out of App Translocation
                 _set_xattr(path, QUARANTINE, f"0181;{stamp}", follow=False)
@@ -1155,7 +1157,7 @@ def _unpack(download: Path, dest: Path, *, name: str) -> None:
         raise ExtractionError(f"can't unpack a {kind} archive", archive=download)
 
     else:
-        shutil.copy2(download, dest / name)
+        clone_tree(download, dest / name)
 
 
 def _unpack_dmg(dmg: Path, dest: Path) -> None:

@@ -186,6 +186,27 @@ class TestStage:
         )
         assert str(download) not in info.stdout
 
+    def test_only_read_only_paths_are_made_writable(self, brew, tmp_path) -> None:
+        """Test that a read-only file gains `S_IWUSR`, and a writable one keeps its mode."""
+        src = tmp_path / "src"
+        _app(src)
+        resources = src / "Foo.app" / "Contents" / "Resources"
+        resources.mkdir()
+        (resources / "locked").write_text("")
+        (resources / "locked").chmod(0o444)
+        (resources / "open").write_text("")
+        (resources / "open").chmod(0o640)
+        archive = tmp_path / "download"
+        subprocess.run(
+            ["ditto", "-c", "-k", "--keepParent", str(src / "Foo.app"), str(archive)],
+            check=True,
+        )
+
+        staged = stage(_row(), archive, brew.caskroom) / "Foo.app" / "Contents"
+
+        assert (staged / "Resources" / "locked").stat().st_mode & 0o777 == 0o644
+        assert (staged / "Resources" / "open").stat().st_mode & 0o777 == 0o640
+
     def test_bare_file_stages_under_its_url_name(self, brew, tmp_path) -> None:
         """Test that a naked download keeps the filename its artifact names."""
         download = tmp_path / "download"

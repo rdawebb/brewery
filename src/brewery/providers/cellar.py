@@ -18,6 +18,13 @@ from brewery.providers.linker import unlink_keg
 
 _IS_DARWIN = sys.platform == "darwin"
 
+if _IS_DARWIN:
+    _libc = ctypes.CDLL(
+        name=ctypes.util.find_library(name="c") or "libc.dylib", use_errno=True
+    )
+    _libc.clonefile.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint32]
+    _libc.clonefile.restype = ctypes.c_int
+
 
 def _clonefile(src: Path, dst: Path) -> None:
     """Use the clonefile syscall to create a copy of the file at `src` in `dst`.
@@ -29,25 +36,19 @@ def _clonefile(src: Path, dst: Path) -> None:
     Raises:
         OSError: If the clonefile syscall fails.
     """
-    libc = ctypes.CDLL(
-        name=ctypes.util.find_library(name="c") or "libc.dylib", use_errno=True
-    )
-    libc.clonefile.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint32]
-    libc.clonefile.restype = ctypes.c_int
-
-    if libc.clonefile(os.fsencode(filename=src), os.fsencode(filename=dst), 0) != 0:
+    if _libc.clonefile(os.fsencode(filename=src), os.fsencode(filename=dst), 0) != 0:
         err = ctypes.get_errno()
         raise OSError(err, os.strerror(err), str(dst))
 
 
 def clone_tree(src: Path, dst: Path, *, use_clonefile: bool | None = None) -> None:
-    """Clone the directory tree at `src` to a non-existent `dst`.
+    """Clone the directory tree, or the file, at `src` to a non-existent `dst`.
 
-    Uses `clonefile` on Darwin (falling back to a recursive copy if the
-    filesystem doesn't support it), and a plain `copytree` elsewhere.
+    Uses `clonefile` on Darwin (falling back to a copy if the filesystem doesn't
+    support it), and a plain copy elsewhere.
 
     Args:
-        src: The source directory path.
+        src: The source directory or file path.
         dst: The destination directory path.
         use_clonefile: Whether to use the clonefile syscall.
 
@@ -69,7 +70,11 @@ def clone_tree(src: Path, dst: Path, *, use_clonefile: bool | None = None) -> No
             if exc.errno not in (errno.ENOTSUP, errno.EXDEV, errno.EINVAL):
                 raise
 
-    shutil.copytree(src, dst, symlinks=True)
+    if src.is_dir():
+        shutil.copytree(src, dst, symlinks=True)
+
+    else:
+        shutil.copy2(src, dst)
 
 
 def rmtree(path: Path) -> None:
