@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
 from brewery.core.errors import LinkError
+from brewery.providers import caskroom
 from brewery.providers.caskroom import _move_out
 
 pytestmark = pytest.mark.skipif(
@@ -28,3 +31,20 @@ def test_move_out_names_a_links_destination(tmp_path) -> None:
     assert str(target) in str(err.value)
     assert "/elsewhere/Foo.app" in str(err.value)
     assert source.is_dir()
+
+
+def test_signer_reads_the_requirement_without_verifying(monkeypatch) -> None:
+    """Test that the old app's signer takes one `codesign -d`, not a deep verify too."""
+    calls: list[list[str]] = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        out = "Executable=/x\ndesignated => identifier foo and anchor apple generic\n"
+        return subprocess.CompletedProcess(cmd, 0, out, "")
+
+    monkeypatch.setattr(caskroom.subprocess, "run", run)
+
+    signer = caskroom._signer(Path("/Applications/Foo.app"))
+
+    assert signer == "identifier foo and anchor apple generic"
+    assert calls == [["codesign", "-d", "-r-", "--", "/Applications/Foo.app"]]

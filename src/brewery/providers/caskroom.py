@@ -488,31 +488,39 @@ def upgrade_cask(
     receipt = read_receipt(token_dir) or {}
     version, config = _installed(token_dir)
     old_specs = _installed_specs(token_dir, version)
+
     if old_specs is None:  # A tap's .rb caskfile, or none: assume it hasn't changed
         old_specs = row.url_specs
+
     old = receipt.get("uninstall_artifacts") or []
     old_staged = token_dir / version
     explicit = config.get("explicit") or {}
     new_dirs = {**DEFAULT_DIRS, **(dirs or {}), **_dir_values(explicit)}
+
     moved = [
         (key, _locate(key, args, old_staged, env, new_dirs)[1])
         for stanza in row.artifacts or []
         for key, args in stanza.items()
         if key in _MOVED
     ]
+
     keep = {target for _key, target in moved}
+    old_dirs = _config_dirs(config)
+
     old_apps = [
-        _locate(key, args, old_staged, env, _config_dirs(config))[1]
+        _locate(key, args, old_staged, env, old_dirs)[1]
         for stanza in old
         for key, args in stanza.items()
         if key == "app"
     ]
+
     new_apps = [target for key, target in moved if key == "app"]
     signers = _approved_signers(old_apps) if len(old_apps) == len(new_apps) else None
     saved = {p: p.read_bytes() for p in meta.iterdir() if p.is_file()}
     backups = [
         (p, p.with_name(f"{p.name}.upgrading")) for p in (old_staged, meta / version)
     ]
+
     directives = [d for stanza in old for d in stanza.get("uninstall", [])]
 
     closed = run_directives(directives, deferred=False, upgrade=True)
@@ -520,9 +528,7 @@ def upgrade_cask(
     backed_up = False
 
     try:
-        _set_aside(
-            old, _sources(old_specs, old_staged), env, _config_dirs(config), keep, done
-        )
+        _set_aside(old, _sources(old_specs, old_staged), env, old_dirs, keep, done)
         run_directives(directives, deferred=True)
         for path, backup in backups:
             if path.exists():
@@ -642,7 +648,7 @@ def _inherit_approval(token: str, signers: list[str | None], apps: list[Path]) -
 
 
 def _signer(app: Path) -> str | None:
-    """An app's designated requirement, if it's validly signed.
+    """An app's designated requirement, if it's signed.
 
     Args:
         app: The app.
@@ -650,10 +656,6 @@ def _signer(app: Path) -> str | None:
     Returns:
         The requirement's text, or None.
     """
-    verify = ["codesign", "--verify", "--deep", "--strict", "--", str(app)]
-    if subprocess.run(verify, capture_output=True, check=False).returncode:
-        return None
-
     cmd = ["codesign", "-d", "-r-", "--", str(app)]
     out = subprocess.run(cmd, capture_output=True, text=True, check=False).stdout
 
