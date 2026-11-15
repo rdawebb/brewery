@@ -313,7 +313,7 @@ def install_artifacts(
         LinkError: If a target is already taken.
         CellarError: If an artifact's source is missing or can't be moved.
     """
-    overrides = dict(dirs or {})
+    overrides = dirs or {}
     explicit = dict(explicit or {})
     dirs = {**DEFAULT_DIRS, **overrides, **_dir_values(explicit)}
     sources = _sources(row.url_specs, staged)
@@ -777,8 +777,8 @@ def _installed(token_dir: Path) -> tuple[str, dict[str, Any]]:
     Raises:
         CellarError: If the cask has no installed version.
     """
-    stamps = sorted(token_dir.glob(".metadata/*/*"), key=lambda p: p.name)
-    if not stamps:
+    stamp = max(token_dir.glob(".metadata/*/*"), key=lambda p: p.name, default=None)
+    if stamp is None:
         raise CellarError(f"{token_dir.name} has no installed version", path=token_dir)
 
     try:
@@ -787,7 +787,7 @@ def _installed(token_dir: Path) -> tuple[str, dict[str, Any]]:
     except (OSError, ValueError):
         config = {}
 
-    return stamps[-1].parent.name, config if isinstance(config, dict) else {}
+    return stamp.parent.name, config if isinstance(config, dict) else {}
 
 
 def _config_dirs(config: Mapping[str, Any]) -> dict[str, Path]:
@@ -843,14 +843,18 @@ def _installed_specs(token_dir: Path, version: str) -> Mapping[str, Any] | None:
     Returns:
         The specs, empty if it has none; None if there's no readable JSON caskfile.
     """
-    # Only the stamp varies, so the newest sorts last
-    caskfiles = sorted(
-        token_dir.glob(f".metadata/{version}/*/Casks/{token_dir.name}.json")
+    # Only the stamp varies, so the newest is the greatest
+    newest = max(
+        token_dir.glob(f".metadata/{version}/*/Casks/{token_dir.name}.json"),
+        default=None,
     )
-    try:
-        caskfile = orjson.loads(caskfiles[-1].read_bytes())
+    if newest is None:
+        return None
 
-    except (IndexError, OSError, ValueError):
+    try:
+        caskfile = orjson.loads(newest.read_bytes())
+
+    except (OSError, ValueError):
         return None
 
     return (caskfile.get("url_specs") or {}) if isinstance(caskfile, dict) else None

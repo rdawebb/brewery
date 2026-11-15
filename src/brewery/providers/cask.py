@@ -11,14 +11,12 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Any
 from urllib.parse import quote
 
 from brewery import __version__
 from brewery.core.catalog import CaskRow
 from brewery.core.host import Platform
-
-Route = Literal["native", "brew"]
 
 # Artifact stanzas brewery can stage itself (`target` annotates an `app`/`binary`)
 NATIVE_ARTIFACTS = frozenset(
@@ -130,33 +128,33 @@ def read_cask_opts(raw: str) -> CaskOpts:
     return CaskOpts(dirs, binaries, "--require-sha" in args, languages)
 
 
-def classify(row: CaskRow, plat: Platform | None) -> tuple[Route, str]:
-    """Route a cask to the native installer or to brew, with the reason.
+def classify(row: CaskRow, plat: Platform | None) -> str:
+    """Why a cask goes to brew rather than the native installer.
 
     Args:
         row: The cask's catalog row.
         plat: The host platform, from `current_platform()`.
 
     Returns:
-        Tuple of (route, reason). The reason is empty for a native cask.
+        The reason, or an empty string for a native cask.
     """
     if plat is None or plat.os != "macos" or plat.macos_major is None:
-        return "brew", "native casks need macOS"
+        return "native casks need macOS"
 
     if row.container and row.container not in _NATIVE_CONTAINERS:
-        return "brew", "`container` unpacking"
+        return "`container` unpacking"
 
     if (row.url_specs or {}).keys() & _GIT_SPECS and not git_files(row):
-        return "brew", "`url` git checkout"
+        return "`url` git checkout"
 
     if reason := _url_reason(row.url_specs or {}):
-        return "brew", reason
+        return reason
 
     if row.language_variations:
-        return "brew", "`language` variant"  # One `localise` couldn't apply
+        return "`language` variant"  # One `localise` couldn't apply
 
     if reason := _artifact_reason(row.artifacts or [], ("uninstall",)):
-        return "brew", reason
+        return reason
 
     return _check_depends(row.depends_on or {}, plat.macos_major, plat.arch)
 
@@ -325,9 +323,7 @@ def _artifact_reason(artifacts: list[Any], directives: tuple[str, ...]) -> str:
     return ""
 
 
-def _check_depends(
-    depends_on: dict[str, Any], macos_major: int, arch: str
-) -> tuple[Route, str]:
+def _check_depends(depends_on: dict[str, Any], macos_major: int, arch: str) -> str:
     """Hand casks this host can't run to brew, which refuses with its own message.
 
     `formula` and `cask` dependencies are resolved by the installer.
@@ -338,7 +334,7 @@ def _check_depends(
         arch: The host's arch token.
 
     Returns:
-        Tuple of (route, reason).
+        The reason, or an empty string if this host meets them.
     """
     for key in ("macos", "maximum_macos"):
         for op, versions in (depends_on.get(key) or {}).items():
@@ -351,10 +347,10 @@ def _check_depends(
             )
 
             if not ok:
-                return "brew", f"needs macOS {op} {', '.join(versions)}"
+                return f"needs macOS {op} {', '.join(versions)}"
 
     archs = {_ARCH_TYPES.get(a.get("type")) for a in depends_on.get("arch") or []}
     if archs and arch not in archs:
-        return "brew", f"needs {'/'.join(sorted(a for a in archs if a))}"
+        return f"needs {'/'.join(sorted(a for a in archs if a))}"
 
-    return "native", ""
+    return ""

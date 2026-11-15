@@ -28,7 +28,7 @@ class TestClassify:
 
     def test_fixture_cask_is_native(self, catalog) -> None:
         """Test that iina (app, binary, uninstall quit, zap) installs natively."""
-        assert classify(catalog.get_cask("iina"), SEQUOIA) == ("native", "")
+        assert classify(catalog.get_cask("iina"), SEQUOIA) == ""
 
     @pytest.mark.parametrize(
         ("artifacts", "reason"),
@@ -58,38 +58,38 @@ class TestClassify:
     )
     def test_foreign_artifacts_go_to_brew(self, artifacts, reason) -> None:
         """Test that anything outside the native artifact set goes to brew."""
-        assert classify(cask_row(artifacts=artifacts), SEQUOIA) == ("brew", reason)
+        assert classify(cask_row(artifacts=artifacts), SEQUOIA) == reason
 
     def test_login_item_is_native(self) -> None:
         """Test that an `uninstall login_item` keeps the cask native."""
         artifacts = [{"app": ["Foo.app"]}, {"uninstall": [{"login_item": "Foo"}]}]
-        assert classify(cask_row(artifacts=artifacts), SEQUOIA) == ("native", "")
+        assert classify(cask_row(artifacts=artifacts), SEQUOIA) == ""
 
     @pytest.mark.parametrize(
         ("depends_on", "expected"),
         [
-            pytest.param({"macos": {">=": ["15"]}}, ("native", ""), id="macos_met"),
+            pytest.param({"macos": {">=": ["15"]}}, "", id="macos_met"),
             pytest.param(
                 {"macos": {">=": ["26"]}},
-                ("brew", "needs macOS >= 26"),
+                "needs macOS >= 26",
                 id="macos_too_new",
             ),
             pytest.param(
                 {"maximum_macos": {"<=": ["14"]}},
-                ("brew", "needs macOS <= 14"),
+                "needs macOS <= 14",
                 id="macos_too_old",
             ),
             pytest.param(
                 {"macos": {"==": ["13", "14"]}},
-                ("brew", "needs macOS == 13, 14"),
+                "needs macOS == 13, 14",
                 id="macos_not_listed",
             ),
             pytest.param(
                 {"arch": [{"type": "intel", "bits": 64}]},
-                ("brew", "needs amd64"),
+                "needs amd64",
                 id="wrong_arch",
             ),
-            pytest.param({"formula": ["wget"]}, ("native", ""), id="formula_dep"),
+            pytest.param({"formula": ["wget"]}, "", id="formula_dep"),
         ],
     )
     def test_depends_on(self, depends_on, expected) -> None:
@@ -135,7 +135,7 @@ class TestClassify:
     def test_download_brew_alone_can_fetch(self, fields, reason) -> None:
         """Test that a download only brew can fetch or unpack goes to brew up front."""
         row = cask_row(artifacts=[{"app": ["Foo.app"]}], **fields)
-        assert classify(row, SEQUOIA) == ("brew", reason)
+        assert classify(row, SEQUOIA) == reason
 
     @pytest.mark.parametrize(
         "specs",
@@ -149,13 +149,13 @@ class TestClassify:
     def test_header_specs_are_native(self, specs) -> None:
         """Test that the `url` options sent as headers keep the cask native."""
         row = cask_row(artifacts=[{"app": ["Foo.app"]}], url_specs=specs)
-        assert classify(row, SEQUOIA) == ("native", "")
+        assert classify(row, SEQUOIA) == ""
 
     @pytest.mark.parametrize("kind", ["naked", "dmg", "zip"])
     def test_container_type_is_native(self, kind) -> None:
         """Test that a container `stage` copies or sniffs keeps the cask native."""
         row = cask_row(artifacts=[{"binary": ["p4"]}], container={"type": kind})
-        assert classify(row, SEQUOIA) == ("native", "")
+        assert classify(row, SEQUOIA) == ""
 
     def test_github_font_checkout_is_native(self) -> None:
         """Test that fonts sparse-checked-out of a GitHub repo keep the cask native."""
@@ -164,12 +164,15 @@ class TestClassify:
             url_specs={"branch": "main", "only_path": "ofl/abeezee"},
             artifacts=[{"font": ["ABeeZee-Regular.ttf"], "target": "x"}, {"zap": []}],
         )
-        assert classify(row, SEQUOIA) == ("native", "")
+        assert classify(row, SEQUOIA) == ""
 
     def test_off_macos_goes_to_brew(self) -> None:
         """Test that native casks are macOS-only."""
         linux = Platform(arch="amd64", os="linux")
-        assert classify(cask_row(artifacts=[{"font": ["a.ttf"]}]), linux)[0] == "brew"
+        assert (
+            classify(cask_row(artifacts=[{"font": ["a.ttf"]}]), linux)
+            == "native casks need macOS"
+        )
 
 
 class TestGitFiles:
@@ -217,7 +220,7 @@ class TestGitFiles:
         """Test that a checkout brewery can't fetch file by file goes to brew."""
         row = cask_row(url=url, url_specs={"only_path": "x"}, artifacts=artifacts)
         assert git_files(row) == {}
-        assert classify(row, SEQUOIA) == ("brew", "`url` git checkout")
+        assert classify(row, SEQUOIA) == "`url` git checkout"
 
 
 _LANG = ("Accept-Language", "en")
@@ -391,7 +394,7 @@ class TestLanguages:
         localised = localise(row, ["de-DE"])
 
         assert (localised.url, localised.sha256) == ("https://a/de.dmg", "b" * 64)
-        assert classify(localised, SEQUOIA) == ("native", "")
+        assert classify(localised, SEQUOIA) == ""
 
     def test_unknown_override_goes_to_brew(self) -> None:
         """Test that a variant overriding a field brewery doesn't store stays brew's."""
@@ -400,10 +403,7 @@ class TestLanguages:
             language_variations=[_variant("de", url_specs={"referer": "x"})],
         )
 
-        assert classify(localise(row, ["de"]), SEQUOIA) == (
-            "brew",
-            "`language` variant",
-        )
+        assert classify(localise(row, ["de"]), SEQUOIA) == "`language` variant"
 
 
 class TestClassifyUninstall:

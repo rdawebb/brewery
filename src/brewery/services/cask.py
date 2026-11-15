@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import httpx2
 
@@ -253,9 +253,7 @@ def _brew_reason(row: CaskRow, opts: CaskOpts) -> str:
     if opts.require_sha and row.sha256 in (None, NO_CHECK):
         return "--require-sha"
 
-    _route, reason = classify(row, current_platform())
-
-    return reason
+    return classify(row, current_platform())
 
 
 def _blocked(row: CaskRow, done: set[str], failed_formulae: set[str]) -> str:
@@ -484,10 +482,11 @@ async def _fetch(
         if (failed := next((g for g in got if isinstance(g, str)), None)) is not None:
             return failed
 
-        return {p: g for p, g in zip(files, got, strict=True) if not isinstance(g, str)}
+        return cast("dict[str, Path]", dict(zip(files, got, strict=True)))
 
-    sha = row.sha256 if row.sha256 not in (None, NO_CHECK) else NO_CHECK
-    ref = BottleRef(row.token, str(row.url), sha, url_headers(row.url_specs))
+    ref = BottleRef(
+        row.token, str(row.url), row.sha256 or NO_CHECK, url_headers(row.url_specs)
+    )
 
     return await _fetch_one(ref, downloader, progress, fresh=fresh)
 
