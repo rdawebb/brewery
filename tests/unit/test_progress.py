@@ -160,6 +160,30 @@ class TestBegin:
         reporter.end()
 
 
+class TestPaused:
+    """Tests that a sudo prompt takes the live display off screen."""
+
+    async def test_a_revealed_display_stops_and_restarts(self, reporter) -> None:
+        """Test that the display is stopped for the prompt and started again after."""
+        reporter.begin(2)
+        reporter._reveal()
+
+        with reporter.paused():
+            assert reporter._progress.live.is_started is False
+
+        assert reporter._progress.live.is_started is True
+
+    async def test_a_reveal_due_while_paused_waits(self, reporter) -> None:
+        """Test that a pending reveal firing mid-prompt starts the display only after."""
+        reporter.begin(2)
+
+        with reporter.paused():
+            reporter._reveal()
+            assert reporter._progress.live.is_started is False
+
+        assert reporter._progress.live.is_started is True
+
+
 class TestUpdate:
     """Tests per-row glyph and activity transitions."""
 

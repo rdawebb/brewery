@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import atexit
+import getpass
+import os
 import sys
-from collections.abc import Iterable, Sequence
+import termios
+from collections.abc import Callable, Generator, Iterable, Sequence
+from contextlib import AbstractContextManager, contextmanager, nullcontext
+from functools import partial
 from typing import TYPE_CHECKING
 
 from rich.prompt import Confirm
@@ -97,6 +103,66 @@ def confirm_or_cancel(
     console.print(cancel_msg, style="dim")
 
     return False
+
+
+@contextmanager
+def _tty_restored_at_exit() -> Generator[None]:
+    """Put the terminal's settings back at exit if a prompt is cut short.
+
+    A second Ctrl-C mid-prompt cuts `askpass`'s shutdown short, and its thread
+    dies in `getpass` with echo still off.
+
+    Yields:
+        None, with the restore registered until the block ends.
+    """
+    try:
+        fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
+
+    except OSError:
+        yield  # No tty: getpass falls back to stdin, nothing to restore
+        return
+
+    try:
+        restore = partial(
+            termios.tcsetattr, fd, termios.TCSAFLUSH, termios.tcgetattr(fd)
+        )
+        atexit.register(restore)
+
+        try:
+            yield
+
+        finally:
+            atexit.unregister(restore)
+
+    finally:
+        os.close(fd)
+
+
+def sudo_ask(
+    pause: Callable[[], AbstractContextManager[object]] = nullcontext,
+) -> Callable[[str], str | None]:
+    """Build `askpass`'s `ask`, which reads sudo's password on the terminal.
+
+    Args:
+        pause: Takes the live display off screen while the prompt is up.
+
+    Returns:
+        A callable taking sudo's prompt and returning the password, or None
+        with no terminal or on Ctrl-D.
+    """
+
+    def ask(prompt: str) -> str | None:
+        if not console.is_terminal:
+            return None
+
+        with pause(), _tty_restored_at_exit():
+            try:
+                return getpass.getpass(prompt)
+
+            except EOFError:
+                return None
+
+    return ask
 
 
 def pkg_line(pkg: Package) -> str:

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections import deque
+from collections.abc import Generator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 from rich.console import Console
@@ -140,9 +143,14 @@ class ProgressReporter:
         self._total = 0
         self._done = 0
         self._tasks: dict[str, TaskID] = {}
-        self._finished: deque[TaskID] = deque()  # finished rows, oldest first
+        self._finished: deque[TaskID] = deque()  # Finished rows, oldest first
         self._reveal_handle: asyncio.TimerHandle | None = None
+
+        # `_started` means the display is wanted; `_paused` keeps it off screen;
+        # `paused` runs on askpass's thread, so the lock covers both
         self._started = False
+        self._paused = False
+        self._lock = threading.Lock()
 
     def begin(self, total: int) -> None:
         """Add the overall bar and arm the deferred reveal.
@@ -170,9 +178,34 @@ class ProgressReporter:
     def _reveal(self) -> None:
         """Start the live display (called by the deferred-reveal timer)."""
         self._reveal_handle = None
-        if not self._started:
-            self._progress.start()
-            self._started = True
+        with self._lock:
+            if not self._started:
+                self._started = True
+                if not self._paused:
+                    self._progress.start()
+
+    @contextmanager
+    def paused(self) -> Generator[None]:
+        """Take the live display off screen, such as for a sudo prompt.
+
+        A reveal that falls due while paused waits for the pause to end.
+
+        Yields:
+            None, with the display stopped; it is started again on exit if wanted.
+        """
+        with self._lock:
+            self._paused = True
+            if self._started:
+                self._progress.stop()
+
+        try:
+            yield
+
+        finally:
+            with self._lock:
+                self._paused = False
+                if self._started:
+                    self._progress.start()
 
     def _task_for(self, name: str) -> TaskID:
         """Return `name`'s task, creating it on first sight.
@@ -278,9 +311,10 @@ class ProgressReporter:
             self._reveal_handle.cancel()
             self._reveal_handle = None
 
-        if self._started:
-            self._progress.stop()
-            self._started = False
+        with self._lock:
+            if self._started:
+                self._progress.stop()
+                self._started = False
 
         for tid in self._progress.task_ids:
             self._progress.remove_task(tid)

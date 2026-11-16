@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Generator
+from contextlib import contextmanager
 from io import StringIO
 
 import pytest
@@ -17,6 +19,7 @@ from brewery.cli.output import (
     print_failures,
     print_result,
     spinner,
+    sudo_ask,
 )
 from brewery.core.models import Package, PackageKind
 
@@ -243,3 +246,44 @@ class TestConfirmOrCancel:
         text = out.getvalue()
         assert _SAVE_CURSOR not in text
         assert _RESTORE_AND_ERASE not in text
+
+
+class TestSudoAsk:
+    """Tests the `ask` that reads sudo's password for `askpass`."""
+
+    def test_the_prompt_is_read_inside_the_pause(self, tty_out, monkeypatch) -> None:
+        """Test that the display is paused around the prompt and the password returned."""
+        events: list[str] = []
+
+        @contextmanager
+        def pause() -> Generator[None]:
+            events.append("pause")
+            yield
+            events.append("resume")
+
+        def fake_getpass(prompt: str) -> str:
+            events.append(prompt)
+            return "hunter2"
+
+        monkeypatch.setattr(output_mod.getpass, "getpass", fake_getpass)
+
+        assert sudo_ask(pause)("Password:") == "hunter2"
+        assert events == ["pause", "Password:", "resume"]
+
+    def test_no_terminal_declines(self, out, monkeypatch) -> None:
+        """Test that with no terminal to prompt on, the password is declined."""
+        monkeypatch.setattr(
+            output_mod.getpass, "getpass", lambda _p: pytest.fail("prompted")
+        )
+
+        assert sudo_ask()("Password:") is None
+
+    def test_ctrl_d_declines(self, tty_out, monkeypatch) -> None:
+        """Test that Ctrl-D at the prompt declines rather than raising."""
+
+        def eof(_prompt: str) -> str:
+            raise EOFError
+
+        monkeypatch.setattr(output_mod.getpass, "getpass", eof)
+
+        assert sudo_ask()("Password:") is None

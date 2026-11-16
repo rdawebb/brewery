@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from contextlib import nullcontext
 from typing import Annotated
 
 from brewery.cli.context import (
@@ -20,10 +21,12 @@ from brewery.cli.output import (
     pkg_line,
     print_failures,
     print_result,
+    sudo_ask,
 )
 from brewery.cli.progress import make_reporter
 from brewery.core.errors import AlreadyInstalledWarning
 from brewery.core.models import PackageKind
+from brewery.core.sudo import askpass
 from brewery.services.install import install_packages
 
 
@@ -55,9 +58,11 @@ def install(
         return
 
     with _repository() as repo:
-        installed, failures = run_async(
-            coro=install_packages(repo, names, target, progress=make_reporter(console))
-        )
+        reporter = make_reporter(console)
+        with askpass(sudo_ask(reporter.paused if reporter else nullcontext)):
+            installed, failures = run_async(
+                coro=install_packages(repo, names, target, progress=reporter)
+            )
 
         print_result(
             f"✓ Installed {len(installed)} package(s)\n",
