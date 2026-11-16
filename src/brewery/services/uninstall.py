@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,7 +33,6 @@ async def uninstall_packages(
     formula: UninstallBackend = brew.formula_backend,
     cask: PackageBackend = brew.cask_backend,
     zap: bool = False,
-    before_brew: Callable[[], object] | None = None,
 ) -> tuple[list[str], Notes]:
     """Uninstall packages and refresh cache on success.
 
@@ -46,7 +44,6 @@ async def uninstall_packages(
         formula: Formula backend for the per-formula brew fallback.
         cask: Cask backend for the casks brewery can't uninstall.
         zap: Also remove the casks' `zap` files, as brew's `--zap` does.
-        before_brew: Called before brew uninstalls a cask, to end the live display.
 
     Returns:
         List of successfully removed package names, and list of (name, reason) failures
@@ -76,11 +73,7 @@ async def uninstall_packages(
 
     locked: dict[str, str] = {}
     if cask_names:
-        locked = dict(
-            await uninstall_casks(
-                cask_names, backend=cask, env=env, zap=zap, before_brew=before_brew
-            )
-        )
+        locked = dict(await uninstall_casks(cask_names, backend=cask, env=env, zap=zap))
 
     repo.cache_mgr.invalidate()
 

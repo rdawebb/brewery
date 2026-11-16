@@ -20,6 +20,7 @@ from brewery.cli.output import (
     print_result,
     spinner,
     sudo_ask,
+    sudo_prompts,
 )
 from brewery.core.models import Package, PackageKind
 
@@ -287,3 +288,34 @@ class TestSudoAsk:
         monkeypatch.setattr(output_mod.getpass, "getpass", eof)
 
         assert sudo_ask()("Password:") is None
+
+
+class TestSudoPrompts:
+    """Tests that `sudo_prompts` pauses the right display around sudo's prompt."""
+
+    def test_a_reporter_is_paused_around_the_prompt(self, tty_out, monkeypatch) -> None:
+        """Test that a progress reporter's `paused` wraps the prompt."""
+        events: list[str] = []
+        asks: list = []
+
+        class Reporter:
+            """A fake reporter that records its pause."""
+
+            @contextmanager
+            def paused(self) -> Generator[None]:
+                """Record the pause and its end."""
+                events.append("pause")
+                yield
+                events.append("resume")
+
+        def fake_getpass(prompt: str) -> str:
+            events.append(prompt)
+            return "hunter2"
+
+        monkeypatch.setattr(output_mod, "askpass", asks.append)
+        monkeypatch.setattr(output_mod.getpass, "getpass", fake_getpass)
+
+        sudo_prompts(Reporter())  # ty: ignore[invalid-argument-type]
+
+        assert asks[0]("Password:") == "hunter2"
+        assert events == ["pause", "Password:", "resume"]

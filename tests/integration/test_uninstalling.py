@@ -316,20 +316,11 @@ class TestUninstallCasks:
             raise PermissionError(f"can't remove {path}")
 
         monkeypatch.setattr(caskroom, "remove", refuse)
-        brew_calls_at_stop: list[int] = []
-        await uninstall_packages(
-            repo,
-            ["foo"],
-            kind=PackageKind.CASK,
-            before_brew=lambda: brew_calls_at_stop.append(
-                len(_provider_calls(mock_brew, "uninstall"))
-            ),
-        )
+        await uninstall_packages(repo, ["foo"], kind=PackageKind.CASK)
 
         assert _provider_calls(mock_brew, "uninstall") == [
             ("brew", "uninstall", "--cask", "foo")
         ]
-        assert brew_calls_at_stop == [0]  # The display ends before brew runs
 
     async def test_pinned_is_refused(self, repo, mock_brew, mock_env, install):
         """Test that a pinned cask is refused, not handed to brew to refuse."""

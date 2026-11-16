@@ -13,14 +13,15 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 from rich.prompt import Confirm
+from rich.status import Status
 from rich.text import Text
 from rich.theme import Theme
 
 from brewery.cli.context import console
+from brewery.core.sudo import askpass
 
 if TYPE_CHECKING:
-    from rich.status import Status
-
+    from brewery.cli.progress import ProgressReporter
     from brewery.core.models import Package
 
 _CONFIRM_BULLET = "•"
@@ -163,6 +164,48 @@ def sudo_ask(
                 return None
 
     return ask
+
+
+@contextmanager
+def _stopped(status: Status) -> Generator[None]:
+    """Stop a spinner for the block, and start it again after.
+
+    Args:
+        status: The spinner to take off screen.
+
+    Yields:
+        None, with the spinner stopped; it is started again on exit, even if
+        the block raises.
+    """
+    status.stop()
+    try:
+        yield
+
+    finally:
+        status.start()
+
+
+def sudo_prompts(
+    display: ProgressReporter | Status | None,
+) -> AbstractContextManager[None]:
+    """Answer sudo's prompts on the terminal, with `display` off screen meanwhile.
+
+    Args:
+        display: The live display to pause, or None when there isn't one.
+
+    Returns:
+        `askpass` set up with `sudo_ask`, for the length of a `with` block.
+    """
+    if display is None:
+        pause: Callable[[], AbstractContextManager[object]] = nullcontext
+
+    elif isinstance(display, Status):
+        pause = partial(_stopped, display)
+
+    else:
+        pause = display.paused
+
+    return askpass(sudo_ask(pause))
 
 
 def pkg_line(pkg: Package) -> str:

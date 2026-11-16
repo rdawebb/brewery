@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Self
+import asyncio
+import os
+from io import StringIO
 
 import pytest
+from rich.console import Console
+from rich.status import Status
 
+from brewery.cli import output as output_mod
 from brewery.cli.commands import install as install_mod
 from brewery.cli.commands import uninstall as uninstall_mod
 from brewery.core.errors import EXIT_USER_ERROR, AlreadyInstalledWarning
@@ -69,10 +74,8 @@ def uninstalls(monkeypatch):
     def _arrange(removed=(), failures=()):
         calls: list[dict] = []
 
-        async def _uninstall(repo, names, kind, *, zap=False, before_brew=None):
+        async def _uninstall(repo, names, kind, *, zap=False):
             calls.append({"names": names, "kind": kind, "zap": zap})
-            if before_brew:
-                before_brew()
 
             return list(removed), list(failures)
 
@@ -276,31 +279,48 @@ class TestUninstall:
 
         assert calls[0]["zap"] is True
 
-    def test_the_spinner_stops_before_brew(self, run, uninstalls, monkeypatch) -> None:
-        """Test that the service is handed the spinner's stop, so brew's sudo prompt shows."""
+    def test_the_spinner_pauses_for_a_sudo_prompt(self, run, monkeypatch) -> None:
+        """Test that a sudo prompt mid-uninstall stops the spinner, then restarts it."""
         events: list[str] = []
 
-        class Spinner:
-            """A fake spinner that records its stop and exit."""
+        class Spinner(Status):
+            """A fake spinner that records its stops and starts."""
 
-            def __enter__(self) -> Self:
-                """Pretend to start the spinner."""
-                return self
-
-            def __exit__(self, *exc) -> None:
-                """Pretend to stop the spinner."""
-                events.append("exit")
+            def __init__(self) -> None:
+                """Skip Status's live display."""
 
             def stop(self) -> None:
                 """Record that the spinner was stopped."""
                 events.append("stop")
 
+            def start(self) -> None:
+                """Record that the spinner was started."""
+                events.append("start")
+
+        def fake_getpass(prompt: str) -> str:
+            events.append(prompt)
+            return "hunter2"
+
+        async def _uninstall(repo, names, kind, *, zap=False):
+            # As sudo does: run the askpass helper, which asks brewery
+            helper = await asyncio.create_subprocess_exec(
+                os.environ["SUDO_ASKPASS"],
+                "Password:",
+                stdout=asyncio.subprocess.DEVNULL,
+            )
+            assert await asyncio.wait_for(helper.wait(), 10) == 0
+            return list(names), []
+
         monkeypatch.setattr(uninstall_mod, "spinner", lambda message: Spinner())
-        uninstalls(removed=["iina"])
+        monkeypatch.setattr(uninstall_mod, "uninstall_packages", _uninstall)
+        monkeypatch.setattr(
+            output_mod, "console", Console(file=StringIO(), force_terminal=True)
+        )
+        monkeypatch.setattr(output_mod.getpass, "getpass", fake_getpass)
 
         run(["uninstall", "iina", "--yes"])
 
-        assert events == ["stop", "exit"]
+        assert events == ["start", "stop", "Password:", "start", "stop"]
 
     @pytest.mark.parametrize("alias", ["rm", "del"])
     def test_the_aliases_reach_the_same_command(self, run, uninstalls, alias) -> None:

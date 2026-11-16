@@ -19,6 +19,7 @@ from brewery.cli.output import (
     print_failures,
     print_result,
     spinner,
+    sudo_prompts,
 )
 from brewery.core.models import PackageKind
 from brewery.services.uninstall import uninstall_packages
@@ -55,12 +56,9 @@ def uninstall(
         return
 
     with _repository() as repo:
-        with spinner("Uninstalling...") as status:
-            # Stopped before brew, so any sudo prompts aren't hidden
+        with spinner("Uninstalling...") as status, sudo_prompts(status):
             removed, failures = run_async(
-                coro=uninstall_packages(
-                    repo, names, kind, zap=zap, before_brew=status.stop
-                )
+                coro=uninstall_packages(repo, names, kind, zap=zap)
             )
 
         print_result(

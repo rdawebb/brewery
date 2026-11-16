@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import sys
-from contextlib import nullcontext
 from typing import Annotated
 
 from brewery.cli.context import (
@@ -22,12 +21,11 @@ from brewery.cli.output import (
     print_advisories,
     print_failures,
     print_result,
-    sudo_ask,
+    sudo_prompts,
 )
 from brewery.cli.progress import make_reporter
 from brewery.core.errors import PinnedPackageWarning
 from brewery.core.models import Package, PackageKind
-from brewery.core.sudo import askpass
 from brewery.services.upgrade import upgrade_packages
 
 
@@ -90,7 +88,7 @@ def upgrade(
                 return
 
         reporter = make_reporter(console)
-        with askpass(sudo_ask(reporter.paused if reporter else nullcontext)):
+        with sudo_prompts(reporter):
             upgraded, current, advisories, failures = run_async(
                 coro=upgrade_packages(
                     repo, names, kind, greedy=greedy, progress=reporter
