@@ -234,7 +234,7 @@ def read_validators(
     Returns:
         (etag, last_modified) tuple, either element may be None.
     """
-    get_meta = catalog.get_meta  # ty: ignore[unresolved-attribute]
+    get_meta = catalog.get_meta  # ty: ignore[missing-attribute]
 
     return get_meta(feed.etag_key), get_meta(feed.last_modified_key)
 
@@ -246,7 +246,7 @@ def store_validators(catalog: object, result: FetchResult) -> None:
         catalog: A Catalog-like object exposing `set_meta(key, value)`.
         result: The fetch result whose validators to persist.
     """
-    set_meta = catalog.set_meta  # ty: ignore[unresolved-attribute]
+    set_meta = catalog.set_meta  # ty: ignore[missing-attribute]
     if result.modified:
         if result.etag:
             set_meta(result.feed.etag_key, result.etag)

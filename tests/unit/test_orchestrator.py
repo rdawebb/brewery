@@ -925,7 +925,7 @@ class TestUpgradeOnRequest:
             brew=MockBrew(),
             config=CFG,
         )
-        o._native_install = cap_native  # ty: ignore[invalid-assignment]
+        o._native_install = cap_native
         monkeypatch.setattr(orch_mod, "mark_replaced", lambda *a, **k: None)
 
         return o
