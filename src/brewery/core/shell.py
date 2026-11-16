@@ -60,8 +60,10 @@ def _one_line(text: str) -> str:
     return flat if len(flat) <= _MAX_LOGGED_ERROR else f"{flat[:_MAX_LOGGED_ERROR]}..."
 
 
-def _signal_brew(proc: asyncio.subprocess.Process, sig: int, *, detached: bool) -> bool:
-    """Signal a brew process, or its whole process group when detached.
+def _signal_brew(
+    proc: asyncio.subprocess.Process, sig: int, *, own_group: bool
+) -> bool:
+    """Signal a brew process, or its whole process group when it has its own.
 
     brew spawns the real work (build.rb, cmake, the compiler) as children, so
     signalling `proc` alone leaves them running.
@@ -69,13 +71,13 @@ def _signal_brew(proc: asyncio.subprocess.Process, sig: int, *, detached: bool) 
     Args:
         proc: The brew process.
         sig: The signal to send.
-        detached: Whether the process was started with its own session.
+        own_group: Whether the process was started in its own process group.
 
     Returns:
         True if the signal was delivered, False if the process was already gone.
     """
     try:
-        if detached:
+        if own_group:
             os.killpg(os.getpgid(proc.pid), sig)
 
         else:
@@ -87,21 +89,21 @@ def _signal_brew(proc: asyncio.subprocess.Process, sig: int, *, detached: bool) 
     return True
 
 
-async def _terminate_brew(proc: asyncio.subprocess.Process, *, detached: bool) -> None:
+async def _terminate_brew(proc: asyncio.subprocess.Process, *, own_group: bool) -> None:
     """Stop a brew process and everything it spawned, then reap it.
 
-    Detached runs never see the terminal's Ctrl-C, so without this brew keeps
-    building after brewery exits; SIGINT first, since brew handles it by
-    releasing its lock and clearing the partial keg; SIGKILL after `_GRACE`.
+    Runs in their own group never see the terminal's Ctrl-C, so without this brew keeps
+    building after brewery exits; SIGINT first, since brew handles it by releasing its
+    lock and clearing the partial keg; SIGKILL after `_GRACE`.
 
     Args:
         proc: The brew process.
-        detached: Whether the process was started with its own session.
+        own_group: Whether the process was started in its own process group.
     """
     if proc.returncode is not None:
         return
 
-    if not _signal_brew(proc, signal.SIGINT, detached=detached):
+    if not _signal_brew(proc, signal.SIGINT, own_group=own_group):
         return
 
     # Shielded: the wait outlives this timeout so the second `wait` can reuse it
@@ -109,7 +111,7 @@ async def _terminate_brew(proc: asyncio.subprocess.Process, *, detached: bool) -
         await asyncio.wait_for(asyncio.shield(proc.wait()), _GRACE)
 
     if proc.returncode is None:
-        _signal_brew(proc, signal.SIGKILL, detached=detached)
+        _signal_brew(proc, signal.SIGKILL, own_group=own_group)
 
     with contextlib.suppress(asyncio.CancelledError):
         await proc.wait()
@@ -151,10 +153,10 @@ async def run_brew(
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
-            # Detach from the terminal unless INHERIT mode is used to prevent
-            # progress display interference
+            # CAPTURE: own process group, so Ctrl-C skips brew and it can't
+            # read the tty; not a new session, sudo caches credentials per tty
             stdin=asyncio.subprocess.DEVNULL if capture else None,
-            start_new_session=capture,
+            process_group=0 if capture else None,
             stdout=asyncio.subprocess.PIPE if capture else None,
             stderr=asyncio.subprocess.PIPE if capture else None,
             env=env,
@@ -177,13 +179,13 @@ async def run_brew(
             out, err = "", ""
 
     except TimeoutError:
-        await _terminate_brew(proc, detached=capture)
+        await _terminate_brew(proc, own_group=capture)
         raise BrewTimeoutError(command=" ".join(cmd), timeout=timeout)
 
     # Ctrl+C terminates any brew processes as well
     except asyncio.CancelledError:
         log.info(event="brew_command_cancelled", args=args)
-        await _terminate_brew(proc, detached=capture)
+        await _terminate_brew(proc, own_group=capture)
         raise
 
     code = proc.returncode or 0

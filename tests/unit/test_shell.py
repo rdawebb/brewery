@@ -92,8 +92,8 @@ class MockProc:
 def _patch_group_signals(monkeypatch, proc) -> list[int]:
     """Route the module's process-group signalling into `proc`.
 
-    A captured run is detached into its own process group and signalled by
-    group, so the real `os` calls would otherwise target a pid that is not ours.
+    A captured run is started in its own process group and signalled by group,
+    so the real `os` calls would otherwise target a pid that is not Brewery's.
 
     Args:
         monkeypatch: The monkeypatch fixture.
@@ -145,7 +145,7 @@ def _patch(monkeypatch, proc, *, have_brew=True) -> dict[str, Any]:
             stderr: The standard error stream.
             env: The environment mapping passed to the child.
             **kwargs: Other create_subprocess_exec args (e.g. stdin,
-                start_new_session) captured for assertions.
+                process_group) captured for assertions.
 
         Returns:
             A mock process with the specified output.
@@ -161,7 +161,7 @@ def _patch(monkeypatch, proc, *, have_brew=True) -> dict[str, Any]:
         calls["stderr"] = stderr
         calls["env"] = env
         calls["stdin"] = kwargs.get("stdin")
-        calls["start_new_session"] = kwargs.get("start_new_session")
+        calls["process_group"] = kwargs.get("process_group")
 
         return proc
 
@@ -184,9 +184,9 @@ async def test_capture_returns_decoded_output(monkeypatch) -> None:
     assert calls["env"]["LANG"] == "C"
     assert calls["env"]["HOMEBREW_NO_COLOR"] == "1"
 
-    # CAPTURE detaches from the controlling terminal (new session, no stdin) so a
-    # child cannot write to /dev/tty and corrupt a live progress display
-    assert calls["start_new_session"] is True
+    # CAPTURE runs brew in its own process group, out of Ctrl-C's reach, but
+    # in brewery's session, so sudo's tty timestamp carries over
+    assert calls["process_group"] == 0
     assert calls["stdin"] == asyncio.subprocess.DEVNULL
 
 
@@ -203,7 +203,7 @@ async def test_inherit_does_not_pipe(monkeypatch) -> None:
     assert calls["env"] is None
 
     # INHERIT stays attached to the terminal (interactive passthrough)
-    assert calls["start_new_session"] is False and calls["stdin"] is None
+    assert calls["process_group"] is None and calls["stdin"] is None
 
 
 async def test_check_raises_on_nonzero(monkeypatch) -> None:
@@ -298,10 +298,10 @@ async def test_timeout_kills_and_raises(monkeypatch) -> None:
     assert proc.returncode is not None
 
 
-async def test_cancel_stops_the_detached_child(monkeypatch) -> None:
+async def test_cancel_stops_the_captured_child(monkeypatch) -> None:
     """Test that cancelling a captured run takes its brew process down with it.
 
-    A captured child is detached from the terminal, so a Ctrl-C never reaches
+    A captured child is outside the foreground group, so a Ctrl-C never reaches
     it: cancellation is the only thing standing between an abandoned brew and a
     source build that outlives brewery.
     """
