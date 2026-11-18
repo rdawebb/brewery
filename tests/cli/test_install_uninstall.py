@@ -13,6 +13,7 @@ from rich.status import Status
 from brewery.cli import output as output_mod
 from brewery.cli.commands import install as install_mod
 from brewery.cli.commands import uninstall as uninstall_mod
+from brewery.core import sudo as sudo_mod
 from brewery.core.errors import EXIT_USER_ERROR, AlreadyInstalledWarning
 from brewery.core.models import Package, PackageKind
 
@@ -317,6 +318,9 @@ class TestUninstall:
             output_mod, "console", Console(file=StringIO(), force_terminal=True)
         )
         monkeypatch.setattr(output_mod.getpass, "getpass", fake_getpass)
+        monkeypatch.setattr(
+            sudo_mod, "_is_sudo", lambda _pid: True
+        )  # Stands in for sudo
 
         run(["uninstall", "iina", "--yes"])
 

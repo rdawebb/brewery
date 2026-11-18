@@ -28,6 +28,30 @@ class _NullSink:
         """
 
 
+class _RecordingProgress:
+    """A mock ProgressPort that records the sequence of calls it receives."""
+
+    def __init__(self) -> None:
+        """Initialise with an empty event list."""
+        self.events: list[tuple] = []
+
+    def begin(self, total: int) -> None:
+        """Record the begin event with the total."""
+        self.events.append(("begin", total))
+
+    def update(self, name, stage, done=None, total=None) -> None:
+        """Record the update event with the name, stage, and optional done/total."""
+        self.events.append(("update", name, stage))
+
+    def finish(self, name, outcome) -> None:
+        """Record the finish event with the name and outcome."""
+        self.events.append(("finish", name, outcome))
+
+    def end(self) -> None:
+        """Record the end event."""
+        self.events.append(("end",))
+
+
 class MockHTTPClient:
     """Async httpx2-like stub, either injected into code or patched in for it.
 

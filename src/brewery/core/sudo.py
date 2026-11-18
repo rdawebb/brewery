@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import os
+import socket
 import socketserver
+import struct
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
@@ -26,14 +30,81 @@ if not reply:
 sys.stdout.buffer.write(reply + b"\\n")
 """
 
+# How long an answer is reused for; a sudo asking later is prompted again
+_SHARE_FOR = 5.0
+
+if sys.platform == "darwin":
+    _libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+
+
+def _peer_parent(conn: socket.socket) -> int:
+    """The parent of the process on the other end of `conn`: sudo, for the helper.
+
+    Read from the kernel, so the peer can't lie about it.
+
+    Args:
+        conn: A connected unix socket.
+
+    Returns:
+        The peer's parent pid.
+    """
+    if sys.platform == "darwin":
+        pid = conn.getsockopt(0, 0x002)  # SOL_LOCAL, LOCAL_PEERPID
+        info = ctypes.create_string_buffer(136)  # struct proc_bsdinfo
+
+        # PROC_PIDTBSDINFO; allowed for the helper
+        if _libproc.proc_pidinfo(pid, 3, 0, info, 136) != 136:
+            raise OSError(f"no process info for pid {pid}")
+
+        return struct.unpack_from("I", info, 16)[0]  # pbi_ppid
+
+    pid = struct.unpack(
+        "3i", conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+    )[0]
+
+    # Fields after the parenthesised command name: state, then ppid
+    return int(Path(f"/proc/{pid}/stat").read_text().rpartition(")")[2].split()[1])
+
+
+def _is_sudo(pid: int) -> bool:
+    """Whether `pid` is sudo, so the password it gets goes to sudo alone.
+
+    macOS reads the executable's path, which proc_pidpath gives even for root's
+    processes; Linux hides a setuid process's exe, so it checks the process holds
+    root and is named sudo instead.
+
+    Args:
+        pid: The process to check.
+
+    Returns:
+        True if it is sudo (macOS) or a privileged process named sudo (Linux).
+    """
+    if sys.platform == "darwin":
+        path = ctypes.create_string_buffer(4096)  # PROC_PIDPATHINFO_MAXSIZE
+        _libproc.proc_pidpath(pid, path, 4096)
+
+        # Only the SIP-sealed default macOS sudo
+        return path.value == b"/usr/bin/sudo"
+
+    status = dict(
+        line.split(":", 1)
+        for line in Path(f"/proc/{pid}/status").read_text().splitlines()
+    )
+
+    # Effective or saved uid
+    return (
+        status.get("Name", "").strip() == "sudo"
+        and "0" in status.get("Uid", "").split()[1:3]
+    )
+
 
 @contextmanager
 def askpass(ask: Callable[[str], str | None]) -> Generator[None]:
     """Point `SUDO_ASKPASS` at a helper that answers sudo's prompts with `ask`.
 
-    `ask` takes sudo's prompt and returns the password, or None to decline; it
-    runs on the server's thread; the server is not threaded, so prompts are
-    answered one at a time and never overlap.
+    `ask` runs on the single-threaded server, so prompts never overlap; sudos
+    queued behind a prompt reuse its answer for `_SHARE_FOR` seconds; a sudo
+    asking again (wrong answer) is prompted afresh.
 
     Args:
         ask: Called with sudo's prompt; returns the password, or None to decline.
@@ -43,9 +114,32 @@ def askpass(ask: Callable[[str], str | None]) -> Generator[None]:
         removed on exit.
     """
 
+    shared: list[tuple[str | None, float]] = []  # The last answer, and when
+    served: set[int] = set()  # The sudos using it
+
     class Handler(socketserver.StreamRequestHandler):
         def handle(self) -> None:
-            reply = ask(self.rfile.read().decode(errors="replace"))
+            prompt = self.rfile.read().decode(errors="replace")
+            try:
+                pid = _peer_parent(self.connection)
+                if not _is_sudo(pid):
+                    return  # Declined: only sudo gets the password
+
+            except (OSError, ValueError):
+                return
+
+            # A sudo back again was refused the answer; a stale one isn't reused
+            if shared and (
+                pid in served or time.monotonic() - shared[0][1] > _SHARE_FOR
+            ):
+                shared.clear()
+                served.clear()
+
+            if not shared:
+                shared.append((ask(prompt), time.monotonic()))
+
+            served.add(pid)
+            reply = shared[0][0]
             if reply:
                 with contextlib.suppress(OSError):
                     self.wfile.write(reply.encode())

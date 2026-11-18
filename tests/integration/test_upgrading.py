@@ -8,7 +8,7 @@ import sys
 
 import orjson
 import pytest
-from _mocks import _NullSink
+from _mocks import _NullSink, _RecordingProgress
 from _repo_helpers import _provider_calls, zip_app
 from _rows import cask_dict
 
@@ -16,8 +16,12 @@ import brewery.providers.cask_directives as directives
 from brewery.core.locks import cask_lock
 from brewery.core.models import PackageKind
 from brewery.core.repo import Repository
+from brewery.core.shell import BrewResult
+from brewery.providers import brew as brew_mod
 from brewery.providers import caskroom
 from brewery.providers.downloader import Downloader
+from brewery.providers.orchestrator import Outcome
+from brewery.services import cask as cask_service
 from brewery.services.install import install_packages
 from brewery.services.pin import pin_packages, unpin_packages
 from brewery.services.upgrade import upgrade_packages
@@ -156,6 +160,45 @@ class TestUpgrade:
 
         await upgrade_packages(repo, ["tapped"])
         assert any("tapped" in call for call in _provider_calls(mock_brew, "upgrade"))
+
+    async def test_brew_routed_cask_gets_a_row(self, repo, brew) -> None:
+        """Test that a cask going straight to brew is shown, inside the display."""
+        brew.cask("tapped", ["1.0"])
+        progress = _RecordingProgress()
+
+        await upgrade_packages(repo, ["tapped"], progress=progress)
+
+        assert progress.events == [
+            ("begin", 1),
+            ("update", "tapped", "brew"),
+            ("finish", "tapped", Outcome.BREW_UPGRADE.value),
+            ("end",),
+        ]
+
+    async def test_a_brew_failure_doesnt_stop_the_next_cask(
+        self, repo, brew, mock_brew, monkeypatch
+    ) -> None:
+        """Test that a cask brew fails on is reported, and the next still upgrades."""
+        brew.cask("bad", ["1.0"])
+        brew.cask("good", ["1.0"])
+
+        async def run_brew(args, *, output, check):
+            mock_brew.append(("brew", *args))
+            if "bad" in args:
+                return BrewResult("", "Error: sudo: a password is required\n", 1)
+            return BrewResult("", "", 0)
+
+        monkeypatch.setattr(brew_mod, "run_brew", run_brew)
+        progress = _RecordingProgress()
+
+        _, _, _, failures = await upgrade_packages(
+            repo, ["bad", "good"], progress=progress
+        )
+
+        assert failures == [("bad", "Error: sudo: a password is required")]
+        assert ("brew", "upgrade", "--cask", "good") in mock_brew
+        assert ("finish", "bad", Outcome.FAILED.value) in progress.events
+        assert ("finish", "good", Outcome.BREW_UPGRADE.value) in progress.events
 
     async def test_native_upgrade_bumps_version_and_retains_old(
         self, brew, empty_catalog, monkeypatch
@@ -442,6 +485,26 @@ class TestUpgradeCasks:
         assert (mock_env.caskroom / "foo" / "1.0" / "Foo.app").is_symlink()
         assert self._version(mock_env) == "1.0"
         assert reopened == [(["org.example.foo"], [app])]
+
+    async def test_failed_native_upgrade_finishes_after_brew(
+        self, repo, mock_brew, mock_env, foo, tmp_path, monkeypatch
+    ) -> None:
+        """Test that a cask whose native upgrade fails is finished by its brew call."""
+        foo("1.0", zip_app(tmp_path, mock_env.bottle_cache, "v1"))
+        await install_packages(repo, ["foo"], kind=PackageKind.CASK)
+        foo("2.0", zip_app(tmp_path, mock_env.bottle_cache, "v2"))
+
+        def fail(*args, **kwargs) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(cask_service, "upgrade_cask", fail)
+        progress = _RecordingProgress()
+        progress.events = mock_brew  # One log, so the finish's place among brew's calls
+
+        await upgrade_packages(repo, ["foo"], progress=progress)
+
+        upgraded = mock_brew.index(("brew", "upgrade", "--cask", "foo"))
+        assert mock_brew.index(("finish", "foo", Outcome.BREW_UPGRADE.value)) > upgraded
 
     async def test_locked_cask_is_reported_not_current(
         self, repo, mock_brew, mock_env, foo, tmp_path
