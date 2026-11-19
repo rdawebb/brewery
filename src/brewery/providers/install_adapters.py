@@ -58,7 +58,7 @@ class CatalogAdapter:  # Implements orchestrator.CatalogPort
 
     Every method here must be called on the thread that opened the catalog, i.e.
     the event loop; resolve what a worker needs before handing off to
-    `asyncio.to_thread`, never from inside one. See `Catalog`'s docstring.
+    `asyncio.to_thread`, never from inside one; see `Catalog`'s docstring.
     """
 
     def __init__(self, catalog: CatalogSource, cache_mgr: InstalledSource) -> None:
@@ -143,7 +143,7 @@ class BrewAdapter:
 
     install() reuses the formula backend (which raises BrewCommandError on
     failure); link/post_install are not on the backend, so they go through the
-    brew runner directly. Each method returns True on success, False on a brew
+    brew runner directly; each method returns True on success, False on a brew
     failure, so the orchestrator can record the outcome without exceptions
     crossing the port boundary.
     """

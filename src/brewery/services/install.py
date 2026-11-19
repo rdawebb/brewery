@@ -50,9 +50,9 @@ async def install_packages(
     Raises:
         BrewCommandError: Propagated from provider.
     """
-    locked: dict[str, str] = {}
+    cask_notes: dict[str, str] = {}
     if kind == PackageKind.CASK:
-        locked = dict(
+        cask_notes = dict(
             await install_casks(
                 names,
                 repo=repo,
@@ -88,7 +88,7 @@ async def install_packages(
     ]
 
     failures: Notes = [
-        (n, locked.get(n, "install failed or not found"))
+        (n, cask_notes.get(n, "install failed or not found"))
         for n in names
         if resolved[n] not in installed_by_name
     ]

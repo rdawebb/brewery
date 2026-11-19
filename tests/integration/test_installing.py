@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import hashlib
 import json
@@ -9,12 +10,17 @@ import os
 import sys
 
 import pytest
+from _mocks import _RecordingProgress
 from _repo_helpers import _add_alias, _provider_calls, zip_app
 from _rows import cask_dict
 
 import brewery.services.cask as cask_service
+from brewery.core.errors import BrewTimeoutError
 from brewery.core.locks import lock_path
 from brewery.core.models import PackageKind
+from brewery.core.shell import BrewResult
+from brewery.providers import brew as brew_mod
+from brewery.providers.orchestrator import Outcome
 from brewery.services.install import install_packages
 
 
@@ -86,6 +92,96 @@ class TestInstall:
         )
         assert [p.name for p in installed] == ["yazi"]
         assert failures == []
+
+
+class TestInstallCasksViaBrew:
+    """Tests for casks brewery hands to brew, one call each, inside the display."""
+
+    @staticmethod
+    def _brew_says(monkeypatch, mock_brew, replies: dict[str, BrewResult]) -> None:
+        """Have brew reply to a cask with its `replies` entry, and succeed otherwise."""
+
+        async def run_brew(args, *, output, check) -> BrewResult:
+            mock_brew.append(("brew", *args))
+            return replies.get(args[-1], BrewResult("", "", 0))
+
+        monkeypatch.setattr(brew_mod, "run_brew", run_brew)
+
+    async def test_brew_routed_cask_gets_a_row(self, repo) -> None:
+        """Test that a cask going straight to brew is shown, inside the display."""
+        progress = _RecordingProgress()
+
+        await install_packages(
+            repo, ["tapped"], kind=PackageKind.CASK, progress=progress
+        )
+
+        assert progress.events == [
+            ("begin", 1),
+            ("update", "tapped", "brew"),
+            ("finish", "tapped", Outcome.BREW_INSTALL.value),
+            ("end",),
+        ]
+
+    async def test_a_brew_failure_doesnt_stop_the_next_cask(
+        self, repo, mock_brew, monkeypatch
+    ) -> None:
+        """Test that a cask brew fails on is reported, and the next is still installed."""
+        self._brew_says(
+            monkeypatch,
+            mock_brew,
+            {"bad": BrewResult("", "Error: sudo: a password is required\n", 1)},
+        )
+        progress = _RecordingProgress()
+
+        _, failures = await install_packages(
+            repo, ["bad", "good"], kind=PackageKind.CASK, progress=progress
+        )
+
+        assert ("bad", "Error: sudo: a password is required") in failures
+        assert ("brew", "install", "--cask", "good") in mock_brew
+        assert ("finish", "bad", Outcome.FAILED.value) in progress.events
+        assert ("finish", "good", Outcome.BREW_INSTALL.value) in progress.events
+
+    async def test_a_brew_timeout_doesnt_stop_the_next_cask(
+        self, repo, mock_brew, monkeypatch
+    ) -> None:
+        """Test that a cask brew times out on is reported, and the next still installed."""
+
+        async def run_brew(args, *, output, check) -> BrewResult:
+            mock_brew.append(("brew", *args))
+            if args[-1] == "slow":
+                raise BrewTimeoutError(timeout=1)
+            return BrewResult("", "", 0)
+
+        monkeypatch.setattr(brew_mod, "run_brew", run_brew)
+
+        _, failures = await install_packages(
+            repo, ["slow", "good"], kind=PackageKind.CASK
+        )
+
+        assert ("slow", "Brew command timed out after 1s") in failures
+        assert ("brew", "install", "--cask", "good") in mock_brew
+
+    async def test_already_installed_is_success(
+        self, repo, mock_brew, monkeypatch
+    ) -> None:
+        """Test that brew finding a cask already installed counts as installed."""
+        self._brew_says(
+            monkeypatch,
+            mock_brew,
+            {
+                "tapped": BrewResult(
+                    "", "Warning: Cask 'tapped' is already installed.", 1
+                )
+            },
+        )
+        progress = _RecordingProgress()
+
+        await install_packages(
+            repo, ["tapped"], kind=PackageKind.CASK, progress=progress
+        )
+
+        assert ("finish", "tapped", Outcome.BREW_INSTALL.value) in progress.events
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="native casks are macOS-only")
@@ -314,9 +410,71 @@ class TestInstallCasks:
             repo, ["foo", "bar", "nope", "iina"], kind=PackageKind.CASK
         )
 
-        assert _provider_calls(mock_brew, "install") == [
-            ("brew", "install", "--cask", "bar", "nope")
+        assert sorted(_provider_calls(mock_brew, "install")) == [
+            ("brew", "install", "--cask", "bar"),
+            ("brew", "install", "--cask", "nope"),
         ]
+
+    async def test_failed_native_install_finishes_after_brew(
+        self, repo, mock_brew, casks, appdir
+    ) -> None:
+        """Test that a cask whose native install fails is finished by its brew call."""
+        (appdir / "Foo.app").mkdir(parents=True)
+        casks({"foo": (None, [{"app": ["Foo.app"]}])})
+        progress = _RecordingProgress()
+        progress.events = mock_brew
+
+        await install_packages(repo, ["foo"], kind=PackageKind.CASK, progress=progress)
+
+        installed = mock_brew.index(("brew", "install", "--cask", "foo"))
+        assert (
+            mock_brew.index(("finish", "foo", Outcome.BREW_INSTALL.value)) > installed
+        )
+
+    async def test_a_brew_bound_dependency_goes_to_brew_first(
+        self, repo, mock_brew, casks
+    ) -> None:
+        """Test that brew installs a requested dependency before the cask needing it.
+
+        brew would otherwise install the dependency itself, racing its own call.
+        """
+        casks(
+            {
+                "bar": (None, [{"pkg": ["Bar.pkg"]}]),
+                "baz": ({"cask": ["bar"]}, [{"app": ["Foo.app"]}]),
+            }
+        )
+
+        await install_packages(repo, ["baz", "bar"], kind=PackageKind.CASK)
+
+        assert _provider_calls(mock_brew, "install") == [
+            ("brew", "install", "--cask", "bar"),
+            ("brew", "install", "--cask", "baz"),
+        ]
+
+    async def test_a_dependency_cycle_fails_rather_than_hangs(
+        self, repo, mock_brew, casks
+    ) -> None:
+        """Test that casks depending on each other, or on themselves, fail at once."""
+        casks(
+            {
+                "bar": ({"cask": ["baz"]}, [{"pkg": ["Bar.pkg"]}]),
+                "baz": ({"cask": ["bar"]}, [{"pkg": ["Baz.pkg"]}]),
+                "qux": ({"cask": ["qux"]}, [{"pkg": ["Qux.pkg"]}]),
+            }
+        )
+
+        async with asyncio.timeout(5):
+            _, failures = await install_packages(
+                repo, ["bar", "baz", "qux"], kind=PackageKind.CASK
+            )
+
+        assert sorted(failures) == [
+            ("bar", "dependency cycle"),
+            ("baz", "dependency cycle"),
+            ("qux", "dependency cycle"),
+        ]
+        assert _provider_calls(mock_brew, "install") == []
 
     async def test_failed_install_is_unstaged_and_goes_to_brew(
         self, repo, mock_brew, mock_env, casks, appdir

@@ -13,7 +13,11 @@ import httpx2
 from brewery.core.cask_locale import config_languages, localise, system_languages
 from brewery.core.catalog import CaskRow
 from brewery.core.config import BreweryENV, get_brewery_env
-from brewery.core.errors import BrewCommandError, BrewError, OperationInProgressError
+from brewery.core.errors import (
+    AlreadyInstalledWarning,
+    BrewError,
+    OperationInProgressError,
+)
 from brewery.core.host import current_platform
 from brewery.core.locks import cask_lock
 from brewery.core.logging import BreweryLogger, get_logger
@@ -47,12 +51,15 @@ from brewery.providers.orchestrator import _NULL_PROGRESS, Outcome, ProgressPort
 from brewery.providers.pipeline import PIPELINE_TIMEOUT, run_install
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Callable
+    from collections.abc import AsyncGenerator, Awaitable, Callable
     from pathlib import Path
 
     from brewery.core.repo import Repository
 
 log: BreweryLogger = get_logger(name=__name__)
+
+# Matching native install concurrency limit
+_BREW_CONCURRENCY = 8
 
 
 async def install_casks(
@@ -77,15 +84,16 @@ async def install_casks(
         backend: The cask backend for the casks brewery can't install.
         formula: Formula backend for the formula pipeline's brew fallback.
         env: Brewery environment (paths), resolved if omitted.
-        progress: Optional progress sink for the native installs.
+        progress: Optional progress sink.
 
     Returns:
-        A (token, reason) note per cask left alone because it was locked.
+        A (token, reason) note per cask left alone because it was locked, or
+        that brew failed to install.
     """
     env = env or get_brewery_env()
     progress = progress or _NULL_PROGRESS
     opts = read_cask_opts(os.environ.get("HOMEBREW_CASK_OPTS", ""))
-    locked: Notes = []
+    notes: Notes = []
     installed = {p.name for p in repo.cache_mgr.installed_packages(PackageKind.CASK)}
     requested = [n for n in dict.fromkeys(names) if n not in installed]
 
@@ -122,48 +130,75 @@ async def install_casks(
     )
 
     done = set(installed)
-    if native:
-        async with _downloads(env, progress, len(native)) as (downloader, fetches):
-            fetches.extend(
-                asyncio.create_task(_fetch(rows[t], downloader, progress))
-                for t in native
-            )
-            # In dependency order, each as soon as its download lands
-            for token, fetch in zip(native, fetches, strict=True):
-                row = rows[token]
-                try:
-                    reasons[token] = _blocked(row, done, failed_formulae) or (
-                        await _install_one(
-                            row,
-                            await fetch,
-                            env,
-                            opts,
-                            progress,
-                            on_request=token in requested,
-                        )
+
+    # A row per native cask, and per requested one falling back to brew
+    total = len({*native, *requested})
+    async with _downloads(env, progress, total) as (downloader, fetches):
+        fetches.extend(
+            asyncio.create_task(_fetch(rows[t], downloader, progress)) for t in native
+        )
+
+        # In dependency order, each as soon as its download finishes
+        for token, fetch in zip(native, fetches, strict=True):
+            row = rows[token]
+            try:
+                reasons[token] = _blocked(row, done, failed_formulae) or (
+                    await _install_one(
+                        row,
+                        await fetch,
+                        env,
+                        opts,
+                        progress,
+                        on_request=token in requested,
                     )
+                )
 
-                except OperationInProgressError as exc:
-                    _note_locked(token, exc, locked, progress)
-                    continue
+            except OperationInProgressError as exc:
+                _note_locked(token, exc, notes, progress)
+                continue
 
-                if not reasons[token]:
-                    done.add(token)
+            if not reasons[token]:
+                done.add(token)
+                progress.finish(token, Outcome.NATIVE.value)
 
-                _finish(token, reasons[token], progress, brew=Outcome.BREW_INSTALL)
+            elif token not in requested:
+                # Left to the brew call of the cask that depends on it
+                log.info(event="cask_to_brew", cask=token, reason=reasons[token])
+                progress.finish(token, Outcome.FAILED.value)
 
-    for token, reason in reasons.items():
-        if reason:
-            log.info(event="cask_to_brew", cask=token, reason=reason)
+        held = {t for t, _ in notes}
+        sem = asyncio.Semaphore(_BREW_CONCURRENCY)
+        brewing: dict[str, asyncio.Task] = {}
 
-    # brew installs a dependency of a cask it's given, so only requested casks go
-    held = {t for t, _ in locked}
-    to_brew = [t for t in requested if t not in done and t not in held]
-    if to_brew:
-        # After the live display ends: a pkg cask may prompt for a sudo password
-        await backend.install(names=to_brew)
+        async def via_brew(token: str) -> None:
+            """Install one cask through brew, after any it depends on."""
+            deps = _cask_deps(token, rows)
+            if token in deps:
+                notes.append((token, "dependency cycle"))
+                progress.finish(token, Outcome.FAILED.value)
+                return
 
-    return locked
+            # brew would install a missing dependency itself, racing its own call
+            for dep in deps & brewing.keys():
+                await brewing[dep]
+
+            async with sem:
+                await _brew_one(
+                    token,
+                    reasons.get(token, "not in the catalog"),
+                    functools.partial(backend.install, names=[token]),
+                    Outcome.BREW_INSTALL,
+                    progress,
+                    notes,
+                )
+
+        # A bug in one cancels the rest, rather than leaving brew calls hanging
+        async with asyncio.TaskGroup() as tg:
+            for token in requested:
+                if token not in done and token not in held:
+                    brewing[token] = tg.create_task(via_brew(token))
+
+    return notes
 
 
 @asynccontextmanager
@@ -198,24 +233,62 @@ async def _downloads(
         progress.end()
 
 
-def _finish(token: str, reason: str, progress: ProgressPort, *, brew: Outcome) -> None:
-    """Report a cask done natively, or handed to brew.
+async def _brew_one(
+    token: str,
+    reason: str,
+    run: Callable[[], Awaitable[object]],
+    outcome: Outcome,
+    progress: ProgressPort,
+    notes: Notes,
+) -> None:
+    """Hand one cask to brew in its own row, noting it if brew fails.
 
     Args:
         token: The cask token.
-        reason: Why it goes to brew; empty once it's done natively.
+        reason: Why it goes to brew, for the log.
+        run: Runs brew on the cask.
+        outcome: The outcome to report once brew succeeds.
         progress: The progress sink.
-        brew: The outcome to report when it goes to brew.
+        notes: The notes a brew failure is added to.
     """
-    if not reason:
-        progress.finish(token, Outcome.NATIVE.value)
+    log.info(event="cask_to_brew", cask=token, reason=reason)
+    progress.update(token, "brew")
+    try:
+        await run()
+
+    except AlreadyInstalledWarning:
+        pass  # Installed since last check: success, as in `BrewAdapter.install`
+
+    except BrewError as exc:
+        notes.append((token, _brew_note(exc)))
+        progress.finish(token, Outcome.FAILED.value)
         return
 
-    progress.update(token, "brew")
-    progress.finish(token, brew.value)
+    progress.finish(token, outcome.value)
 
 
-def _brew_note(exc: BrewCommandError) -> str:
+def _cask_deps(token: str, rows: dict[str, CaskRow]) -> set[str]:
+    """Every cask `token` depends on, directly or not, among `rows`.
+
+    Args:
+        token: The cask token.
+        rows: The catalog rows of the run's casks.
+
+    Returns:
+        The dependencies' tokens.
+    """
+    found: set[str] = set()
+    stack = [token]
+    while stack:
+        if row := rows.get(stack.pop()):
+            new = set(_depends(row, "cask")) - found
+            found |= new
+            stack.extend(new)
+
+    return found
+
+
+def _brew_note(exc: BrewError) -> str:
     """The last line of brew's error output, as a cask's failure note.
 
     Args:
@@ -648,23 +721,19 @@ async def upgrade_casks(
 
                 progress.finish(token, Outcome.NATIVE.value)
 
-        # Same concurrency as formulae
-        sem = asyncio.Semaphore(8)
+        sem = asyncio.Semaphore(_BREW_CONCURRENCY)
 
         async def via_brew(token: str, reason: str) -> None:
-            """Upgrade one cask through brew, noting it if brew fails."""
+            """Upgrade one cask through brew."""
             async with sem:
-                log.info(event="cask_to_brew", cask=token, reason=reason)
-                progress.update(token, "brew")
-                try:
-                    await backend.upgrade(names=[token])
-
-                except BrewCommandError as exc:
-                    notes.append((token, _brew_note(exc)))
-                    progress.finish(token, Outcome.FAILED.value)
-                    return
-
-            progress.finish(token, Outcome.BREW_UPGRADE.value)
+                await _brew_one(
+                    token,
+                    reason,
+                    functools.partial(backend.upgrade, names=[token]),
+                    Outcome.BREW_UPGRADE,
+                    progress,
+                    notes,
+                )
 
         await asyncio.gather(*(via_brew(t, r) for t, r in reasons.items() if r))
 
