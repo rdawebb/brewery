@@ -431,6 +431,19 @@ class TestInstallCasks:
             mock_brew.index(("finish", "foo", Outcome.BREW_INSTALL.value)) > installed
         )
 
+    @pytest.mark.parametrize(
+        ("artifacts", "calls"), [({"pkg": ["Foo.pkg"]}, 1), ({"app": ["Foo.app"]}, 0)]
+    )
+    async def test_sudo_is_asked_for_once_up_front(
+        self, repo, casks, sudo_validations, artifacts, calls
+    ) -> None:
+        """Test that two pkg casks ask for sudo once, and an app cask not at all."""
+        casks({"foo": (None, [artifacts]), "bar": (None, [artifacts])})
+
+        await install_packages(repo, ["foo", "bar"], kind=PackageKind.CASK)
+
+        assert len(sudo_validations) == calls
+
     async def test_a_brew_bound_dependency_goes_to_brew_first(
         self, repo, mock_brew, casks
     ) -> None:

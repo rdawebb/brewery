@@ -172,3 +172,31 @@ def test_is_sudo_on_linux(
     monkeypatch.setattr(sudo, "Path", lambda _path: status)
 
     assert sudo._is_sudo(1) is expected
+
+
+@pytest.mark.parametrize(("code", "warned"), [(0, False), (1, True)])
+async def test_validate_runs_sudo_askpass_and_warns_on_failure(
+    monkeypatch, caplog, code: int, warned: bool
+) -> None:
+    """Test that validate runs `sudo -A -v` and only warns on a non-zero exit."""
+    import logging
+
+    argv: list[tuple[str, ...]] = []
+
+    class Proc:
+        async def wait(self) -> int:
+            return code
+
+    async def fake_exec(*args: str, **_: object) -> Proc:
+        argv.append(args)
+        return Proc()
+
+    monkeypatch.setattr(sudo.asyncio, "create_subprocess_exec", fake_exec)
+
+    with caplog.at_level(logging.WARNING, logger="brewery.core.sudo"):
+        await sudo.validate()
+
+    assert argv == [("sudo", "-A", "-v")]
+    assert (
+        any("sudo_validate_failed" in r.getMessage() for r in caplog.records) is warned
+    )

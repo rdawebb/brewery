@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import ctypes
 import os
@@ -15,6 +16,10 @@ import time
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
+
+from brewery.core.logging import BreweryLogger, get_logger
+
+log: BreweryLogger = get_logger(name=__name__)
 
 # Run by sudo with its prompt as argv[1]; prints brewery's reply; an empty
 # reply exits 1, which sudo reports as no password given
@@ -175,3 +180,28 @@ def askpass(ask: Callable[[str], str | None]) -> Generator[None]:
                 os.environ["SUDO_ASKPASS"] = old
 
             server.shutdown()
+
+
+async def validate() -> None:
+    """Ask for sudo's password upfront when it's known to be needed.
+
+    sudo's timestamp is keyed on the tty and session, which brew shares; a
+    declined or failed ask is only logged: brew asks again when needed.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "sudo",
+            "-A",
+            "-v",
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        code = await proc.wait()
+
+    except OSError as exc:
+        log.warning(event="sudo_validate_failed", error=str(exc))
+        return
+
+    if code:
+        log.warning(event="sudo_validate_failed", returncode=code)

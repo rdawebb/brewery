@@ -506,6 +506,21 @@ class TestUpgradeCasks:
         upgraded = mock_brew.index(("brew", "upgrade", "--cask", "foo"))
         assert mock_brew.index(("finish", "foo", Outcome.BREW_UPGRADE.value)) > upgraded
 
+    @pytest.mark.parametrize(
+        ("stanzas", "calls"), [([{"pkg": ["Foo.pkg"]}], 1), ([], 0)]
+    )
+    async def test_sudo_is_asked_for_once_up_front(
+        self, repo, mock_env, foo, tmp_path, sudo_validations, stanzas, calls
+    ) -> None:
+        """Test that an upgrade to a pkg asks for sudo once, and an app's not at all."""
+        foo("1.0", zip_app(tmp_path, mock_env.bottle_cache, "v1"))
+        await install_packages(repo, ["foo"], kind=PackageKind.CASK)
+        foo("2.0", zip_app(tmp_path, mock_env.bottle_cache, "v2"), *stanzas)
+
+        await upgrade_packages(repo, ["foo"])
+
+        assert len(sudo_validations) == calls
+
     async def test_locked_cask_is_reported_not_current(
         self, repo, mock_brew, mock_env, foo, tmp_path
     ) -> None:

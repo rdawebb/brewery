@@ -23,6 +23,7 @@ from brewery.core.locks import cask_lock
 from brewery.core.logging import BreweryLogger, get_logger
 from brewery.core.models import Notes, PackageKind
 from brewery.core.shell import run_brew
+from brewery.core.sudo import validate
 from brewery.providers.base import (
     InstallBackend,
     PackageBackend,
@@ -34,6 +35,7 @@ from brewery.providers.cask import (
     classify,
     classify_uninstall,
     git_files,
+    needs_sudo,
     read_cask_opts,
     url_headers,
 )
@@ -120,6 +122,9 @@ async def install_casks(
         visit(token)
 
     reasons = {t: _brew_reason(rows[t], opts) for t in order}
+    if any(reasons[t] and needs_sudo(rows[t].artifacts) for t in order):
+        await validate()  # Before any display, rather than mid-way through it
+
     native = [t for t in order if not reasons[t]]
     failed_formulae = await _install_formulae(
         sorted({f for t in native for f in _depends(rows[t], "formula")}),
@@ -528,8 +533,11 @@ async def uninstall_casks(
     plat = current_platform()
     to_brew: list[str] = []
     locked: Notes = []
+    sudo = False
+
     for token in names:
-        reason = classify_uninstall(read_receipt(env.caskroom / token), plat, zap=zap)
+        receipt = read_receipt(env.caskroom / token)
+        reason = classify_uninstall(receipt, plat, zap=zap)
 
         if not reason:
             try:
@@ -550,8 +558,12 @@ async def uninstall_casks(
 
         log.info(event="cask_to_brew", cask=token, reason=reason)
         to_brew.append(token)
+        sudo = sudo or needs_sudo((receipt or {}).get("uninstall_artifacts"))
 
     if to_brew:
+        if sudo:
+            await validate()
+
         await backend.uninstall(names=to_brew, zap=zap)
 
     return locked
@@ -658,9 +670,15 @@ async def upgrade_casks(
 
     rows: dict[str, CaskRow] = {}
     reasons: dict[str, str] = {}
+    sudo: set[str] = set()  # brew removes the old version, then installs new one
+
     for token in dict.fromkeys(names):
         token_dir = env.caskroom / token
-        reasons[token] = classify_uninstall(read_receipt(token_dir), plat, zap=False)
+        receipt = read_receipt(token_dir)
+        reasons[token] = classify_uninstall(receipt, plat, zap=False)
+        if needs_sudo((receipt or {}).get("uninstall_artifacts")):
+            sudo.add(token)
+
         if (row := repo.catalog.get_cask(token)) is None:
             reasons[token] = reasons[token] or "not in the catalog"
             continue
@@ -671,10 +689,16 @@ async def upgrade_casks(
             row = localise(row, [*languages, *system_languages()])
 
         rows[token] = row
+        if needs_sudo(row.artifacts):
+            sudo.add(token)
+
         missing = {f for f in _depends(row, "formula") if f not in formulae}
         reasons[token] = (
             reasons[token] or _brew_reason(row, opts) or _blocked(row, casks, missing)
         )
+
+    if any(reasons[t] for t in sudo):
+        await validate()  # Before the display, rather than mid-way through
 
     async with _downloads(env, progress, len(reasons)) as (downloader, fetches):
         if native := [t for t, reason in reasons.items() if not reason]:

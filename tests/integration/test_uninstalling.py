@@ -306,6 +306,17 @@ class TestUninstallCasks:
         ]
         assert (tmp_path / "apps" / "Foo.app").is_dir()  # brew wasn't really run
 
+    @pytest.mark.parametrize(("zap", "calls"), [(True, 1), (False, 0)])
+    async def test_sudo_is_asked_for_before_a_pkgutil_goes_to_brew(
+        self, repo, install, sudo_validations, zap, calls
+    ) -> None:
+        """Test that sudo is asked for only when brew gets the `pkgutil` to run."""
+        await install({"zap": [{"pkgutil": "org.example.foo"}]})
+
+        await uninstall_packages(repo, ["foo"], kind=PackageKind.CASK, zap=zap)
+
+        assert len(sudo_validations) == calls
+
     async def test_failure_goes_to_brew(
         self, repo, mock_brew, install, monkeypatch
     ) -> None:

@@ -88,6 +88,28 @@ def _reset_module_state() -> Generator[None, None, None]:
     yield
 
 
+@pytest.fixture(autouse=True)
+def sudo_validations(monkeypatch) -> list[None]:
+    """Record the cask services' up-front `sudo -v`, which never runs for real.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+
+    Returns:
+        A list gaining one entry per call.
+    """
+    import brewery.services.cask as cask_service
+
+    calls: list[None] = []
+
+    async def validate() -> None:
+        calls.append(None)
+
+    monkeypatch.setattr(cask_service, "validate", validate)
+
+    return calls
+
+
 @pytest.fixture
 def delays(monkeypatch) -> list[float]:
     """Record every retry backoff instead of sleeping through it.

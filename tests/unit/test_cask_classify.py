@@ -16,6 +16,7 @@ from brewery.providers.cask import (
     classify,
     classify_uninstall,
     git_files,
+    needs_sudo,
     read_cask_opts,
     url_headers,
 )
@@ -453,3 +454,31 @@ class TestClassifyUninstall:
     def test_reasons(self, receipt, zap, reason) -> None:
         """Test that the receipt decides, and `zap` directives count only for --zap."""
         assert classify_uninstall(receipt, SEQUOIA, zap=zap) == reason
+
+
+class TestNeedsSudo:
+    """Tests for spotting the casks brew will need sudo for."""
+
+    @pytest.mark.parametrize(
+        ("artifacts", "expected"),
+        [
+            pytest.param([{"pkg": ["Foo.pkg"]}], True, id="pkg"),
+            pytest.param([{"installer": [{"script": "x"}]}], True, id="installer"),
+            pytest.param(
+                [{"uninstall": [{"pkgutil": "org.example.foo"}]}], True, id="pkgutil"
+            ),
+            pytest.param(
+                [{"zap": [{"pkgutil": "org.example.foo"}]}], True, id="zap_pkgutil"
+            ),
+            pytest.param(
+                [{"app": ["Foo.app"]}, {"uninstall": [{"quit": "org.example.foo"}]}],
+                False,
+                id="app",
+            ),
+            pytest.param(None, False, id="none"),
+            pytest.param(["odd", {"uninstall": "odd"}], False, id="unrecognised"),
+        ],
+    )
+    def test_needs_sudo(self, artifacts, expected) -> None:
+        """Test that pkg-like artifacts and pkgutil directives need sudo."""
+        assert needs_sudo(artifacts) is expected
