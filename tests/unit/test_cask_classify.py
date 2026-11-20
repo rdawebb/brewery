@@ -46,11 +46,6 @@ class TestClassify:
                 id="postflight_steps",
             ),
             pytest.param(
-                [{"command_wrapper": ["foo"]}],
-                "`command_wrapper` artifact",
-                id="command_wrapper",
-            ),
-            pytest.param(
                 [{"app": ["Foo.app"]}, {"uninstall": [{"quit": "a"}, {"script": "b"}]}],
                 "`uninstall script`",
                 id="uninstall_script",

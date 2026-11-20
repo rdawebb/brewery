@@ -23,6 +23,7 @@ NATIVE_ARTIFACTS = frozenset(
     {
         "app",
         "binary",
+        "command_wrapper",
         "font",
         "suite",
         "qlplugin",

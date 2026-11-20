@@ -12,7 +12,7 @@ import pytest
 from _rows import cask_row
 from _tar import make_tar
 
-from brewery.core.errors import ExtractionError, LinkError
+from brewery.core.errors import CellarError, ExtractionError, LinkError
 from brewery.core.fs_state import scan_installed
 from brewery.core.models import PackageKind
 from brewery.providers.caskroom import (
@@ -355,6 +355,38 @@ class TestInstallArtifacts:
 
         assert not (brew.prefix / "bin").exists()
         assert (brew.prefix / "share" / "man" / "man1" / "foo.1.gz").is_symlink()
+
+    def test_command_wrappers_are_written_and_linked(self, brew, staged, dirs) -> None:
+        """Test both wrapper kinds: an env script with quoted args, and `content`."""
+        exe = {"executable": "/bin/sh", "args": ["-c", 'echo "$FOO $0 $1"', "a b"]}
+        row = cask_row(
+            "foo",
+            version="1.0",
+            artifacts=[
+                {"command_wrapper": ["foo-run", {**exe, "env": {"FOO": "x"}}]},
+                {"command_wrapper": ["foo-raw", {"content": "$HOMEBREW_PREFIX\n"}]},
+            ],
+        )
+
+        install_artifacts(row, staged, brew.env, dirs=dirs)
+
+        run = brew.prefix / "bin" / "foo-run"
+        assert os.readlink(run) == str(
+            staged / ".homebrew-command-wrappers" / "foo-run"
+        )
+        out = subprocess.run([run, "c"], capture_output=True, text=True, check=True)
+        assert out.stdout == "x a b c\n"
+        assert (brew.prefix / "bin" / "foo-raw").read_text() == f"{brew.prefix}\n"
+
+    @pytest.mark.parametrize("args", [["foo-run"], ["foo-run", {}]])
+    def test_malformed_command_wrapper_raises(self, brew, staged, dirs, args) -> None:
+        """Test that a wrapper with no content or executable is a CellarError."""
+        row = cask_row("foo", version="1.0", artifacts=[{"command_wrapper": args}])
+
+        with pytest.raises(CellarError, match="no content or executable"):
+            install_artifacts(row, staged, brew.env, dirs=dirs)
+
+        assert not (brew.prefix / "bin").exists()
 
     def test_conflict_puts_everything_back(self, brew, staged, dirs) -> None:
         """Test that a taken target raises and restores what was already moved."""

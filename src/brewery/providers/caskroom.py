@@ -18,6 +18,7 @@ import os
 import plistlib
 import posixpath
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -83,11 +84,15 @@ _MOVED = {
 # Artifacts symlinked into the prefix, and where under it
 _LINKED = {
     "binary": "bin",
+    "command_wrapper": "bin",
     "manpage": "share/man",
     "bash_completion": "etc/bash_completion.d",
     "zsh_completion": "share/zsh/site-functions",
     "fish_completion": "share/fish/vendor_completions.d",
 }
+
+# Where brew writes a `command_wrapper`'s script, under the staged dir
+_WRAPPERS = ".homebrew-command-wrappers"
 
 _MANPAGE_SECTION = re.compile(r"\.([1-8]|n|l)(?:\.gz)?$")
 
@@ -325,10 +330,13 @@ def install_artifacts(
                 if key not in _MOVED and key not in _LINKED:
                     continue  # `uninstall`, `zap` and the feed's own `target` hint
 
-                if key == "binary" and not binaries:
+                if key in ("binary", "command_wrapper") and not binaries:
                     continue
 
                 source, target = _locate(key, args, sources, env, dirs)
+                if key == "command_wrapper":
+                    _write_wrapper(source, args[1] if len(args) > 1 else {}, env, dirs)
+
                 if not source.exists():
                     raise CellarError(
                         f"{row.token}: {source} is not there", path=source
@@ -896,18 +904,12 @@ def _locate(
     Raises:
         CellarError: If the artifact names no target brew could place.
     """
+    if key == "command_wrapper":  # Linked from where `_write_wrapper` writes it
+        args = [f"{_WRAPPERS}/{args[0]}"]
 
-    def expand(value: str) -> str:
-        return (
-            value.replace("/$HOME", str(Path.home()))
-            .replace("$HOMEBREW_PREFIX", str(env.prefix))
-            .replace("$HOMEBREW_CELLAR", str(env.cellar))
-            .replace("$APPDIR", str(dirs["appdir"]))
-        )
-
-    source = staged / expand(args[0])  # Absolute source replaces `staged`
+    source = staged / _expand(args[0], env, dirs)  # Absolute source replaces `staged`
     given = args[1].get("target") if len(args) > 1 else None
-    name = expand(given) if given else source.name
+    name = _expand(given, env, dirs) if given else source.name
 
     if key == "manpage":
         if not (section := _MANPAGE_SECTION.search(args[0])):
@@ -935,6 +937,66 @@ def _locate(
         return source, dirs[base] / target
 
     raise CellarError(f"{key} {args[0]} has no absolute target", path=source)
+
+
+def _expand(value: str, env: BreweryENV, dirs: Mapping[str, Path]) -> str:
+    """Expand the feed's path placeholders.
+
+    Args:
+        value: A string from the feed.
+        env: The Homebrew layout.
+        dirs: The dirs moved artifacts go to.
+
+    Returns:
+        The value with `$HOME`, `$HOMEBREW_PREFIX`, `$HOMEBREW_CELLAR` and `$APPDIR` filled in.
+    """
+    return (
+        value.replace("/$HOME", str(Path.home()))
+        .replace("$HOMEBREW_PREFIX", str(env.prefix))
+        .replace("$HOMEBREW_CELLAR", str(env.cellar))
+        .replace("$APPDIR", str(dirs["appdir"]))
+    )
+
+
+def _write_wrapper(
+    path: Path, spec: Mapping[str, Any], env: BreweryENV, dirs: Mapping[str, Path]
+) -> None:
+    """Write a `command_wrapper`'s script.
+
+    Either the cask's `content` as it is, or brew's `write_env_script`: the env
+    as `K="V"` before an `exec` of the executable and its shell-quoted args.
+
+    Args:
+        path: The script's path, from `_locate`.
+        spec: The stanza's options: `content`, or `executable` plus optional
+            `args` and `env`.
+        env: The Homebrew layout.
+        dirs: The dirs moved artifacts go to.
+
+    Raises:
+        CellarError: If the stanza has neither `content` nor `executable`.
+    """
+    if "content" not in spec and "executable" not in spec:
+        raise CellarError(f"{path.name} has no content or executable", path=path)
+
+    if "content" in spec:
+        script = _expand(spec["content"], env, dirs)
+
+    else:
+        assigns = "".join(
+            f'{k}="{_expand(str(v), env, dirs)}" '
+            for k, v in (spec.get("env") or {}).items()
+        )
+        argv = "".join(
+            f"{shlex.quote(_expand(str(a), env, dirs))} "
+            for a in spec.get("args") or []
+        )
+        exe = _expand(spec["executable"], env, dirs)
+        script = f'#!/bin/bash\n{assigns}exec "{exe}" {argv}"$@"\n'
+
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(script)
+    path.chmod(0o555)
 
 
 def _move_out(source: Path, target: Path, *, reuse: bool = False) -> None:
