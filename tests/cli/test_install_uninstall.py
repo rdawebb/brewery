@@ -143,13 +143,13 @@ class TestInstall:
         assert result.exit_code == 0
         assert calls[0]["names"] == ["wget"]
 
-    def test_the_kind_defaults_to_formula(self, run, installs) -> None:
-        """Test that an unqualified install targets formulae, as brew does."""
+    def test_no_flag_leaves_the_kind_to_the_service(self, run, installs) -> None:
+        """Test that an unqualified install lets the service pick formula or cask."""
         calls = installs(installed=[_pkg("wget")])
 
         run(["install", "wget", "--yes"])
 
-        assert calls[0]["kind"] is PackageKind.FORMULA
+        assert calls[0]["kind"] is None
 
     def test_the_cask_flag_is_forwarded(self, run, installs) -> None:
         """Test that --cask reaches the service as the cask kind."""

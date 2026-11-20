@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import shutil
 import sys
@@ -22,6 +23,7 @@ from brewery.providers import caskroom
 from brewery.providers.downloader import Downloader
 from brewery.providers.orchestrator import Outcome
 from brewery.services import cask as cask_service
+from brewery.services import upgrade as upgrade_service
 from brewery.services.install import install_packages
 from brewery.services.pin import pin_packages, unpin_packages
 from brewery.services.upgrade import upgrade_packages
@@ -173,6 +175,27 @@ class TestUpgrade:
             ("update", "tapped", "brew"),
             ("finish", "tapped", Outcome.BREW_UPGRADE.value),
             ("end",),
+        ]
+
+    async def test_formulae_upgrade_alongside_casks(
+        self, repo, brew, mock_brew, monkeypatch
+    ) -> None:
+        """Test that a cask upgrades while the formula run is held."""
+        brew.cask("tapped", ["1.0"])
+        run_upgrade = upgrade_service.run_upgrade
+
+        async def held_run_upgrade(*args, **kwargs):
+            async with asyncio.timeout(5):  # Formulae first: tapped never upgrades
+                while not _provider_calls(mock_brew, "upgrade"):
+                    await asyncio.sleep(0.01)
+            return await run_upgrade(*args, **kwargs)
+
+        monkeypatch.setattr(upgrade_service, "run_upgrade", held_run_upgrade)
+
+        await upgrade_packages(repo, ["act", "tapped"])
+
+        assert _provider_calls(mock_brew, "upgrade") == [
+            ("brew", "upgrade", "--cask", "tapped")
         ]
 
     async def test_a_brew_failure_doesnt_stop_the_next_cask(

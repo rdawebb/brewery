@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 async def install_packages(
     repo: Repository,
     names: list[str],
-    kind: PackageKind = PackageKind.FORMULA,
+    kind: PackageKind | None = None,
     *,
     env: BreweryENV | None = None,
     formula: PackageBackend = brew.formula_backend,
@@ -38,7 +38,8 @@ async def install_packages(
     Args:
         repo: The data facade to read installed state and aliases through.
         names: Name(s) of the package(s) to install.
-        kind: Kind of the package(s) - formula (default) or cask.
+        kind: Kind of the package(s); None picks per name: a formula when the catalog
+            has one, else a cask, else passed to brew as a formula.
         env: Brewery environment (paths), resolved by the pipeline if omitted.
         formula: Formula backend for the per-formula brew fallback.
         cask: Cask backend, for the casks brewery can't install natively.
@@ -50,21 +51,32 @@ async def install_packages(
     Raises:
         BrewCommandError: Propagated from provider.
     """
-    cask_notes: dict[str, str] = {}
-    if kind == PackageKind.CASK:
-        cask_notes = dict(
+    casks = names if kind == PackageKind.CASK else []
+    if kind is None:
+        casks = [
+            n
+            for n in names
+            if repo.catalog.get_formula(repo.catalog.resolve_alias(n)) is None
+            and repo.catalog.get_cask(n) is not None
+        ]
+
+    formulae = [n for n in names if n not in casks]
+    if casks:
+        # Any formulae run alongside, in the casks' display
+        notes = dict(
             await install_casks(
-                names,
+                casks,
                 repo=repo,
                 backend=cask,
                 formula=formula,
                 env=env,
                 progress=progress,
+                formulae=formulae,
             )
         )
 
     else:
-        await run_install(
+        report = await run_install(
             names,
             catalog=repo.catalog,
             cache_mgr=repo.cache_mgr,
@@ -73,24 +85,22 @@ async def install_packages(
             env=env,
             progress=progress,
         )
+        notes = report.errors
 
     repo.cache_mgr.invalidate()
-    installed_by_name: dict[str, Package] = {
-        p.name: p for p in repo.cache_mgr.installed_packages(kind=kind)
+    by_key: dict[tuple[str, PackageKind], Package] = {
+        (p.name, p.kind): p for p in repo.cache_mgr.installed_packages()
     }
 
-    resolved: dict[str, str] = {n: repo.catalog.resolve_alias(n) for n in names}
+    keys: dict[str, tuple[str, PackageKind]] = {
+        n: (repo.catalog.resolve_alias(n), PackageKind.FORMULA) for n in formulae
+    } | {n: (n, PackageKind.CASK) for n in casks}
 
-    installed: list[Package] = [
-        installed_by_name[resolved[n]]
-        for n in names
-        if resolved[n] in installed_by_name
-    ]
-
+    installed: list[Package] = [by_key[keys[n]] for n in names if keys[n] in by_key]
     failures: Notes = [
-        (n, cask_notes.get(n, "install failed or not found"))
+        (n, notes.get(keys[n][0], notes.get(n, "install failed or not found")))
         for n in names
-        if resolved[n] not in installed_by_name
+        if keys[n] not in by_key
     ]
 
     return installed, failures

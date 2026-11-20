@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -279,24 +280,40 @@ async def upgrade_packages(
         p.name: _active_version(p) for p in (*targets, *satisfied)
     }
 
-    report: InstallReport | None = None
+    # The formulae upgrade alongside the casks, in one display
+    formula_run: asyncio.Task[InstallReport] | None = None
     if formula_names:
-        report = await run_upgrade(
-            formula_names,
-            _old_kegs(targets),
-            catalog=repo.catalog,
-            cache_mgr=repo.cache_mgr,
-            formula=formula,
-            run_brew=run_brew,
-            env=env,
-            progress=progress,
+        formula_run = asyncio.create_task(
+            run_upgrade(
+                formula_names,
+                _old_kegs(targets),
+                catalog=repo.catalog,
+                cache_mgr=repo.cache_mgr,
+                formula=formula,
+                run_brew=run_brew,
+                env=env,
+                progress=progress,
+            )
         )
 
     cask_failures: Notes = []
-    if cask_names:
-        cask_failures = await upgrade_casks(
-            cask_names, repo=repo, backend=cask, env=env, progress=progress
-        )
+    try:
+        if cask_names:
+            cask_failures = await upgrade_casks(
+                cask_names,
+                repo=repo,
+                backend=cask,
+                env=env,
+                progress=progress,
+                formula_run=formula_run,
+            )
+
+        report = await formula_run if formula_run else None
+
+    finally:
+        if formula_run:  # Left running only if the casks failed
+            formula_run.cancel()
+            await asyncio.gather(formula_run, return_exceptions=True)
 
     # Only invalidate the cache if something actually changed
     if formula_names or cask_names:

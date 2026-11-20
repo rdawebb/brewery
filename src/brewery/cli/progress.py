@@ -151,26 +151,40 @@ class ProgressReporter:
         self._started = False
         self._paused = False
         self._lock = threading.Lock()
+        self._depth = 0  # Open begins; only the last end clears the display
 
     def begin(self, total: int) -> None:
         """Add the overall bar and arm the deferred reveal.
 
-        The overall anchor bar is only displayed for multi-package transactions;
-        for a single formula it is omitted.
+        The overall anchor bar is only shown once the display covers more than
+        one package; a 'begin' before the open display's end, such as concurrent
+        formula and cask runs, joins it, adding `total` to the overall bar.
 
         Args:
             total: The number of packages that will be installed.
         """
-        if total > 1:
-            self._total = total
-            self._overall = self._progress.add_task(
-                "",
-                total=total,
-                name="[bold green]Installing[/bold green]",
-                status=f"0/{total}",
-                glyph=" ",
-                activity="bar",
+        self._depth += 1
+        self._total += total
+
+        if self._overall is not None:
+            self._progress.update(
+                self._overall,
+                total=self._total,
+                status=f"{self._done}/{self._total}",
+                visible=self._total > 1,
             )
+            return
+
+        # Added hidden, so it stays above every row
+        self._overall = self._progress.add_task(
+            "",
+            total=self._total,
+            name="[bold green]Installing[/bold green]",
+            status=f"0/{self._total}",
+            glyph=" ",
+            activity="bar",
+            visible=self._total > 1,
+        )
 
         loop = asyncio.get_running_loop()
         self._reveal_handle = loop.call_later(_REVEAL_DELAY, self._reveal)
@@ -304,9 +318,14 @@ class ProgressReporter:
     def end(self) -> None:
         """Cancel a pending reveal, stop the live display (clears it) and reset.
 
-        Resetting lets one command run several transactions, such as a cask's
-        formula dependencies and then the casks.
+        Only the 'end' matching the first 'begin' does this; an earlier one closes
+        a transaction that joined the display; resetting lets one command run
+        several displays in turn.
         """
+        self._depth -= 1
+        if self._depth > 0:
+            return
+
         if self._reveal_handle is not None:
             self._reveal_handle.cancel()
             self._reveal_handle = None

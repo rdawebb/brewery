@@ -44,14 +44,16 @@ def install(
 
     Args:
         names: Name(s) of the package(s) to install.
-        formula: Install the package(s) as formulae (the default).
-        cask: Install the package(s) as casks.
+        formula: Install the package(s) as formulae.
+        cask: Install the package(s) as casks; with neither flag, each name is
+            a formula if one exists, else a cask.
         yes: If true, skip confirmation prompt.
     """
-    target: PackageKind = kind_from_flags(formula, cask) or PackageKind.FORMULA
+    target: PackageKind | None = kind_from_flags(formula, cask)
+    label = f"{target.value}: " if target else ""
 
     if not confirm_or_cancel(
-        f"Install {target.value}: {', '.join(names)}?", yes=yes, default=True
+        f"Install {label}{', '.join(names)}?", yes=yes, default=True
     ):
         return
 

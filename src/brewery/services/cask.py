@@ -53,7 +53,7 @@ from brewery.providers.orchestrator import _NULL_PROGRESS, Outcome, ProgressPort
 from brewery.providers.pipeline import PIPELINE_TIMEOUT, run_install
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Collection
     from pathlib import Path
 
     from brewery.core.repo import Repository
@@ -72,6 +72,7 @@ async def install_casks(
     formula: PackageBackend,
     env: BreweryENV | None = None,
     progress: ProgressPort | None = None,
+    formulae: list[str] | None = None,
 ) -> Notes:
     """Install every named cask, natively where possible, the rest through brew.
 
@@ -80,6 +81,9 @@ async def install_casks(
     cask whose native install or dependencies fail goes to brew, which then installs
     those dependencies; a cask another process has locked is left alone.
 
+    The formula pipeline runs alongside the casks, in the same display: only a cask
+    needing a formula itself, or through a cask it depends on, waits for it.
+
     Args:
         names: Cask tokens to install.
         repo: The data facade to read the catalog and installed state through.
@@ -87,10 +91,12 @@ async def install_casks(
         formula: Formula backend for the formula pipeline's brew fallback.
         env: Brewery environment (paths), resolved if omitted.
         progress: Optional progress sink.
+        formulae: Formulae requested with the casks, installed in the same run as
+            the casks' formula dependencies.
 
     Returns:
         A (token, reason) note per cask left alone because it was locked, or
-        that brew failed to install.
+        that brew failed to install, and per formula that didn't install.
     """
     env = env or get_brewery_env()
     progress = progress or _NULL_PROGRESS
@@ -125,29 +131,49 @@ async def install_casks(
     if any(reasons[t] and needs_sudo(rows[t].artifacts) for t in order):
         await validate()  # Before any display, rather than mid-way through it
 
-    native = [t for t in order if not reasons[t]]
-    failed_formulae = await _install_formulae(
-        sorted({f for t in native for f in _depends(rows[t], "formula")}),
-        repo=repo,
-        formula=formula,
-        env=env,
-        progress=progress,
+    # Casks needing a formula, directly or through a cask dependency, go last
+    needs_formulae = {
+        t
+        for t in rows
+        if any(
+            _depends(rows[d], "formula")
+            for d in {t, *_cask_deps(t, rows)} & rows.keys()
+        )
+    }
+    native = sorted(
+        (t for t in order if not reasons[t]), key=lambda t: t in needs_formulae
     )
-
+    formula_deps = sorted({f for t in native for f in _depends(rows[t], "formula")})
     done = set(installed)
 
     # A row per native cask, and per requested one falling back to brew
     total = len({*native, *requested})
     async with _downloads(env, progress, total) as (downloader, fetches):
-        fetches.extend(
-            asyncio.create_task(_fetch(rows[t], downloader, progress)) for t in native
+        formula_run = asyncio.create_task(
+            _install_formulae(
+                [*dict.fromkeys([*(formulae or []), *formula_deps])],
+                repo=repo,
+                formula=formula,
+                env=env,
+                progress=progress,
+            )
         )
+        fetches.append(formula_run)  # Cancelled with the downloads on a failure
+
+        async def formulae_failed(token: str) -> dict[str, str]:
+            """The formula run's failures, once it ends, if `token` needs a formula."""
+            return await formula_run if token in needs_formulae else {}
+
+        downloads = [
+            asyncio.create_task(_fetch(rows[t], downloader, progress)) for t in native
+        ]
+        fetches.extend(downloads)
 
         # In dependency order, each as soon as its download finishes
-        for token, fetch in zip(native, fetches, strict=True):
+        for token, fetch in zip(native, downloads, strict=True):
             row = rows[token]
             try:
-                reasons[token] = _blocked(row, done, failed_formulae) or (
+                reasons[token] = _blocked(row, done, await formulae_failed(token)) or (
                     await _install_one(
                         row,
                         await fetch,
@@ -166,8 +192,8 @@ async def install_casks(
                 done.add(token)
                 progress.finish(token, Outcome.NATIVE.value)
 
+            # Left to the brew call of the cask that depends on it
             elif token not in requested:
-                # Left to the brew call of the cask that depends on it
                 log.info(event="cask_to_brew", cask=token, reason=reasons[token])
                 progress.finish(token, Outcome.FAILED.value)
 
@@ -187,6 +213,10 @@ async def install_casks(
             for dep in deps & brewing.keys():
                 await brewing[dep]
 
+            # Likewise racing the formula run, for one of its formulae
+            if token in needs_formulae:
+                await asyncio.wait([formula_run])
+
             async with sem:
                 await _brew_one(
                     token,
@@ -202,6 +232,8 @@ async def install_casks(
             for token in requested:
                 if token not in done and token not in held:
                     brewing[token] = tg.create_task(via_brew(token))
+
+        notes.extend((await formula_run).items())
 
     return notes
 
@@ -370,7 +402,7 @@ def _brew_reason(row: CaskRow, opts: CaskOpts) -> str:
     return classify(row, current_platform())
 
 
-def _blocked(row: CaskRow, done: set[str], failed_formulae: set[str]) -> str:
+def _blocked(row: CaskRow, done: set[str], failed_formulae: Collection[str]) -> str:
     """Why a native cask's dependencies rule it out.
 
     Args:
@@ -399,8 +431,8 @@ async def _install_formulae(
     formula: PackageBackend,
     env: BreweryENV,
     progress: ProgressPort,
-) -> set[str]:
-    """Install casks' formula dependencies through the formula pipeline.
+) -> dict[str, str]:
+    """Install formulae for casks, and any requested with them, through the pipeline.
 
     Args:
         names: The formula names.
@@ -410,10 +442,10 @@ async def _install_formulae(
         progress: The progress sink.
 
     Returns:
-        The names that didn't install.
+        Each name that didn't install, with why.
     """
     if not names:
-        return set()
+        return {}
 
     try:
         report = await run_install(
@@ -428,10 +460,10 @@ async def _install_formulae(
 
     except BrewError as exc:
         log.warning(event="cask_formula_deps_failed", error=str(exc))
-        return set(names)
+        return dict.fromkeys(names, str(exc))
 
     repo.cache_mgr.invalidate()
-    return set(report.failed)
+    return {n: report.errors.get(n, "install failed") for n in report.failed}
 
 
 async def _install_one(
@@ -641,6 +673,7 @@ async def upgrade_casks(
     backend: UpgradeBackend,
     env: BreweryENV | None = None,
     progress: ProgressPort | None = None,
+    formula_run: asyncio.Future | None = None,
 ) -> Notes:
     """Upgrade every named cask, natively where possible, the rest through brew.
 
@@ -654,6 +687,8 @@ async def upgrade_casks(
         backend: The cask backend for the casks brewery can't upgrade.
         env: Brewery environment (paths), resolved if omitted.
         progress: Optional progress sink.
+        formula_run: A formula upgrade running alongside, which a cask brew
+            upgrades waits for if it depends on a formula.
 
     Returns:
         A (token, reason) note per cask left alone because it was locked, or
@@ -749,6 +784,9 @@ async def upgrade_casks(
 
         async def via_brew(token: str, reason: str) -> None:
             """Upgrade one cask through brew."""
+            if formula_run and (row := rows.get(token)) and _depends(row, "formula"):
+                await asyncio.wait([formula_run])  # Its failure is the caller's
+
             async with sem:
                 await _brew_one(
                     token,

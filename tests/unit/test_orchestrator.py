@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 
 import pytest
@@ -792,101 +793,6 @@ class TestUpgradeForceGate:
         assert "openssl" not in report.outcomes  # Satisfied dep skipped
 
 
-class TestUpgradeMarking:
-    """Test upgrade marking."""
-
-    def _row(self, version="2.0") -> MockFormula:
-        """Return a mock formula with the given version.
-
-        Args:
-            version: The version to set on the formula.
-
-        Returns:
-            A mock formula with the given version.
-        """
-        f = MockFormula("wget")
-        f.version = version
-
-        return f
-
-    def _patch_mark(self, monkeypatch) -> list:
-        """Patch mark_replaced to record marks.
-
-        Args:
-            monkeypatch: The monkeypatch fixture to use for patching.
-
-        Returns:
-            A list to record marks.
-        """
-        marks: list = []
-        monkeypatch.setattr(
-            orch_mod,
-            "mark_replaced",
-            lambda keg, *, by=None, at=None: marks.append((keg, by)),
-        )
-
-        return marks
-
-    async def test_marks_old_on_native_success(self, monkeypatch) -> None:
-        """Test that old version is marked when native upgrade succeeds."""
-        old = Path("/hb/Cellar/wget/1.0")
-        cat = MockCatalogPort(
-            {"wget": self._row("2.0")}, {"wget": []}, satisfied={"wget"}
-        )
-        o = _make(
-            cat,
-            MockDownloader(),
-            MockTab(),
-            MockBrew(),
-            native={
-                "wget": _NativeResult(stage=None, dest=Path("/hb/Cellar/wget/2.0"))
-            },
-        )
-        marks = self._patch_mark(monkeypatch)
-        report = await o.upgrade(["wget"], {"wget": old})
-
-        assert report.outcomes["wget"] is Outcome.NATIVE
-        assert marks == [(old, "2.0")]
-
-    async def test_no_mark_when_pour_falls_back_to_brew(self, monkeypatch) -> None:
-        """Test that no mark is recorded when pour falls back to brew."""
-        old = Path("/hb/Cellar/wget/1.0")
-        cat = MockCatalogPort({"wget": self._row()}, {"wget": []}, satisfied={"wget"})
-        brew = MockBrew()
-        o = _make(
-            cat,
-            MockDownloader(),
-            MockTab(),
-            brew,
-            native={"wget": _NativeResult(stage="install", error="boom")},
-        )
-        marks = self._patch_mark(monkeypatch)
-        report = await o.upgrade(["wget"], {"wget": old})
-
-        assert marks == []  # brew owns the old keg
-        assert report.outcomes["wget"] is Outcome.BREW_UPGRADE
-        assert ("upgrade", "wget") in brew.calls
-
-    async def test_marks_old_when_link_stage_falls_back(self, monkeypatch) -> None:
-        """Test that old version is marked when link stage falls back."""
-        old = Path("/hb/Cellar/wget/1.0")
-        cat = MockCatalogPort(
-            {"wget": self._row("2.0")}, {"wget": []}, satisfied={"wget"}
-        )
-        o = _make(
-            cat,
-            MockDownloader(),
-            MockTab(),
-            MockBrew(link_ok=True),
-            native={"wget": _NativeResult(stage="link", dest=Path("/d"), error="x")},
-        )
-        marks = self._patch_mark(monkeypatch)
-        report = await o.upgrade(["wget"], {"wget": old})
-
-        assert report.outcomes["wget"] is Outcome.BREW_LINK
-        assert marks == [(old, "2.0")]
-
-
 class TestUpgradeOnRequest:
     """installed_on_request is inherited from the superseded keg's receipt."""
 
@@ -926,7 +832,6 @@ class TestUpgradeOnRequest:
             config=CFG,
         )
         o._native_install = cap_native
-        monkeypatch.setattr(orch_mod, "mark_replaced", lambda *a, **k: None)
 
         return o
 
@@ -1313,3 +1218,49 @@ class TestCancellation:
             await run
 
         assert ("end",) in progress.events
+
+    @pytest.mark.parametrize(
+        ("result", "call"),
+        [
+            (_NativeResult(stage=None, dest=Path("/d")), "postinstall"),
+            (_NativeResult(stage="link", dest=Path("/d"), error="x"), "link"),
+        ],
+    )
+    async def test_a_pour_under_way_is_finished_off(self, result, call) -> None:
+        """Test that a cancel landing mid-pour still runs the step the pour needs.
+
+        The pour's thread finishes regardless, so stopping after it would leave a
+        keg without its post-install hook, or never linked.
+        """
+        pouring, release = threading.Event(), threading.Event()
+        brew = MockBrew()
+        cat = MockCatalogPort({"x": MockFormula("x", post_install=True)}, {"x": []})
+        o = _make(cat, MockDownloader(), MockTab(), brew)
+
+        def slow_native(*args) -> _NativeResult:
+            """Pour once the cancel has landed."""
+            pouring.set()
+            release.wait(5)
+            return result
+
+        o._native_install = slow_native  # ty: ignore[invalid-assignment]
+
+        run = asyncio.create_task(o.install(["x"]))
+        await asyncio.to_thread(pouring.wait, 5)
+        install = next(
+            t
+            for t in asyncio.all_tasks()
+            if getattr(t.get_coro(), "__name__", None) == "_install_one"
+        )
+        run.cancel()
+
+        # Once the install task's cancel is requested its shield is already
+        # cancelled, so the pour returning any later still takes the cancel path
+        while not install.cancelling():
+            await asyncio.sleep(0)
+        release.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await run
+
+        assert brew.calls == [(call, "x")]

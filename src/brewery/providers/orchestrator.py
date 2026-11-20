@@ -849,26 +849,39 @@ class Orchestrator:
 
         async with self._install_sem:
             self.progress.update(name, "install")
-            result = await asyncio.to_thread(
-                self._native_install,
-                name,
-                fr,
-                bottle_path,
-                tab,
-                on_request,
-                aliases,
-                rt_deps,
-                old,
+            pour = asyncio.ensure_future(
+                asyncio.to_thread(
+                    self._native_install,
+                    name,
+                    fr,
+                    bottle_path,
+                    tab,
+                    on_request,
+                    aliases,
+                    rt_deps,
+                    old,
+                )
             )
+            try:
+                result = await asyncio.shield(pour)
+
+            # The thread pours on regardless, so finishes the keg off before
+            # stopping; a second Ctrl+C still interrupts this
+            except asyncio.CancelledError:
+                result = await pour
+                if result.stage is None and fr.post_install:
+                    await self.brew.post_install(name)
+
+                elif result.stage == "link":
+                    await self.brew.link(name)
+
+                raise
 
         if result.stage == "lock":
             # brew would contend on the same rack lock, so there is no fallback
             report.add_note(name, f"lock: {result.error}")
 
             return Outcome.FAILED
-
-        if old is not None and result.stage != "install":
-            await asyncio.to_thread(mark_replaced, old, by=fr.version)
 
         if result.config_error is not None:
             report.add_note(name, f"config: {result.config_error}")
@@ -1035,6 +1048,13 @@ class Orchestrator:
             shutil.rmtree(staging, ignore_errors=True)
 
         result = _NativeResult(stage=None, dest=dest)
+        if old_keg is not None and old_keg != dest:
+            try:
+                mark_replaced(old_keg, by=fr.version)
+
+            except OSError as exc:
+                log.warning(event="mark_replaced_failed", formula=name, error=str(exc))
+
         try:
             if old_keg is not None and old_keg != dest:
                 unlink_keg(old_keg, prefix=self.cfg.prefix, name=name)

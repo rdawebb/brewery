@@ -35,7 +35,9 @@ class TestInstall:
             repo, ["ripgrep"], kind=PackageKind.FORMULA
         )
         assert _provider_calls(mock_brew, "install") == []
-        assert [n for n, _ in failures] == ["ripgrep"]
+        [(name, reason)] = failures
+        assert name == "ripgrep"
+        assert reason.startswith("no bottle for ")
 
     async def test_install_reports_present_package_as_installed(self, repo) -> None:
         """Test that a package present on the mock fs is reported installed.
@@ -59,7 +61,7 @@ class TestInstall:
             repo, ["ripgrep"], kind=PackageKind.FORMULA
         )
         assert installed == []
-        assert failures == [("ripgrep", "install failed or not found")]
+        assert [n for n, _ in failures] == ["ripgrep"]
 
     async def test_install_appearing_package_is_detected(self, repo, mock_env) -> None:
         """Test that a keg created during install is detected on re-scan.
@@ -259,6 +261,41 @@ class TestInstallCasks:
         )
         assert config["env"] == {"appdir": str(appdir)}
         assert self._receipt(mock_env, "foo")["installed_on_request"] is True
+
+    async def test_unflagged_names_route_by_catalog(
+        self, repo, mock_brew, casks
+    ) -> None:
+        """Test that with no kind, a formula goes to the pipeline and a cask to casks."""
+        casks({"foo": (None, [{"app": ["Foo.app"]}])})
+
+        installed, failures = await install_packages(repo, ["yazi", "foo"])
+
+        assert (sorted(p.name for p in installed), failures) == (["foo", "yazi"], [])
+        assert _provider_calls(mock_brew, "install") == []
+
+    async def test_unflagged_formulae_install_alongside_casks(
+        self, repo, casks, monkeypatch
+    ) -> None:
+        """Test that a cask needing no formula installs while the formula run is held."""
+        casks({"foo": (None, [{"app": ["Foo.app"]}])})
+        staged, loop = asyncio.Event(), asyncio.get_running_loop()
+        stage, run_install = cask_service.stage, cask_service.run_install
+
+        def recording_stage(row, *args, **kwargs):
+            loop.call_soon_threadsafe(staged.set)  # Staging runs in a worker thread
+            return stage(row, *args, **kwargs)
+
+        async def held_run_install(*args, **kwargs):
+            async with asyncio.timeout(5):  # Formulae first: foo never stages
+                await staged.wait()
+            return await run_install(*args, **kwargs)
+
+        monkeypatch.setattr(cask_service, "stage", recording_stage)
+        monkeypatch.setattr(cask_service, "run_install", held_run_install)
+
+        installed, failures = await install_packages(repo, ["yazi", "foo"])
+
+        assert (sorted(p.name for p in installed), failures) == (["foo", "yazi"], [])
 
     async def test_downloads_overlap_before_installs(
         self, repo, mock_brew, casks, monkeypatch

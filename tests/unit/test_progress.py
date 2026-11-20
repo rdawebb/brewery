@@ -94,10 +94,23 @@ class TestBegin:
         """Test that a lone formula is not given an anchor bar counting to one."""
         reporter.begin(1)
 
-        assert reporter._overall is None
-        assert reporter._progress.tasks == []
+        assert not any(t.visible for t in reporter._progress.tasks)
 
         reporter.end()
+
+    async def test_a_nested_run_joins_the_open_display(self, reporter) -> None:
+        """Test that a begin inside another adds to it, and only the last end clears."""
+        reporter.begin(1)
+        reporter.begin(2)
+
+        [overall] = reporter._progress.tasks
+        assert (overall.visible, overall.total) == (True, 3)
+
+        reporter.end()
+        assert reporter._progress.tasks == [overall]
+
+        reporter.end()
+        assert reporter._progress.tasks == []
 
     async def test_the_display_is_not_revealed_immediately(self, reporter) -> None:
         """Test that begin arms the deferred reveal rather than starting the display.
