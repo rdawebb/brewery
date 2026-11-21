@@ -200,3 +200,46 @@ async def test_validate_runs_sudo_askpass_and_warns_on_failure(
     assert (
         any("sudo_validate_failed" in r.getMessage() for r in caplog.records) is warned
     )
+
+
+def test_run_sudo_sets_env_through_env_and_raises_on_failure(monkeypatch) -> None:
+    """Test that env goes through /usr/bin/env, `-A` only with askpass set up."""
+    from brewery.core.errors import CellarError
+
+    calls: list[tuple[list[str], bytes]] = []
+
+    def fake_run(
+        cmd: list[str], *, input: bytes, **_: object
+    ) -> subprocess.CompletedProcess:
+        calls.append((cmd, input))
+        return subprocess.CompletedProcess(cmd, int("fail" in cmd), b"", b"boom\n")
+
+    monkeypatch.setattr(sudo.subprocess, "run", fake_run)
+    monkeypatch.delenv("HOMEBREW_NO_SUDO", raising=False)
+    monkeypatch.setenv("SUDO_ASKPASS", "/askpass")
+    sudo.run_sudo("/bin/ls", stdin=b"in", env={"USER": "me"})
+    monkeypatch.delenv("SUDO_ASKPASS")
+
+    with pytest.raises(CellarError, match="fail failed: boom"):
+        sudo.run_sudo("fail")
+
+    assert calls == [
+        (["/usr/bin/sudo", "-A", "--", "/usr/bin/env", "USER=me", "/bin/ls"], b"in"),
+        (["/usr/bin/sudo", "--", "/usr/bin/env", "fail"], b""),
+    ]
+
+
+async def test_no_sudo_skips_validate_and_refuses_to_run(monkeypatch) -> None:
+    """Test that HOMEBREW_NO_SUDO, as brew's, stops brewery using sudo at all."""
+    from brewery.core.errors import CellarError
+
+    def fail(*args: object, **kwargs: object) -> None:
+        pytest.fail("sudo ran")
+
+    monkeypatch.setenv("HOMEBREW_NO_SUDO", "1")
+    monkeypatch.setattr(sudo.subprocess, "run", fail)
+    monkeypatch.setattr(sudo.asyncio, "create_subprocess_exec", fail)
+
+    await sudo.validate()
+    with pytest.raises(CellarError, match="HOMEBREW_NO_SUDO"):
+        sudo.run_sudo("/bin/ls")

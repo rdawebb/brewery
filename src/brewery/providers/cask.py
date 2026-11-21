@@ -29,6 +29,7 @@ NATIVE_ARTIFACTS = frozenset(
         "qlplugin",
         "artifact",
         "manpage",
+        "pkg",
         "bash_completion",
         "zsh_completion",
         "fish_completion",
@@ -46,14 +47,15 @@ NATIVE_UNINSTALL = frozenset(
         "launchctl",
         "signal",
         "login_item",
+        "pkgutil",
         "trash",
         "rmdir",
         "on_upgrade",
     }
 )
 
-# Artifacts brew installs or removes with sudo, and the directive it removes a pkg
-# with; a narrow list (a `delete` of a root-owned file needs sudo too); a sudo it
+# Artifacts installed or removed with sudo, and the directive that removes a pkg;
+# a narrow list (a `delete` of a root-owned file needs sudo too); a sudo it
 # misses pauses the display through askpass instead
 _SUDO_ARTIFACTS = frozenset({"pkg", "installer"})
 
@@ -296,26 +298,29 @@ def classify_uninstall(
     return _artifact_reason(artifacts, ("uninstall", "zap") if zap else ("uninstall",))
 
 
-def needs_sudo(artifacts: Any) -> bool:
-    """Whether brew will need sudo for these artifacts.
+def needs_sudo(artifacts: Any, *, directives: tuple[str, ...] = ()) -> bool:
+    """Whether installing these artifacts, or running these directives, will need sudo.
 
     Args:
         artifacts: A cask's artifacts, or a receipt's `uninstall_artifacts`.
+        directives: The stanzas a removal runs (`uninstall`, and `zap` for
+            `--zap`); empty for an install.
 
     Returns:
-        True for a `pkg` or `installer` stanza, or a `pkgutil` directive.
+        True for a `pkg` or `installer` stanza when installing, or a `pkgutil`
+        directive in one of `directives`.
     """
     for stanza in artifacts if isinstance(artifacts, list) else []:
         if not isinstance(stanza, dict):
             continue
 
-        if stanza.keys() & _SUDO_ARTIFACTS:
+        if not directives and stanza.keys() & _SUDO_ARTIFACTS:
             return True
 
-        for key in ("uninstall", "zap"):
-            directives = stanza.get(key)
-            if isinstance(directives, list) and any(
-                isinstance(d, dict) and "pkgutil" in d for d in directives
+        for key in directives:
+            steps = stanza.get(key)
+            if isinstance(steps, list) and any(
+                isinstance(d, dict) and "pkgutil" in d for d in steps
             ):
                 return True
 

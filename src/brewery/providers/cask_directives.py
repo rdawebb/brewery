@@ -1,7 +1,8 @@
 """Run a cask's `uninstall` and `zap` directives.
 
-macOS-only, like native casks; brew runs some steps with sudo; where one would
-need root here, it raises instead, and the cask goes to brew.
+macOS-only, like native casks; `pkgutil`, and a `delete` the user can't do, run
+through sudo as brew's do; other steps that would need root raise instead, and
+the cask goes to brew.
 """
 
 # This file contains code derived from Homebrew (https://github.com/Homebrew/brew)
@@ -16,9 +17,11 @@ import functools
 import getpass
 import glob
 import os
+import plistlib
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import time
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -27,11 +30,21 @@ from typing import Any
 
 from brewery.core.errors import CellarError
 from brewery.core.logging import BreweryLogger, get_logger
+from brewery.core.sudo import run_sudo
 
 log: BreweryLogger = get_logger(name=__name__)
 
 # `ORDERED_DIRECTIVES`, less those `classify_uninstall` sends to brew
-_ORDER = ("launchctl", "quit", "signal", "login_item", "delete", "trash", "rmdir")
+_ORDER = (
+    "launchctl",
+    "quit",
+    "signal",
+    "login_item",
+    "pkgutil",
+    "delete",
+    "trash",
+    "rmdir",
+)
 
 _RUNNING_APPS_JS = """
 ObjC.import('AppKit')
@@ -506,7 +519,7 @@ def _resolve(action: str, paths: Iterable[str]) -> Iterator[list[Path]]:
 
         kept: list[Path] = []
         for m in matches:
-            if undeletable(m):
+            if undeletable(m, home):
                 log.warning(f"Skipping {action} for undeletable path {m}")
 
             else:
@@ -516,21 +529,136 @@ def _resolve(action: str, paths: Iterable[str]) -> Iterator[list[Path]]:
 
 
 def _delete(paths: list[str]) -> None:
-    """Remove the paths' matches.
+    """Remove the paths' matches, through sudo for those the user can't.
 
     Args:
         paths: The `delete` paths.
 
     Raises:
-        CellarError: If one can't be removed; brew removes it with sudo.
+        CellarError: If one can't be removed, even with sudo.
     """
+    denied: list[Path] = []
     for matches in _resolve("delete", paths):
         for path in matches:
             try:
                 remove(path)
 
+            except PermissionError:
+                denied.append(path)  # brew always deletes with sudo
+
             except OSError as exc:
                 raise CellarError(f"can't delete {path}: {exc}", path=path) from exc
+
+    _sudo_each(denied, "/bin/rm", "-r", "-f")
+
+
+def _pkgutil(patterns: list[str]) -> None:
+    """Remove the files of each installed package an ID pattern matches.
+
+    Args:
+        patterns: Package ID regexes, as `pkgutil --pkgs` takes them.
+
+    Raises:
+        CellarError: If a package can't be read, or its files removed or forgotten.
+    """
+    for pattern in patterns:
+        proc = _run("pkgutil", f"--pkgs={pattern}")
+        if proc.returncode and (err := proc.stderr.strip()):  # A bare exit 1: no match
+            log.warning(f"Couldn't list packages matching {pattern}: {err}")
+
+        for pkg_id in proc.stdout.split():
+            _remove_pkg(pkg_id)
+
+
+def _remove_pkg(pkg_id: str) -> None:
+    """Remove a package's files and the dirs they leave empty.
+
+    Args:
+        pkg_id: The installed package's ID.
+
+    Raises:
+        CellarError: If the package can't be read, or its files removed or forgotten.
+    """
+    proc = subprocess.run(
+        ["pkgutil", "--export-plist", pkg_id], capture_output=True, check=False
+    )
+    try:
+        info = plistlib.loads(proc.stdout)
+        root = Path(info["volume"]) / info["install-location"]
+        paths = list(info.get("paths") or {})  # None for a payload-free package
+
+    except (plistlib.InvalidFileException, KeyError, TypeError) as exc:
+        raise CellarError(f"can't read package {pkg_id}") from exc
+
+    home = Path.home()
+    files: list[Path] = []
+    dirs: list[Path] = []
+    for rel in paths:
+        path = root / rel
+        if ".." in rel.split("/") or undeletable(path, home):
+            continue
+
+        try:
+            mode = path.lstat().st_mode
+
+        except OSError:
+            continue  # Gone or unreadable to the user
+
+        if stat.S_ISDIR(mode):
+            dirs.append(path)
+
+        elif stat.S_IFMT(mode) in (
+            stat.S_IFREG,
+            stat.S_IFLNK,
+            stat.S_IFCHR,
+            stat.S_IFBLK,
+        ):
+            files.append(path)
+
+    _sudo_each(files, "/bin/rm", "-f")
+
+    # Deepest first, so a dir's emptied subdirs are gone before it is tried
+    dirs.sort(key=lambda d: len(d.parts), reverse=True)
+    if not undeletable(root, home):
+        dirs.append(root)
+
+    junk: list[Path] = []
+    for d in dirs:
+        try:
+            with os.scandir(d) as entries:
+                junk += [
+                    Path(e.path)
+                    for e in entries
+                    if e.name == ".DS_Store"
+                    or (e.is_symlink() and not os.path.exists(e.path))
+                ]
+
+        except OSError:
+            continue
+
+    _sudo_each(junk, "/bin/rm", "-f")
+    _sudo_each(dirs, "/bin/rmdir", check=False)  # A dir still holding files stays
+    run_sudo("/usr/sbin/pkgutil", "--forget", pkg_id)
+
+
+def _sudo_each(paths: Sequence[Path], *cmd: str, check: bool = True) -> None:
+    """Run `cmd` as root over the paths, fed to xargs so any number fits.
+
+    Args:
+        paths: The paths, appended to `cmd` in order.
+        *cmd: The command and its options.
+        check: Raise if it fails.
+    """
+    if paths:
+        run_sudo(
+            "/usr/bin/xargs",
+            "-0",
+            "--",
+            *cmd,
+            "--",
+            stdin=b"\0".join(map(os.fsencode, paths)),
+            check=check,
+        )
 
 
 def _trash(paths: list[str]) -> None:
@@ -599,28 +727,77 @@ _RUNNERS = {
     "launchctl": _launchctl,
     "quit": _quit,
     "signal": _signal,
+    "pkgutil": _pkgutil,
     "delete": _delete,
     "trash": _trash,
     "rmdir": _rmdir,
 }
 
 
-def undeletable(path: Path) -> bool:
+def undeletable(path: Path, home: str | Path | None = None) -> bool:
     """Whether brew would refuse to remove this path.
+
+    Checked as given with its parent's symlinks resolved.
+
+    Args:
+        path: An absolute path.
+        home: The home dir, for callers checking many paths; `Path.home()` if None.
+
+    Returns:
+        True for system and home dirs no cask may remove, and anything in a
+        protected home container.
+    """
+    given = os.path.abspath(path)
+    parent, name = os.path.split(given)
+    home = os.path.abspath(home or Path.home())
+    containers = _containers(home)
+
+    for candidate in {given, os.path.join(_realpath(parent), name)}:
+        if candidate in _SYSTEM_DIRS or any(
+            candidate == c or candidate.startswith(f"{c}/") for c in containers
+        ):
+            return True
+
+        if os.path.relpath(candidate, home) in _HOME_DIRS:  # Never "../…"
+            return True
+
+    return False
+
+
+@functools.lru_cache(maxsize=1)
+def _containers(home: str) -> frozenset[str]:
+    """The protected home containers, as given and resolved, for this home.
+
+    Args:
+        home: The absolute home dir.
+
+    Returns:
+        Each container's path, plus its symlink-resolved path.
+    """
+    joined = {os.path.join(home, c) for c in _HOME_CONTAINERS}
+
+    return frozenset(joined | {_realpath(c) for c in joined})
+
+
+@functools.lru_cache(maxsize=4096)
+def _realpath(path: str) -> str:
+    """`os.path.realpath`, cached: a package's paths share far fewer parents.
 
     Args:
         path: An absolute path.
 
     Returns:
-        True for system and home dirs no cask may remove.
+        The path with its symlinks resolved.
     """
-    path = Path(os.path.abspath(path))
-    if str(path) in _SYSTEM_DIRS:
-        return True
+    return os.path.realpath(path)
 
-    home = Path(os.path.abspath(Path.home()))
 
-    return path.is_relative_to(home) and str(path.relative_to(home)) in _HOME_DIRS
+# `UNDELETABLE_CONTAINERS` (cask/macos.rb): nothing under them may be removed
+_HOME_CONTAINERS = (
+    "Library/Application Support/com.apple.TCC",
+    "Library/Keychains",
+    "Library/Messages",
+)
 
 
 # `SYSTEM_DIRS` and `UNDELETABLE_PATHS` (cask/macos.rb); home dirs are under ~

@@ -296,8 +296,8 @@ class TestUninstallCasks:
     async def test_zap_brewery_cant_run_goes_to_brew(
         self, repo, mock_brew, install, tmp_path
     ) -> None:
-        """Test that a `zap` with a `pkgutil` hands the whole --zap to brew."""
-        await install({"zap": [{"pkgutil": "org.example.foo", "trash": "~/x"}]})
+        """Test that a `zap` with a `kext` hands the whole --zap to brew."""
+        await install({"zap": [{"kext": "org.example.foo", "trash": "~/x"}]})
 
         await uninstall_packages(repo, ["foo"], kind=PackageKind.CASK, zap=True)
 
@@ -307,10 +307,10 @@ class TestUninstallCasks:
         assert (tmp_path / "apps" / "Foo.app").is_dir()  # brew wasn't really run
 
     @pytest.mark.parametrize(("zap", "calls"), [(True, 1), (False, 0)])
-    async def test_sudo_is_asked_for_before_a_pkgutil_goes_to_brew(
+    async def test_sudo_is_asked_for_up_front_only_when_pkgutil_runs(
         self, repo, install, sudo_validations, zap, calls
     ) -> None:
-        """Test that sudo is asked for only when brew gets the `pkgutil` to run."""
+        """Test that a `zap pkgutil` asks for sudo for --zap, and not otherwise."""
         await install({"zap": [{"pkgutil": "org.example.foo"}]})
 
         await uninstall_packages(repo, ["foo"], kind=PackageKind.CASK, zap=zap)

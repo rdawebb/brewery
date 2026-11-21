@@ -128,7 +128,7 @@ async def install_casks(
         visit(token)
 
     reasons = {t: _brew_reason(rows[t], opts) for t in order}
-    if any(reasons[t] and needs_sudo(rows[t].artifacts) for t in order):
+    if any(needs_sudo(rows[t].artifacts) for t in order):
         await validate()  # Before any display, rather than mid-way through it
 
     # Casks needing a formula, directly or through a cask dependency, go last
@@ -565,10 +565,16 @@ async def uninstall_casks(
     plat = current_platform()
     to_brew: list[str] = []
     locked: Notes = []
-    sudo = False
+    keys = ("uninstall", "zap") if zap else ("uninstall",)
+    receipts = {t: read_receipt(env.caskroom / t) for t in names}
+    if any(
+        needs_sudo((r or {}).get("uninstall_artifacts"), directives=keys)
+        for r in receipts.values()
+    ):
+        await validate()
 
     for token in names:
-        receipt = read_receipt(env.caskroom / token)
+        receipt = receipts[token]
         reason = classify_uninstall(receipt, plat, zap=zap)
 
         if not reason:
@@ -590,12 +596,8 @@ async def uninstall_casks(
 
         log.info(event="cask_to_brew", cask=token, reason=reason)
         to_brew.append(token)
-        sudo = sudo or needs_sudo((receipt or {}).get("uninstall_artifacts"))
 
     if to_brew:
-        if sudo:
-            await validate()
-
         await backend.uninstall(names=to_brew, zap=zap)
 
     return locked
@@ -711,7 +713,8 @@ async def upgrade_casks(
         token_dir = env.caskroom / token
         receipt = read_receipt(token_dir)
         reasons[token] = classify_uninstall(receipt, plat, zap=False)
-        if needs_sudo((receipt or {}).get("uninstall_artifacts")):
+        removing = (receipt or {}).get("uninstall_artifacts")
+        if needs_sudo(removing, directives=("uninstall",)):
             sudo.add(token)
 
         if (row := repo.catalog.get_cask(token)) is None:
@@ -732,7 +735,7 @@ async def upgrade_casks(
             reasons[token] or _brew_reason(row, opts) or _blocked(row, casks, missing)
         )
 
-    if any(reasons[t] for t in sudo):
+    if sudo:
         await validate()  # Before the display, rather than mid-way through
 
     async with _downloads(env, progress, len(reasons)) as (downloader, fetches):

@@ -34,7 +34,6 @@ class TestClassify:
     @pytest.mark.parametrize(
         ("artifacts", "reason"),
         [
-            pytest.param([{"pkg": ["Foo.pkg"]}], "`pkg` artifact", id="pkg"),
             pytest.param(
                 [{"installer": [{"manual": "Install.app"}]}],
                 "`installer` artifact",
@@ -402,13 +401,16 @@ class TestLanguages:
         assert classify(localise(row, ["de"]), SEQUOIA) == "`language` variant"
 
 
+PKGUTIL = {"uninstall": [{"pkgutil": "org.example.foo"}]}
+
+
 class TestClassifyUninstall:
     """Tests for routing an installed cask's uninstall from its receipt."""
 
     ARTIFACTS = (
         {"uninstall": [{"quit": "org.example.foo", "delete": "/tmp/foo"}]},
         {"app": ["Foo.app"]},
-        {"zap": [{"trash": "~/foo", "pkgutil": "org.example.foo"}]},
+        {"zap": [{"trash": "~/foo", "kext": "org.example.foo"}]},
     )
 
     @pytest.mark.parametrize(
@@ -418,13 +420,13 @@ class TestClassifyUninstall:
             pytest.param(
                 {"uninstall_artifacts": [*ARTIFACTS]},
                 True,
-                "`zap pkgutil`",
+                "`zap kext`",
                 id="zap_brew",
             ),
             pytest.param(
-                {"uninstall_artifacts": [{"pkg": ["Foo.pkg"]}]},
+                {"uninstall_artifacts": [{"pkg": ["Foo.pkg"]}, PKGUTIL]},
                 False,
-                "`pkg` artifact",
+                "",
                 id="pkg",
             ),
             pytest.param(None, False, "no uninstall receipt", id="no_receipt"),
@@ -452,7 +454,7 @@ class TestClassifyUninstall:
 
 
 class TestNeedsSudo:
-    """Tests for spotting the casks brew will need sudo for."""
+    """Tests for spotting the casks that will need sudo."""
 
     @pytest.mark.parametrize(
         ("artifacts", "expected"),
@@ -460,10 +462,7 @@ class TestNeedsSudo:
             pytest.param([{"pkg": ["Foo.pkg"]}], True, id="pkg"),
             pytest.param([{"installer": [{"script": "x"}]}], True, id="installer"),
             pytest.param(
-                [{"uninstall": [{"pkgutil": "org.example.foo"}]}], True, id="pkgutil"
-            ),
-            pytest.param(
-                [{"zap": [{"pkgutil": "org.example.foo"}]}], True, id="zap_pkgutil"
+                [{"uninstall": [{"pkgutil": "org.example.foo"}]}], False, id="pkgutil"
             ),
             pytest.param(
                 [{"app": ["Foo.app"]}, {"uninstall": [{"quit": "org.example.foo"}]}],
@@ -475,5 +474,16 @@ class TestNeedsSudo:
         ],
     )
     def test_needs_sudo(self, artifacts, expected) -> None:
-        """Test that pkg-like artifacts and pkgutil directives need sudo."""
+        """Test that installing pkg-like artifacts needs sudo, and pkgutil doesn't."""
         assert needs_sudo(artifacts) is expected
+
+    @pytest.mark.parametrize(
+        ("directives", "expected"),
+        [(("uninstall",), False), (("uninstall", "zap"), True)],
+    )
+    def test_pkgutil_needs_sudo_when_its_stanza_runs(
+        self, directives, expected
+    ) -> None:
+        """Test that a removal counts pkgutil in the stanzas it runs, and not `pkg`."""
+        artifacts = [{"pkg": ["Foo.pkg"]}, {"zap": [{"pkgutil": "org.example.foo"}]}]
+        assert needs_sudo(artifacts, directives=directives) is expected

@@ -9,14 +9,16 @@ import os
 import socket
 import socketserver
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 
+from brewery.core.errors import CellarError
 from brewery.core.logging import BreweryLogger, get_logger
 
 log: BreweryLogger = get_logger(name=__name__)
@@ -188,6 +190,9 @@ async def validate() -> None:
     sudo's timestamp is keyed on the tty and session, which brew shares; a
     declined or failed ask is only logged: brew asks again when needed.
     """
+    if os.environ.get("HOMEBREW_NO_SUDO"):
+        return
+
     try:
         proc = await asyncio.create_subprocess_exec(
             "sudo",
@@ -205,3 +210,46 @@ async def validate() -> None:
 
     if code:
         log.warning(event="sudo_validate_failed", returncode=code)
+
+
+def run_sudo(
+    *args: str,
+    stdin: bytes = b"",
+    env: Mapping[str, str] | None = None,
+    check: bool = True,
+) -> subprocess.CompletedProcess[bytes]:
+    """Run a command as root.
+
+    sudo resets the environment, so `env` is set through `/usr/bin/env`; `-A`
+    lets `askpass` answer a prompt when it's set up.
+
+    Args:
+        *args: The command and its arguments.
+        stdin: Bytes to feed the command.
+        env: Variables to set for the command, on top of sudo's reset environment.
+        check: Raise if the command exits non-zero.
+
+    Returns:
+        The completed process.
+
+    Raises:
+        CellarError: If `HOMEBREW_NO_SUDO` is set, sudo can't be run, or the
+            command fails and `check` is set.
+    """
+    if os.environ.get("HOMEBREW_NO_SUDO"):
+        raise CellarError(f"{args[0]} needs sudo, which HOMEBREW_NO_SUDO disables")
+
+    askpass_flag = ["-A"] if "SUDO_ASKPASS" in os.environ else []
+    assigns = [f"{k}={v}" for k, v in (env or {}).items()]
+    cmd = ["/usr/bin/sudo", *askpass_flag, "--", "/usr/bin/env", *assigns, *args]
+    try:
+        proc = subprocess.run(cmd, input=stdin, capture_output=True, check=False)
+
+    except OSError as exc:
+        raise CellarError(f"can't run sudo: {exc}") from exc
+
+    if check and proc.returncode:
+        out = (proc.stderr or proc.stdout).decode(errors="replace").strip()
+        raise CellarError(f"{args[0]} failed: {out}")
+
+    return proc

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import getpass
 import gzip
 import json
 import os
+import plistlib
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 from _rows import cask_row
@@ -15,6 +18,7 @@ from _tar import make_tar
 from brewery.core.errors import CellarError, ExtractionError, LinkError
 from brewery.core.fs_state import scan_installed
 from brewery.core.models import PackageKind
+from brewery.providers import cask_directives, caskroom
 from brewery.providers.caskroom import (
     ALT_NAMES,
     QUARANTINE,
@@ -218,6 +222,30 @@ class TestStage:
 
         assert (staged / "Foo[wght].ttf").read_bytes() == b"\x00\x01\x00\x00font"
 
+    def test_flat_pkg_stages_whole(self, brew, tmp_path) -> None:
+        """Test that a xar named `.pkg` is staged as is, as brew's `Pkg` strategy does."""
+        download = tmp_path / "download"
+        download.write_bytes(b"xar!\x00\x1c" + b"\x00" * 32)
+
+        staged = stage(_row("https://example.org/Foo-1.0.pkg"), download, brew.caskroom)
+
+        assert (staged / "Foo-1.0.pkg").read_bytes() == download.read_bytes()
+
+    def test_bare_pkg_takes_its_stanzas_name(self, brew, tmp_path) -> None:
+        """Test that a pkg from a URL without its name is staged as its stanza says."""
+        download = tmp_path / "download"
+        download.write_bytes(b"xar!\x00\x1c" + b"\x00" * 32)
+        row = cask_row(
+            "foo",
+            version="1.0",
+            url="https://example.org/download.php?id=1",
+            artifacts=[{"pkg": ["Foo Installer.pkg"]}],
+        )
+
+        staged = stage(row, download, brew.caskroom)
+
+        assert (staged / "Foo Installer.pkg").read_bytes() == download.read_bytes()
+
     def test_unsupported_archive_raises_and_stages_nothing(
         self, brew, tmp_path
     ) -> None:
@@ -388,6 +416,49 @@ class TestInstallArtifacts:
 
         assert not (brew.prefix / "bin").exists()
 
+    def test_pkg_runs_installer_with_choices(
+        self, brew, staged, dirs, monkeypatch
+    ) -> None:
+        """Test `installer`'s args, env and choices, and that a missing pkg raises."""
+        (staged / "Foo.pkg").write_bytes(b"xar!")
+        calls = []
+
+        def run_sudo(*args: str, env: dict[str, str]) -> None:
+            choices = Path(args[args.index("-applyChoiceChangesXML") + 1])
+            calls.append((args[:5], env, plistlib.loads(choices.read_bytes())))
+
+        monkeypatch.setattr(caskroom, "run_sudo", run_sudo)
+        choices = [
+            {
+                "choiceIdentifier": "x",
+                "choiceAttribute": "selected",
+                "attributeSetting": 0,
+            }
+        ]
+        row = cask_row(
+            "foo",
+            version="1.0",
+            artifacts=[{"pkg": ["Foo.pkg", {"choices": choices}]}, {"pkg": ["No.pkg"]}],
+        )
+
+        with pytest.raises(CellarError, match="No.pkg is not there"):
+            install_artifacts(row, staged, brew.env, dirs=dirs)
+
+        user = getpass.getuser()
+        assert calls == [
+            (
+                (
+                    "/usr/sbin/installer",
+                    "-pkg",
+                    str(staged / "Foo.pkg"),
+                    "-target",
+                    "/",
+                ),
+                {"LOGNAME": user, "USER": user, "USERNAME": user},
+                choices,
+            )
+        ]
+
     def test_conflict_puts_everything_back(self, brew, staged, dirs) -> None:
         """Test that a taken target raises and restores what was already moved."""
         taken = brew.prefix / "bin" / "foo-cli"
@@ -474,3 +545,54 @@ class TestUpgradeCask:
         assert os.readlink(staged / "a" / "Foo.ttf") == str(target)
         assert not (staged / "b").exists()
         assert not (brew.caskroom / "foo" / "2.0").exists()
+
+    def test_failed_pkg_upgrade_reinstalls_the_old_pkg(
+        self, brew, tmp_path, monkeypatch
+    ) -> None:
+        """Test that a rollback reinstalls the old pkg its `pkgutil` removed.
+
+        brew's receipt has no `pkg` stanza, so the one staged pkg is used, with
+        the new version's choices.
+        """
+        calls: list[tuple[str, ...]] = []
+        monkeypatch.setattr(caskroom, "run_sudo", lambda *a, **_: calls.append(a))
+        monkeypatch.setattr(
+            cask_directives,
+            "_run",
+            lambda *a: subprocess.CompletedProcess(a, 1, "", ""),
+        )
+        pkgutil = {"uninstall": [{"pkgutil": "org.example.foo"}]}
+        old_pkg = tmp_path / "old"
+        old_pkg.write_bytes(b"xar!old")
+        old = cask_row(
+            "foo",
+            version="1.0",
+            url="https://e.org/Foo-1.0.pkg",
+            artifacts=[{"pkg": ["Foo-1.0.pkg"]}, pkgutil],
+        )
+        staged = stage(old, old_pkg, brew.caskroom)
+        install_artifacts(old, staged, brew.env)
+
+        receipt = brew.caskroom / "foo" / ".metadata" / "INSTALL_RECEIPT.json"
+        data = json.loads(receipt.read_text())
+        receipt.write_text(json.dumps({**data, "uninstall_artifacts": [pkgutil]}))
+        calls.clear()
+
+        bad = tmp_path / "new"
+        bad.write_bytes(b"7z\xbc\xaf\x27\x1c" + b"\x00" * 32)
+        choices = {"pkg": ["Foo-2.0.pkg", {"choices": [{"choiceIdentifier": "x"}]}]}
+        new = cask_row(
+            "foo",
+            version="2.0",
+            url="https://e.org/Foo-2.0.pkg",
+            artifacts=[choices, pkgutil],
+        )
+
+        with pytest.raises(ExtractionError):
+            upgrade_cask(new, bad, brew.env)
+
+        assert [c[:3] for c in calls] == [
+            ("/usr/sbin/installer", "-pkg", str(staged / "Foo-1.0.pkg"))
+        ]
+        assert "-applyChoiceChangesXML" in calls[0]
+        assert json.loads(receipt.read_text())["uninstall_artifacts"] == [pkgutil]

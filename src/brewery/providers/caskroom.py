@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import getpass
 import hashlib
 import os
 import plistlib
@@ -23,8 +24,9 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import time
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -37,6 +39,7 @@ from brewery.core.catalog import CaskRow
 from brewery.core.config import BreweryENV
 from brewery.core.errors import CellarError, ExtractionError, LinkError
 from brewery.core.logging import BreweryLogger, get_logger
+from brewery.core.sudo import run_sudo
 from brewery.providers.cask_directives import (
     remove,
     reopen,
@@ -93,6 +96,10 @@ _LINKED = {
 
 # Where brew writes a `command_wrapper`'s script, under the staged dir
 _WRAPPERS = ".homebrew-command-wrappers"
+
+# One `installer` at a time across the native casks installing concurrently;
+# macOS runs one package install at a time anyway
+_INSTALLER = threading.Lock()
 
 _MANPAGE_SECTION = re.compile(r"\.([1-8]|n|l)(?:\.gz)?$")
 
@@ -165,10 +172,15 @@ def stage(
     token_dir.mkdir(parents=True, exist_ok=True)
 
     stamp = f"{int(time.time()):x};brewery;"
+
     # Hidden, so `_scan_casks` never reports a half-staged version
     scratch = Path(tempfile.mkdtemp(prefix=".stage-", dir=token_dir))
     try:
-        name = _url_name(row.url) or row.token
+        # Names a bare download from Content-Disposition
+        pkgs = [a["pkg"][0] for a in row.artifacts or [] if "pkg" in a]
+        own = len(pkgs) == 1 and Path(pkgs[0]).name == pkgs[0]  # No dirs or '..'
+        name = pkgs[0] if own else _url_name(row.url) or row.token
+
         if isinstance(download, Mapping):
             for path, file in download.items():
                 (scratch / path).parent.mkdir(parents=True, exist_ok=True)
@@ -300,8 +312,9 @@ def install_artifacts(
 
     Apps, suites, fonts, Quick Look plugins and generic artifacts are moved out,
     leaving a symlink in the version dir that brew's uninstall moves them back
-    over. Binaries, manpages and completions are symlinked into the prefix. On
-    failure, whatever was already installed is put back.
+    over; binaries, manpages and completions are symlinked into the prefix; a
+    `pkg` is run through `installer`; on failure, whatever was already moved or
+    linked is put back; an installed pkg stays, as brew leaves it.
 
     Args:
         row: The cask's catalog row.
@@ -316,7 +329,8 @@ def install_artifacts(
 
     Raises:
         LinkError: If a target is already taken.
-        CellarError: If an artifact's source is missing or can't be moved.
+        CellarError: If an artifact's source is missing or can't be moved, or a
+            pkg fails to install.
     """
     overrides = dirs or {}
     explicit = dict(explicit or {})
@@ -327,6 +341,10 @@ def install_artifacts(
         # The feed lists artifacts in brew's install order: apps before binaries into them
         for stanza in row.artifacts or []:
             for key, args in stanza.items():
+                if key == "pkg":
+                    _install_pkg(sources / args[0], args[1] if len(args) > 1 else {})
+                    continue
+
                 if key not in _MOVED and key not in _LINKED:
                     continue  # `uninstall`, `zap` and the feed's own `target` hint
 
@@ -468,9 +486,10 @@ def upgrade_cask(
     lists it), then its artifacts are set aside in its version dir; an app dir
     the new version also installs is emptied rather than removed, since macOS
     treats a removed app as uninstalled; if staging or installing the new version
-    fails, the old version, its receipt and its artifacts are put back, and any
-    apps it quit are reopened; the user's Gatekeeper approval of the old apps
-    carries over to the new ones when they're signed by the same identity.
+    fails, the old version, its receipt and its artifacts are put back, its pkgs
+    reinstalled if its `uninstall pkgutil` removed them, and any apps it quit are
+    reopened; the user's Gatekeeper approval of the old apps carries over to the
+    new ones when they're signed by the same identity.
 
     Args:
         row: The new version's catalog row, already localised.
@@ -525,11 +544,12 @@ def upgrade_cask(
 
     directives = [d for stanza in old for d in stanza.get("uninstall", [])]
 
-    closed = run_directives(directives, deferred=False, upgrade=True)
+    closed: list[str] = []
     done: list[tuple[str, Path, Path]] = []
     backed_up = False
 
     try:
+        closed = run_directives(directives, deferred=False, upgrade=True)
         _set_aside(old, _sources(old_specs, old_staged), env, old_dirs, keep, done)
         run_directives(directives, deferred=True)
         for path, backup in backups:
@@ -572,6 +592,11 @@ def upgrade_cask(
                 p.write_bytes(data)
 
             _put_back(done)
+
+            # Maybe not needed if a failure occurs before `pkgutil` runs
+            if any("pkgutil" in d for d in directives):
+                _reinstall_pkgs(old, _sources(old_specs, old_staged), row)
+
             reopen(closed, old_apps)
 
         except (OSError, CellarError) as exc:
@@ -999,6 +1024,64 @@ def _write_wrapper(
     path.chmod(0o555)
 
 
+def _install_pkg(path: Path, options: Mapping[str, Any]) -> None:
+    """Install a staged pkg with `installer`.
+
+    Run without the user's environment, as Installer.app runs a pkg's scripts.
+
+    Args:
+        path: The staged pkg.
+        options: The stanza's options; `choices` become `-applyChoiceChangesXML`.
+
+    Raises:
+        CellarError: If the pkg isn't there, or `installer` fails.
+    """
+    if not path.exists():
+        raise CellarError(f"{path} is not there", path=path)
+
+    user = getpass.getuser()
+    args = ["/usr/sbin/installer", "-pkg", str(path), "-target", "/"]
+
+    with _INSTALLER, tempfile.NamedTemporaryFile(suffix=".xml") as choices:
+        if options.get("choices"):
+            choices.write(plistlib.dumps(options["choices"]))
+            choices.flush()
+            args += ["-applyChoiceChangesXML", choices.name]
+
+        run_sudo(*args, env={"LOGNAME": user, "USER": user, "USERNAME": user})
+
+
+def _reinstall_pkgs(
+    old: Sequence[Mapping[str, Any]], sources: Path, row: CaskRow
+) -> None:
+    """Reinstall the old version's pkgs from its staged dir, after a failed upgrade.
+
+    Args:
+        old: The old version's receipt artifacts.
+        sources: The old version's staged dir, as `_sources` gives it.
+        row: The new version's catalog row.
+    """
+
+    def pkgs(artifacts: Iterable[Mapping[str, Any]]) -> list[list[Any]]:
+        return [
+            args for stanza in artifacts for k, args in stanza.items() if k == "pkg"
+        ]
+
+    stanzas: list[list[Any]] = pkgs(old)
+    if not stanzas:
+        staged = [p for ext in ("*.pkg", "*.mpkg") for p in sources.rglob(ext)]
+        if len(staged) != 1:
+            log.warning(f"can't tell which pkg to reinstall {row.token} from")
+            return
+
+        new = pkgs(row.artifacts or [])
+        options = new[0][1] if len(new) == 1 and len(new[0]) > 1 else {}
+        stanzas = [[str(staged[0].relative_to(sources)), options]]
+
+    for args in stanzas:
+        _install_pkg(sources / args[0], args[1] if len(args) > 1 else {})
+
+
 def _move_out(source: Path, target: Path, *, reuse: bool = False) -> None:
     """Move an artifact to its target, leaving a symlink to it at the source.
 
@@ -1185,7 +1268,7 @@ def _relocate(source: Path, target: Path) -> None:
 
 
 def _unpack(download: Path, dest: Path, *, name: str) -> None:
-    """Unpack a dmg, zip or tar into `dest`, or copy any other file in as `name`.
+    """Unpack a dmg, zip or tar into `dest`, or copy any other file (a pkg) in as `name`.
 
     The cache names files by digest, so the container is told by its contents.
 
@@ -1210,6 +1293,9 @@ def _unpack(download: Path, dest: Path, *, name: str) -> None:
 
     elif head.startswith(_TAR_MAGIC) or head[257:262] == b"ustar":
         extract_tar(download, dest)
+
+    elif head.startswith(b"xar!") and name.endswith((".pkg", ".mpkg")):
+        clone_tree(download, dest / name)  # A flat pkg, which `installer` takes as is
 
     elif kind := _UNSUPPORTED.get(head[:4]):
         raise ExtractionError(f"can't unpack a {kind} archive", archive=download)

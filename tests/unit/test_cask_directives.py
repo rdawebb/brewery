@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import getpass
 import os
+import plistlib
 import signal
 import subprocess
 from pathlib import Path
@@ -64,13 +65,24 @@ class TestResolve:
             ("/Library", True),
             ("~", True),
             ("~/Desktop", True),
+            ("~/Library/Keychains/login.keychain-db", True),
             ("~/x", False),
         ],
     )
     def test_undeletable(self, home, path, expected) -> None:
-        """Test brew's system and home lists."""
+        """Test brew's system and home lists, and its protected containers."""
         path = path.replace("~", str(home))
         assert directives.undeletable(Path(path)) is expected
+
+    def test_undeletable_resolves_the_parent(self, tmp_path, monkeypatch) -> None:
+        """Test that a protected dir reached through a symlinked parent is kept."""
+        home = tmp_path.resolve() / "home"
+        (home / "Desktop").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        (tmp_path / "link").symlink_to(home)
+
+        assert directives.undeletable(tmp_path / "link" / "Desktop")
+        assert not directives.undeletable(tmp_path / "link" / "x")
 
 
 class TestRmdir:
@@ -93,6 +105,137 @@ class TestRmdir:
         directives._rmdir([str(tmp_path / "app")])
 
         assert (tmp_path / "app" / "a" / "keep").exists()
+
+
+_RUN = subprocess.run  # The real one, for test sudo commands run as the user
+
+
+@pytest.fixture
+def sudo_calls(monkeypatch) -> list[tuple[str, ...]]:
+    """Record each sudo command, running the `xargs` ones as the user.
+
+    Args:
+        monkeypatch: The pytest monkeypatch fixture.
+
+    Returns:
+        The commands, in order.
+    """
+    calls: list[tuple[str, ...]] = []
+
+    def run_sudo(*args: str, stdin: bytes = b"", check: bool = True) -> None:
+        calls.append(args)
+        if args[0] == "/usr/bin/xargs":
+            proc = _RUN(args, input=stdin, capture_output=True, check=False)
+            assert not check or not proc.returncode, proc.stderr
+
+    monkeypatch.setattr(directives, "run_sudo", run_sudo)
+
+    return calls
+
+
+class TestPkgutil:
+    """Tests for removing an installed package's files, as brew's `Cask::Pkg` does."""
+
+    def test_removes_files_and_emptied_dirs_then_forgets(
+        self, tmp_path, monkeypatch, sudo_calls
+    ) -> None:
+        """Test that only the BOM's files go, with dirs they leave empty, then forget."""
+        root = tmp_path / "root"
+        (root / "Foo.app" / "Contents").mkdir(parents=True)
+        (root / "Foo.app" / "Contents" / "foo").write_text("")
+        (root / "Foo.app" / ".DS_Store").write_text("")
+        (root / "lib").mkdir()
+        (root / "lib" / "link").symlink_to("../Foo.app")
+        (root / "lib" / "dangling").symlink_to("gone")  # Not in the BOM
+        (root / "shared").mkdir()
+        (root / "shared" / "mine").write_text("")  # Not in the BOM
+        (tmp_path / "escape").write_text("")
+        bom = [
+            "Foo.app",
+            "Foo.app/Contents",
+            "Foo.app/Contents/foo",
+            "lib",
+            "lib/link",
+            "shared",
+            "../escape",
+            "missing",
+        ]
+        receipt = {
+            "volume": "/",
+            "install-location": str(root),
+            "paths": {p: {} for p in bom},
+        }
+
+        def run(cmd: list[str], **_: object) -> subprocess.CompletedProcess:
+            assert cmd == ["pkgutil", "--export-plist", "org.example.foo"]
+            return subprocess.CompletedProcess(cmd, 0, plistlib.dumps(receipt), b"")
+
+        monkeypatch.setattr(
+            directives,
+            "_run",
+            lambda *a: subprocess.CompletedProcess(a, 0, "org.example.foo\n", ""),
+        )
+        monkeypatch.setattr(directives.subprocess, "run", run)
+
+        directives._pkgutil(["org\\.example\\..*"])
+
+        assert sorted(p.name for p in root.rglob("*")) == ["mine", "shared"]
+        assert (tmp_path / "escape").exists()
+        assert sudo_calls[-1] == ("/usr/sbin/pkgutil", "--forget", "org.example.foo")
+
+    @pytest.mark.parametrize(("stderr", "warned"), [("", False), ("Error: bad", True)])
+    def test_failed_listing_warns(
+        self, monkeypatch, caplog, sudo_calls, stderr: str, warned: bool
+    ) -> None:
+        """Test that a listing error warns, but a bare exit 1 is just no match."""
+        import logging
+
+        monkeypatch.setattr(
+            directives,
+            "_run",
+            lambda *a: subprocess.CompletedProcess(a, 1, "", stderr),
+        )
+
+        with caplog.at_level(logging.WARNING, logger=directives.__name__):
+            directives._pkgutil(["["])
+
+        assert any("Error: bad" in r.getMessage() for r in caplog.records) is warned
+        assert sudo_calls == []
+
+    def test_unreadable_package_needs_brew(self, monkeypatch, sudo_calls) -> None:
+        """Test that a package pkgutil can't export raises before removing anything."""
+        monkeypatch.setattr(
+            directives.subprocess,
+            "run",
+            lambda cmd, **_: subprocess.CompletedProcess(cmd, 1, b"", b"no such pkg"),
+        )
+
+        with pytest.raises(CellarError, match="org.example.foo"):
+            directives._remove_pkg("org.example.foo")
+
+        assert sudo_calls == []
+
+
+def test_delete_retries_what_the_user_cant_with_sudo(
+    home, monkeypatch, sudo_calls
+) -> None:
+    """Test that permission failures are removed in one sudo call, as brew would."""
+    for name in ("mine", "roots", "also"):
+        (home / name).write_text("")
+
+    def remove(path: Path) -> None:
+        if path.name != "mine":
+            raise PermissionError(13, "Permission denied")
+        path.unlink()
+
+    monkeypatch.setattr(directives, "remove", remove)
+
+    directives._delete(["~/mine", "~/roots", "~/also"])
+
+    assert not (home / "mine").exists()
+    assert not (home / "roots").exists()
+    assert not (home / "also").exists()
+    assert sudo_calls == [("/usr/bin/xargs", "-0", "--", "/bin/rm", "-r", "-f", "--")]
 
 
 class TestLaunchctl:
