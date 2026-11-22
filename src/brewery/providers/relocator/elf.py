@@ -144,6 +144,7 @@ def _read_elf(reader: _Reader) -> _ElfInfo:
         return _ElfInfo(interp, None, None)
 
     def _s(o: int | None) -> str | None:
+        """Return the string at strtab offset `o`, or None."""
         if o is None:
             return None
 

@@ -36,7 +36,7 @@ def upgrades(monkeypatch):
         monkeypatch: The pytest monkeypatch fixture.
 
     Returns:
-        A callable configuring the four-tuple result and returning the call log.
+        A callable configuring the five-tuple result and returning the call log.
     """
 
     def _arrange(upgraded=(), current=(), advisories=(), failures=(), raises=None):
@@ -49,7 +49,13 @@ def upgrades(monkeypatch):
             if raises is not None:
                 raise raises
 
-            return list(upgraded), list(current), list(advisories), list(failures)
+            return (
+                list(upgraded),
+                list(current),
+                list(advisories),
+                list(failures),
+                [],
+            )
 
         monkeypatch.setattr(upgrade_mod, "upgrade_packages", _upgrade)
 

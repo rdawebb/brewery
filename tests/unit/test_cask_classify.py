@@ -35,9 +35,9 @@ class TestClassify:
         ("artifacts", "reason"),
         [
             pytest.param(
-                [{"installer": [{"manual": "Install.app"}]}],
-                "`installer` artifact",
-                id="installer",
+                [{"prefpane": ["Foo.prefPane"]}],
+                "`prefpane` artifact",
+                id="prefpane",
             ),
             pytest.param(
                 [{"app": ["Foo.app"]}, {"postflight_steps": None}],
@@ -45,15 +45,23 @@ class TestClassify:
                 id="postflight_steps",
             ),
             pytest.param(
-                [{"app": ["Foo.app"]}, {"uninstall": [{"quit": "a"}, {"script": "b"}]}],
-                "`uninstall script`",
-                id="uninstall_script",
+                [{"app": ["Foo.app"]}, {"uninstall": [{"quit": "a"}, {"kext": "b"}]}],
+                "`uninstall kext`",
+                id="uninstall_kext",
             ),
         ],
     )
     def test_foreign_artifacts_go_to_brew(self, artifacts, reason) -> None:
         """Test that anything outside the native artifact set goes to brew."""
         assert classify(cask_row(artifacts=artifacts), SEQUOIA) == reason
+
+    def test_installer_and_scripts_are_native(self) -> None:
+        """Test that `installer` and the `uninstall` scripts keep the cask native."""
+        artifacts = [
+            {"installer": [{"script": {"executable": "install.sh"}}]},
+            {"uninstall": [{"early_script": "a"}, {"script": {"executable": "b"}}]},
+        ]
+        assert classify(cask_row(artifacts=artifacts), SEQUOIA) == ""
 
     def test_login_item_is_native(self) -> None:
         """Test that an `uninstall login_item` keeps the cask native."""
@@ -460,7 +468,15 @@ class TestNeedsSudo:
         ("artifacts", "expected"),
         [
             pytest.param([{"pkg": ["Foo.pkg"]}], True, id="pkg"),
-            pytest.param([{"installer": [{"script": "x"}]}], True, id="installer"),
+            pytest.param(
+                [{"installer": [{"script": {"executable": "x", "sudo": True}}]}],
+                True,
+                id="sudo_script",
+            ),
+            pytest.param(
+                [{"installer": [{"script": {"executable": "x"}}]}], False, id="script"
+            ),
+            pytest.param([{"installer": [{"manual": "X.app"}]}], False, id="manual"),
             pytest.param(
                 [{"uninstall": [{"pkgutil": "org.example.foo"}]}], False, id="pkgutil"
             ),
@@ -474,7 +490,7 @@ class TestNeedsSudo:
         ],
     )
     def test_needs_sudo(self, artifacts, expected) -> None:
-        """Test that installing pkg-like artifacts needs sudo, and pkgutil doesn't."""
+        """Test that a pkg or sudo installer script needs sudo, and pkgutil doesn't."""
         assert needs_sudo(artifacts) is expected
 
     @pytest.mark.parametrize(
@@ -487,3 +503,12 @@ class TestNeedsSudo:
         """Test that a removal counts pkgutil in the stanzas it runs, and not `pkg`."""
         artifacts = [{"pkg": ["Foo.pkg"]}, {"zap": [{"pkgutil": "org.example.foo"}]}]
         assert needs_sudo(artifacts, directives=directives) is expected
+
+    @pytest.mark.parametrize("key", ["script", "early_script"])
+    @pytest.mark.parametrize(("sudo", "expected"), [(True, True), (False, False)])
+    def test_uninstall_script_needs_sudo_when_it_asks(
+        self, key, sudo, expected
+    ) -> None:
+        """Test that an uninstall script needs sudo only when it says so."""
+        artifacts = [{"uninstall": [{key: {"executable": "x", "sudo": sudo}}]}]
+        assert needs_sudo(artifacts, directives=("uninstall",)) is expected

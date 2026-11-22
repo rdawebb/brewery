@@ -52,9 +52,9 @@ def _failing_result(attr: str):
     """
     failure = [("wget", "boom")]
     shapes = {
-        "install_packages": ([], failure),
+        "install_packages": ([], failure, []),
         "uninstall_packages": ([], failure),
-        "upgrade_packages": ([], [], [], failure),
+        "upgrade_packages": ([], [], [], failure, []),
         "cleanup_packages": ([], failure),
     }
     result = shapes[attr]
@@ -88,9 +88,9 @@ class TestFailureExitCodes:
     def test_a_clean_run_exits_zero(self, run, monkeypatch, argv, module, attr) -> None:
         """Test that the same commands exit 0 when nothing failed."""
         shapes = {
-            "install_packages": ([], []),
+            "install_packages": ([], [], []),
             "uninstall_packages": ([], []),
-            "upgrade_packages": ([], [], [], []),
+            "upgrade_packages": ([], [], [], [], []),
             "cleanup_packages": ([], []),
         }
 

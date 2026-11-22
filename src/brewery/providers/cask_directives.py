@@ -1,8 +1,8 @@
 """Run a cask's `uninstall` and `zap` directives.
 
-macOS-only, like native casks; `pkgutil`, and a `delete` the user can't do, run
-through sudo as brew's do; other steps that would need root raise instead, and
-the cask goes to brew.
+macOS-only, like native casks; `pkgutil`, a `delete` the user can't do and a
+script asking for it run through sudo as brew's do; other steps that would need
+root raise instead, and the cask goes to brew.
 """
 
 # This file contains code derived from Homebrew (https://github.com/Homebrew/brew)
@@ -13,6 +13,7 @@ the cask goes to brew.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import getpass
 import glob
@@ -36,14 +37,44 @@ log: BreweryLogger = get_logger(name=__name__)
 
 # `ORDERED_DIRECTIVES`, less those `classify_uninstall` sends to brew
 _ORDER = (
+    "early_script",
     "launchctl",
     "quit",
     "signal",
     "login_item",
+    "script",
     "pkgutil",
     "delete",
     "trash",
     "rmdir",
+)
+
+# What `bin/brew` passes on from the user's environment, besides `HOMEBREW_*`
+_SCRIPT_ENV = frozenset(
+    {
+        "BAT_CONFIG_PATH",
+        "BAT_THEME",
+        "HOME",
+        "SHELL",
+        "TERM",
+        "TERMINFO",
+        "TERMINFO_DIRS",
+        "COLUMNS",
+        "DISPLAY",
+        "LOGNAME",
+        "USER",
+        "CI",
+        "SSH_AUTH_SOCK",
+        "SUDO_ASKPASS",
+        "http_proxy",
+        "https_proxy",
+        "ftp_proxy",
+        "no_proxy",
+        "all_proxy",
+        "HTTPS_PROXY",
+        "FTP_PROXY",
+        "ALL_PROXY",
+    }
 )
 
 _RUNNING_APPS_JS = """
@@ -91,15 +122,21 @@ def run_directives(
     deferred: bool,
     upgrade: bool = False,
     apps: Sequence[Path] = (),
+    staged: Path | None = None,
+    prefix: Path | None = None,
 ) -> list[str]:
     """Run the stanzas' directives, one directive at a time across all of them.
 
     Args:
-        stanzas: The `uninstall` (and with `--zap`, `zap`) directive dicts, in order.
+        stanzas: The `uninstall` (and with `--zap`, `zap`) directive dicts, in
+            order, with path placeholders filled in.
         deferred: True for `rmdir`, which runs once the artifacts are removed.
         upgrade: Skip `login_item`, and `signal` unless the stanza's `on_upgrade`
             lists it.
         apps: The cask's installed apps, whose login items `login_item` removes too.
+        staged: The installed version's sources, which a script's relative
+            executable is in; needed for `script` and `early_script`.
+        prefix: The Homebrew prefix, whose `bin` and `sbin` lead a script's PATH.
 
     Returns:
         The bundle ids `quit` closed, for an upgrade to reopen.
@@ -127,6 +164,13 @@ def run_directives(
 
             if name == "login_item":
                 _login_item(_flat(stanza[name]), apps)
+
+            elif name in ("script", "early_script"):
+                if staged is None or prefix is None:
+                    raise CellarError(f"`{name}` needs the staged dir and prefix")
+
+                run_script(stanza[name], staged, prefix)
+                time.sleep(1)  # Lets whatever the uninstaller started finish
 
             else:
                 closed += _RUNNERS[name](_flat(stanza[name])) or []
@@ -190,6 +234,67 @@ def _run(*args: str) -> subprocess.CompletedProcess[str]:
         The completed process, with text stdout and stderr.
     """
     return subprocess.run(args, capture_output=True, text=True, check=False)
+
+
+def run_script(spec: Any, staged: Path, prefix: Path) -> None:
+    """Run an `installer script`, or an uninstall `script`, as brew does.
+
+    The script sees brew's filtered environment rather than brewery's, with the
+    prefix's `bin` and `sbin` leading PATH; it gets `input` on stdin, and its
+    output is kept for the error if it fails.
+
+    Args:
+        spec: The stanza's value: an executable, or a dict of `executable`,
+            `args`, `input`, `sudo` and `must_succeed`.
+        staged: Where a relative executable is; one not there is looked up on PATH.
+        prefix: The Homebrew prefix.
+
+    Raises:
+        CellarError: If there's no such executable, or it fails and `must_succeed`
+            isn't false.
+    """
+    spec = {"executable": spec} if isinstance(spec, str) else spec
+    given = spec.get("executable") if isinstance(spec, Mapping) else None
+    if not isinstance(given, str) or not given:
+        raise CellarError("script has no executable")
+
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if v and (k in _SCRIPT_ENV or k.startswith("HOMEBREW_"))
+    }
+    env["PATH"] = f"{prefix}/bin:{prefix}/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+    exe = staged / os.path.expanduser(given)  # An absolute path replaces `staged`
+    if exe.exists():
+        if not os.access(exe, os.X_OK):
+            with contextlib.suppress(OSError):  # Root's: running it says why
+                exe.chmod(exe.stat().st_mode | 0o111)
+
+    elif found := "/" not in given and shutil.which(given, path=env["PATH"]):
+        exe = Path(found)
+
+    else:
+        raise CellarError(f"script {given} does not exist")
+
+    args = [str(exe), *map(str, spec.get("args") or [])]
+    stdin = "".join(_flat(spec.get("input", []))).encode()
+    if spec.get("sudo") is True:
+        proc = run_sudo(*args, stdin=stdin, env=env, check=False)
+
+    else:
+        try:
+            proc = subprocess.run(
+                args, input=stdin, env=env, capture_output=True, check=False
+            )
+
+        except OSError as exc:
+            raise CellarError(f"can't run {given}: {exc}") from exc
+
+    if proc.returncode and spec.get("must_succeed") is not False:
+        out = (proc.stderr or proc.stdout).decode(errors="replace").strip()
+        tail = "\n".join(out.splitlines()[-5:])
+        raise CellarError(f"{given} failed ({proc.returncode}): {tail}")
 
 
 def _wildcard(pattern: str) -> re.Pattern[str]:

@@ -25,6 +25,7 @@ from brewery.providers.caskroom import (
     _installed_specs,
     install_artifacts,
     stage,
+    uninstall_cask,
     upgrade_cask,
 )
 
@@ -596,3 +597,106 @@ class TestUpgradeCask:
         ]
         assert "-applyChoiceChangesXML" in calls[0]
         assert json.loads(receipt.read_text())["uninstall_artifacts"] == [pkgutil]
+
+
+def _scripted(version: str):
+    """A cask installed and removed by scripts, through path placeholders.
+
+    Args:
+        version: The cask version.
+
+    Returns:
+        The CaskRow.
+    """
+    marker = "$HOMEBREW_PREFIX/marker"
+    return cask_row(
+        "foo",
+        version=version,
+        url="https://e.org/foo",
+        artifacts=[
+            {"installer": [{"script": {"executable": "setup.sh", "args": [marker]}}]},
+            {
+                "uninstall": [
+                    {"script": {"executable": "undo.sh", "args": [marker]}},
+                    {"delete": "$HOMEBREW_PREFIX/extra"},
+                ]
+            },
+        ],
+    )
+
+
+class TestInstallerScripts:
+    """Tests for `installer` and the uninstall scripts."""
+
+    @pytest.fixture
+    def scripts(self, tmp_path, monkeypatch) -> dict[str, Path]:
+        """Non-executable install and uninstall scripts, as a download.
+
+        Args:
+            tmp_path: The pytest tmp_path fixture.
+            monkeypatch: The pytest monkeypatch fixture, to skip brew's 1s pause.
+
+        Returns:
+            The download mapping.
+        """
+        monkeypatch.setattr(cask_directives.time, "sleep", lambda _: None)
+        setup, undo = tmp_path / "setup", tmp_path / "undo"
+        setup.write_text('#!/bin/sh\necho ran >> "$1"\n')
+        undo.write_text('#!/bin/sh\nrm "$1"\n')
+
+        return {"setup.sh": setup, "undo.sh": undo}
+
+    def test_script_installs_and_uninstall_script_removes(self, brew, scripts) -> None:
+        """Test both scripts run, and placeholders are filled in for `delete` too."""
+        row = _scripted("1.0")
+        staged = stage(row, scripts, brew.caskroom)
+
+        assert install_artifacts(row, staged, brew.env) == ""
+
+        marker = brew.prefix / "marker"
+        assert marker.read_text() == "ran\n"
+
+        (brew.prefix / "extra").write_text("")
+        uninstall_cask("foo", brew.env)
+
+        assert not marker.exists()
+        assert not (brew.prefix / "extra").exists()
+
+    def test_manual_installer_is_left_to_the_user(self, brew, tmp_path) -> None:
+        """Test that a manual installer is staged and how to open it returned."""
+        (tmp_path / "x").write_text("")
+        row = cask_row(
+            "foo",
+            version="1.0",
+            url="https://e.org/foo",
+            artifacts=[{"installer": [{"manual": "Setup.app"}]}],
+        )
+        staged = stage(row, {"Setup.app/x": tmp_path / "x"}, brew.caskroom)
+
+        note = install_artifacts(row, staged, brew.env)
+
+        assert note.startswith("only provides a manual installer.")
+        assert note.endswith(f"\n  open {staged / 'Setup.app'}")
+
+    def test_failed_upgrade_reruns_the_old_installer(
+        self, brew, tmp_path, scripts
+    ) -> None:
+        """Test that a rollback reruns the installer the uninstall script undid.
+
+        brew's receipt has no `installer` stanza, so the new version's is used,
+        its executable being staged in the old version.
+        """
+        old = _scripted("1.0")
+        install_artifacts(old, stage(old, scripts, brew.caskroom), brew.env)
+        receipt = brew.caskroom / "foo" / ".metadata" / "INSTALL_RECEIPT.json"
+        data = json.loads(receipt.read_text())
+        uninstall = [a for a in old.artifacts if "uninstall" in a]
+        receipt.write_text(json.dumps({**data, "uninstall_artifacts": uninstall}))
+
+        bad = tmp_path / "new"
+        bad.write_bytes(b"7z\xbc\xaf\x27\x1c" + b"\x00" * 32)
+
+        with pytest.raises(ExtractionError):
+            upgrade_cask(_scripted("2.0"), bad, brew.env)
+
+        assert (brew.prefix / "marker").read_text() == "ran\n"

@@ -18,6 +18,7 @@ from brewery.cli.error_formatting import CommandFailed, command_error
 from brewery.cli.output import (
     confirm_or_cancel,
     pkg_line,
+    print_caveats,
     print_failures,
     print_result,
     sudo_prompts,
@@ -60,7 +61,7 @@ def install(
     with _repository() as repo:
         reporter = make_reporter(console)
         with sudo_prompts(reporter):
-            installed, failures = run_async(
+            installed, failures, caveats = run_async(
                 coro=install_packages(repo, names, target, progress=reporter)
             )
 
@@ -70,7 +71,10 @@ def install(
             style="bold green",
             bullet="→",
         )
+
         print_failures(f"✗ Failed to install {len(failures)} package(s)", failures)
+
+        print_caveats(caveats)
 
         sys.stdout.write("\n")
         if failures:

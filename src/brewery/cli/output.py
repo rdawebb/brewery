@@ -153,6 +153,7 @@ def sudo_ask(
     """
 
     def ask(prompt: str) -> str | None:
+        """Read the password at `prompt`, or None with no terminal or on Ctrl-D."""
         if not console.is_terminal:
             return None
 
@@ -265,6 +266,16 @@ def print_failures(header: str, failures: Sequence[tuple[str, str]]) -> None:
 
     for name, reason in failures:
         console.print(f"  [dim]-[/dim] {name} - {reason}")
+
+
+def print_caveats(caveats: Sequence[tuple[str, str]]) -> None:
+    """Print (name, text) caveats, steps a run left to the user; no-op when empty.
+
+    Args:
+        caveats: Pairs of package name and what's left to do.
+    """
+    for name, text in caveats:
+        console.print(Text.assemble("\n", (name, "bold"), " ", text))
 
 
 def print_advisories(advisories: Sequence[tuple[str, str]]) -> None:

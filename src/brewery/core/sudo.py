@@ -126,6 +126,7 @@ def askpass(ask: Callable[[str], str | None]) -> Generator[None]:
 
     class Handler(socketserver.StreamRequestHandler):
         def handle(self) -> None:
+            """Answer one askpass request, but only from a sudo."""
             prompt = self.rfile.read().decode(errors="replace")
             try:
                 pid = _peer_parent(self.connection)

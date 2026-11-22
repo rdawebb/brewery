@@ -19,6 +19,7 @@ from brewery.cli.output import (
     confirm_or_cancel,
     pkg_line,
     print_advisories,
+    print_caveats,
     print_failures,
     print_result,
     sudo_prompts,
@@ -89,7 +90,7 @@ def upgrade(
 
         reporter = make_reporter(console)
         with sudo_prompts(reporter):
-            upgraded, current, advisories, failures = run_async(
+            upgraded, current, advisories, failures, caveats = run_async(
                 coro=upgrade_packages(
                     repo, names, kind, greedy=greedy, progress=reporter
                 )
@@ -110,13 +111,15 @@ def upgrade(
 
         if current:
             print_result(
-                f"\n{len(current)} already up-to-date:\n",
+                f"{len(current)} already up-to-date:\n",
                 map(pkg_line, current),
                 style="dim",
                 line_style="dim",
             )
 
         print_failures(f"\n✗ {len(failures)} failed:", failures)
+
+        print_caveats(caveats)
 
         sys.stdout.write("\n")
         if failures:

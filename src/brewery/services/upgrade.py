@@ -19,7 +19,7 @@ from brewery.services.cask import upgrade_casks
 if TYPE_CHECKING:
     from brewery.providers.orchestrator import InstallReport, ProgressPort
 
-UpgradeOutcome = tuple[list[Package], list[Package], Notes, Notes]
+UpgradeOutcome = tuple[list[Package], list[Package], Notes, Notes, Notes]
 
 
 def _select_outdated(outdated: list[Package]) -> tuple[list[Package], Notes]:
@@ -245,7 +245,7 @@ async def upgrade_packages(
     cask: PackageBackend = brew.cask_backend,
     progress: ProgressPort | None = None,
 ) -> UpgradeOutcome:
-    """Upgrade packages and report upgraded, up-to-date, advisories, and failures.
+    """Upgrade packages and report upgraded, up-to-date, advisories, failures, caveats.
 
     Naming a formula that is already current reports it as up-to-date rather
     than reinstalling it.
@@ -262,7 +262,7 @@ async def upgrade_packages(
 
     Returns:
         Tuple of (upgraded packages, already up-to-date packages, (name, reason)
-        advisories, (name, reason) failures).
+        advisories, (name, reason) failures, (name, text) caveats).
 
     Raises:
         BrewCommandError: Propagated from provider.
@@ -297,9 +297,10 @@ async def upgrade_packages(
         )
 
     cask_failures: Notes = []
+    caveats: Notes = []
     try:
         if cask_names:
-            cask_failures = await upgrade_casks(
+            cask_failures, caveats = await upgrade_casks(
                 cask_names,
                 repo=repo,
                 backend=cask,
@@ -332,4 +333,4 @@ async def upgrade_packages(
     ]
     upgraded, current = _classify_outcome(touched, pre_versions, post)
 
-    return upgraded, current, advisories, failures + pipeline_failures
+    return upgraded, current, advisories, failures + pipeline_failures, caveats

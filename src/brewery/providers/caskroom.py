@@ -44,6 +44,7 @@ from brewery.providers.cask_directives import (
     remove,
     reopen,
     run_directives,
+    run_script,
     undeletable,
 )
 from brewery.providers.cellar import clone_tree
@@ -100,6 +101,9 @@ _WRAPPERS = ".homebrew-command-wrappers"
 # One `installer` at a time across the native casks installing concurrently;
 # macOS runs one package install at a time anyway
 _INSTALLER = threading.Lock()
+
+# Uninstall directives that can remove what a pkg or installer script installed
+_REMOVES_INSTALLED = ("pkgutil", "script", "early_script")
 
 _MANPAGE_SECTION = re.compile(r"\.([1-8]|n|l)(?:\.gz)?$")
 
@@ -256,6 +260,7 @@ def _write_metadata(row: CaskRow, token_dir: Path, *, on_request: bool) -> None:
         on_request: Whether the user asked for it, rather than a dependent cask.
     """
     version = str(row.version)
+
     # The `target` key is install-time only
     artifacts = [
         {k: v for k, v in stanza.items() if k != "target"}
@@ -307,14 +312,15 @@ def install_artifacts(
     languages: Sequence[str] = (),
     explicit: Mapping[str, Any] | None = None,
     reuse: Collection[Path] = (),
-) -> None:
+) -> str:
     """Move and link a staged cask's artifacts into place, as brew does.
 
     Apps, suites, fonts, Quick Look plugins and generic artifacts are moved out,
     leaving a symlink in the version dir that brew's uninstall moves them back
     over; binaries, manpages and completions are symlinked into the prefix; a
-    `pkg` is run through `installer`; on failure, whatever was already moved or
-    linked is put back; an installed pkg stays, as brew leaves it.
+    `pkg` is run through `installer`, and an `installer script` run; on failure,
+    whatever was already moved or linked is put back; what a pkg or script
+    installed stays.
 
     Args:
         row: The cask's catalog row.
@@ -327,20 +333,30 @@ def install_artifacts(
         explicit: The installed config's `explicit` part, which an upgrade keeps.
         reuse: Targets an upgrade emptied rather than removed, to move into.
 
+    Returns:
+        How to run an `installer manual`'s installer, which is left to the user;
+        empty if none.
+
     Raises:
         LinkError: If a target is already taken.
         CellarError: If an artifact's source is missing or can't be moved, or a
-            pkg fails to install.
+            pkg or script fails.
     """
     overrides = dirs or {}
     explicit = dict(explicit or {})
     dirs = {**DEFAULT_DIRS, **overrides, **_dir_values(explicit)}
     sources = _sources(row.url_specs, staged)
     done: list[tuple[str, Path, Path]] = []
+    notes: list[str] = []
+
     try:
         # The feed lists artifacts in brew's install order: apps before binaries into them
         for stanza in row.artifacts or []:
             for key, args in stanza.items():
+                if key == "installer":
+                    notes += _installer(args, sources, env, dirs)
+                    continue
+
                 if key == "pkg":
                     _install_pkg(sources / args[0], args[1] if len(args) > 1 else {})
                     continue
@@ -394,6 +410,8 @@ def install_artifacts(
     }
     (staged.parent / ".metadata" / "config.json").write_bytes(dumps_bytes(config))
 
+    return "\n".join(notes)
+
 
 def read_receipt(token_dir: Path) -> dict[str, Any] | None:
     """An installed cask's `INSTALL_RECEIPT.json`.
@@ -435,7 +453,9 @@ def uninstall_cask(token: str, env: BreweryENV, *, zap: bool = False) -> None:
     dirs = _config_dirs(config)
     artifacts = receipt.get("uninstall_artifacts") or []
     keys = ("uninstall", "zap") if zap else ("uninstall",)
-    directives = [d for stanza in artifacts for k in keys for d in stanza.get(k, [])]
+    directives = _expand_all(
+        [d for stanza in artifacts for k in keys for d in stanza.get(k, [])], env, dirs
+    )
 
     # Before any directive runs, so a bad artifact quits no app
     placed = [
@@ -446,7 +466,14 @@ def uninstall_cask(token: str, env: BreweryENV, *, zap: bool = False) -> None:
     ]
 
     apps = [target for key, target in placed if key == "app"]
-    run_directives(directives, deferred=False, apps=apps)
+    run_directives(
+        directives,
+        deferred=False,
+        apps=apps,
+        staged=_sources(_installed_specs(token_dir, version), token_dir / version),
+        prefix=env.prefix,
+    )
+
     reload = False
     cellar = env.cellar.resolve()
     for key, target in placed:
@@ -479,7 +506,7 @@ def upgrade_cask(
     dirs: Mapping[str, Path] | None = None,
     binaries: bool = True,
     languages: Sequence[str] = (),
-) -> None:
+) -> str:
     """Replace an installed cask with the version `row` describes.
 
     The old version's `uninstall` directives run (`signal` only if `on_upgrade`
@@ -487,9 +514,9 @@ def upgrade_cask(
     the new version also installs is emptied rather than removed, since macOS
     treats a removed app as uninstalled; if staging or installing the new version
     fails, the old version, its receipt and its artifacts are put back, its pkgs
-    reinstalled if its `uninstall pkgutil` removed them, and any apps it quit are
-    reopened; the user's Gatekeeper approval of the old apps carries over to the
-    new ones when they're signed by the same identity.
+    and installer scripts rerun if its `pkgutil` or scripts removed them, and any
+    apps it quit are reopened; the user's Gatekeeper approval of the old apps carries
+    over to the new ones when they're signed by the same identity.
 
     Args:
         row: The new version's catalog row, already localised.
@@ -499,6 +526,9 @@ def upgrade_cask(
             `explicit` part is kept over them.
         binaries: False skips `binary` artifacts, as `--no-binaries` does.
         languages: `--language` values, recorded as on install.
+
+    Returns:
+        The new version's `installer manual` instructions, as `install_artifacts`.
 
     Raises:
         CellarError: If a step can't be done without root, or the cask isn't installed.
@@ -542,16 +572,26 @@ def upgrade_cask(
         (p, p.with_name(f"{p.name}.upgrading")) for p in (old_staged, meta / version)
     ]
 
-    directives = [d for stanza in old for d in stanza.get("uninstall", [])]
+    directives = _expand_all(
+        [d for stanza in old for d in stanza.get("uninstall", [])], env, old_dirs
+    )
+    old_sources = _sources(old_specs, old_staged)
 
     closed: list[str] = []
     done: list[tuple[str, Path, Path]] = []
     backed_up = False
 
     try:
-        closed = run_directives(directives, deferred=False, upgrade=True)
-        _set_aside(old, _sources(old_specs, old_staged), env, old_dirs, keep, done)
+        closed = run_directives(
+            directives,
+            deferred=False,
+            upgrade=True,
+            staged=old_sources,
+            prefix=env.prefix,
+        )
+        _set_aside(old, old_sources, env, old_dirs, keep, done)
         run_directives(directives, deferred=True)
+
         for path, backup in backups:
             if path.exists():
                 path.rename(backup)
@@ -563,7 +603,8 @@ def upgrade_cask(
             env.caskroom,
             on_request=receipt.get("installed_on_request") is not False,
         )
-        install_artifacts(
+
+        note = install_artifacts(
             row,
             staged,
             env,
@@ -593,9 +634,9 @@ def upgrade_cask(
 
             _put_back(done)
 
-            # Maybe not needed if a failure occurs before `pkgutil` runs
-            if any("pkgutil" in d for d in directives):
-                _reinstall_pkgs(old, _sources(old_specs, old_staged), row)
+            # Maybe not needed if a failure occurs before these run
+            if any(k in d for d in directives for k in _REMOVES_INSTALLED):
+                _reinstall(old, old_sources, row, env, old_dirs)
 
             reopen(closed, old_apps)
 
@@ -611,6 +652,8 @@ def upgrade_cask(
         _inherit_approval(row.token, signers, new_apps)
 
     reopen(closed, new_apps)
+
+    return note
 
 
 def _approved_signers(apps: Sequence[Path]) -> list[str | None] | None:
@@ -983,6 +1026,65 @@ def _expand(value: str, env: BreweryENV, dirs: Mapping[str, Path]) -> str:
     )
 
 
+def _expand_all(value: Any, env: BreweryENV, dirs: Mapping[str, Path]) -> Any:
+    """`_expand` every string in a directive or script spec.
+
+    Args:
+        value: A value from the feed, or a receipt.
+        env: The Homebrew layout.
+        dirs: The dirs moved artifacts go to.
+
+    Returns:
+        A copy with the placeholders filled in.
+    """
+    if isinstance(value, str):
+        return _expand(value, env, dirs)
+
+    if isinstance(value, list):
+        return [_expand_all(v, env, dirs) for v in value]
+
+    if isinstance(value, dict):
+        return {k: _expand_all(v, env, dirs) for k, v in value.items()}
+
+    return value
+
+
+def _installer(
+    specs: Sequence[Any], sources: Path, env: BreweryENV, dirs: Mapping[str, Path]
+) -> list[str]:
+    """Run an `installer script`, or say how to run an `installer manual`.
+
+    Scripts run one at a time, as pkgs do: many run `installer` themselves.
+
+    Args:
+        specs: The stanza's `{"manual": path}` or `{"script": spec}` dicts.
+        sources: The staged dir the paths are relative to.
+        env: The Homebrew layout.
+        dirs: The dirs moved artifacts go to, for the script's placeholders.
+
+    Returns:
+        A manual installer's instructions, as brew prints them.
+
+    Raises:
+        CellarError: If a script is missing or fails.
+    """
+    notes = []
+    for spec in specs:
+        if isinstance(spec, dict) and isinstance(spec.get("manual"), str):
+            path = shlex.quote(str(sources / spec["manual"]))
+            notes.append(
+                "only provides a manual installer. To run it and complete the"
+                f" installation:\n  open {path}"
+            )
+
+        else:
+            with _INSTALLER:
+                script = spec.get("script") if isinstance(spec, dict) else None
+                run_script(_expand_all(script, env, dirs), sources, env.prefix)
+
+    return notes
+
+
 def _write_wrapper(
     path: Path, spec: Mapping[str, Any], env: BreweryENV, dirs: Mapping[str, Path]
 ) -> None:
@@ -1051,34 +1153,66 @@ def _install_pkg(path: Path, options: Mapping[str, Any]) -> None:
         run_sudo(*args, env={"LOGNAME": user, "USER": user, "USERNAME": user})
 
 
-def _reinstall_pkgs(
-    old: Sequence[Mapping[str, Any]], sources: Path, row: CaskRow
+def _reinstall(
+    old: Sequence[Mapping[str, Any]],
+    sources: Path,
+    row: CaskRow,
+    env: BreweryENV,
+    dirs: Mapping[str, Path],
 ) -> None:
-    """Reinstall the old version's pkgs from its staged dir, after a failed upgrade.
+    """Rerun the old version's installer scripts and pkgs, after a failed upgrade.
+
+    brew's receipts leave `installer` and `pkg` out; then the new version's are
+    used, if what they name is staged in the old: its scripts' executables, or
+    the one pkg.
 
     Args:
         old: The old version's receipt artifacts.
         sources: The old version's staged dir, as `_sources` gives it.
         row: The new version's catalog row.
+        env: The Homebrew layout.
+        dirs: The old version's dirs, for a script's placeholders.
     """
 
-    def pkgs(artifacts: Iterable[Mapping[str, Any]]) -> list[list[Any]]:
+    def stanzas(artifacts: Iterable[Mapping[str, Any]], key: str) -> list[list[Any]]:
+        """Return the args of every `key` stanza in `artifacts`."""
+        return [args for stanza in artifacts for k, args in stanza.items() if k == key]
+
+    def scripts(artifacts: Iterable[Mapping[str, Any]]) -> list[Any]:
+        """Return the expanded `script` of every installer stanza in `artifacts`."""
         return [
-            args for stanza in artifacts for k, args in stanza.items() if k == "pkg"
+            _expand_all(i["script"], env, dirs)
+            for args in stanzas(artifacts, "installer")
+            for i in args
+            if isinstance(i, dict) and isinstance(i.get("script"), dict)
         ]
 
-    stanzas: list[list[Any]] = pkgs(old)
-    if not stanzas:
+    runs = scripts(old)
+    if not stanzas(old, "installer"):
+        runs = [
+            s
+            for s in scripts(row.artifacts or [])
+            if (sources / str(s.get("executable", ""))).is_file()
+        ]
+
+    for spec in runs:
+        with _INSTALLER:
+            run_script(spec, sources, env.prefix)
+
+    pkgs: list[list[Any]] = stanzas(old, "pkg")
+    if not pkgs:
         staged = [p for ext in ("*.pkg", "*.mpkg") for p in sources.rglob(ext)]
-        if len(staged) != 1:
+        if len(staged) > 1:
             log.warning(f"can't tell which pkg to reinstall {row.token} from")
+
+        if len(staged) != 1:
             return
 
-        new = pkgs(row.artifacts or [])
+        new = stanzas(row.artifacts or [], "pkg")
         options = new[0][1] if len(new) == 1 and len(new[0]) > 1 else {}
-        stanzas = [[str(staged[0].relative_to(sources)), options]]
+        pkgs = [[str(staged[0].relative_to(sources)), options]]
 
-    for args in stanzas:
+    for args in pkgs:
         _install_pkg(sources / args[0], args[1] if len(args) > 1 else {})
 
 

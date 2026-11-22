@@ -230,6 +230,7 @@ def _over_size_limit(
     measured = du_many(to_measure)
 
     def size_of(p: Path) -> int:
+        """Return keg `p`'s size, cached or measured."""
         return cached.get(p) or measured.get(str(p), 0)
 
     sizes = {sk.keg: size_of(sk.keg) for sk in survivors}

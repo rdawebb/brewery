@@ -310,6 +310,113 @@ class TestRunDirectives:
         assert closed == ["a.b"]
         assert bool(ran) is signalled
 
+    def test_scripts_run_in_brews_order(self, tmp_path, monkeypatch) -> None:
+        """Test that `early_script` runs first and `script` before `pkgutil`."""
+        ran: list[str] = []
+        monkeypatch.setattr(directives.time, "sleep", lambda _: None)
+        monkeypatch.setattr(
+            directives, "run_script", lambda spec, *_: ran.append(spec["executable"])
+        )
+        monkeypatch.setitem(directives._RUNNERS, "quit", lambda _: ran.append("quit"))
+        monkeypatch.setitem(directives._RUNNERS, "pkgutil", lambda _: ran.append("pkg"))
+        stanza = {
+            "pkgutil": "a",
+            "script": {"executable": "late"},
+            "quit": "a.b",
+            "early_script": {"executable": "early"},
+        }
+
+        directives.run_directives(
+            [stanza], deferred=False, staged=tmp_path, prefix=tmp_path
+        )
+
+        assert ran == ["early", "quit", "late", "pkg"]
+
+
+class TestRunScript:
+    """Tests for running installer and uninstall scripts as brew does."""
+
+    @pytest.fixture
+    def script(self, tmp_path) -> Path:
+        """A non-executable staged script recording its env, args and stdin.
+
+        Args:
+            tmp_path: The pytest tmp_path fixture.
+
+        Returns:
+            The script.
+        """
+        path = tmp_path / "bin" / "install.sh"
+        path.parent.mkdir()
+        path.write_text('#!/bin/sh\nenv > "$1"\ncat > "$2"\nexit "${3:-0}"\n')
+        path.chmod(0o644)
+
+        return path
+
+    def test_runs_with_brews_env_args_and_input(
+        self, tmp_path, script, monkeypatch
+    ) -> None:
+        """Test the filtered env and PATH, `+x`, args and `input` on stdin."""
+        monkeypatch.setenv("VIRTUAL_ENV", "/venv")
+        monkeypatch.setenv("HOMEBREW_FOO", "1")
+        spec = {
+            "executable": "bin/install.sh",
+            "args": [str(tmp_path / "env"), str(tmp_path / "in")],
+            "input": ["y\n", "n\n"],
+        }
+
+        directives.run_script(spec, tmp_path, Path("/opt/hb"))
+
+        env = dict(
+            line.split("=", 1) for line in (tmp_path / "env").read_text().splitlines()
+        )
+        assert env["PATH"] == "/opt/hb/bin:/opt/hb/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
+        assert env["HOMEBREW_FOO"] == "1"
+        assert "VIRTUAL_ENV" not in env
+        assert (tmp_path / "in").read_text() == "y\nn\n"
+        assert os.access(script, os.X_OK)
+
+    def test_failure_raises_unless_it_need_not_succeed(self, tmp_path, script) -> None:
+        """Test that a failing script raises with its code, or not if allowed to."""
+        args = [str(tmp_path / "env"), str(tmp_path / "in"), "3"]
+        spec = {"executable": str(script), "args": args}
+
+        with pytest.raises(CellarError, match=r"failed \(3\)"):
+            directives.run_script(spec, tmp_path, tmp_path)
+
+        directives.run_script({**spec, "must_succeed": False}, tmp_path, tmp_path)
+
+    def test_bare_name_is_looked_up_on_path(self, tmp_path) -> None:
+        """Test that an executable not staged is found on the system PATH."""
+        directives.run_script("true", tmp_path, tmp_path)
+
+        with pytest.raises(CellarError, match="does not exist"):
+            directives.run_script({"executable": "no/such.sh"}, tmp_path, tmp_path)
+
+    def test_sudo_runs_through_run_sudo(self, tmp_path, script, monkeypatch) -> None:
+        """Test that `sudo: true` hands the command, input and env to run_sudo."""
+        calls = []
+
+        def run_sudo(*args, stdin, env, check):
+            calls.append((args, stdin, env["PATH"], check))
+            return subprocess.CompletedProcess(args, 0, b"", b"")
+
+        monkeypatch.setattr(directives, "run_sudo", run_sudo)
+
+        directives.run_script(
+            {
+                "executable": "bin/install.sh",
+                "args": ["-q"],
+                "input": "y",
+                "sudo": True,
+            },
+            tmp_path,
+            Path("/opt/hb"),
+        )
+
+        path = "/opt/hb/bin:/opt/hb/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
+        assert calls == [((str(script), "-q"), b"y", path, False)]
+
 
 class TestLoginItem:
     """Tests for removing login items."""

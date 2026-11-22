@@ -75,6 +75,7 @@ class Cache:
         """
 
         def mtime(p: Path) -> int:
+            """Return `p`'s mtime in ns, or 0 if it doesn't exist."""
             try:
                 return p.stat().st_mtime_ns
 

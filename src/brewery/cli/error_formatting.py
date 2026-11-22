@@ -188,8 +188,11 @@ def command_error(
     """
 
     def decorate(fn: Callable[P, None]) -> Callable[P, None]:
+        """Wrap command `fn` with the error handling."""
+
         @functools.wraps(fn)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
+            """Run the command, turning its errors into messages and exit codes."""
             try:
                 return fn(*args, **kwargs)
 

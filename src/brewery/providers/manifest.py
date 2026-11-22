@@ -144,6 +144,7 @@ def select_bottle_manifest(
         return matches[0] if matches else None
 
     def plat(m: dict) -> dict:
+        """Return manifest `m`'s platform, or an empty dict."""
         return m.get("platform") or {}
 
     pool = [m for m in matches if plat(m).get("architecture") == oci_arch] or matches
@@ -231,6 +232,7 @@ async def _get_index_with_retry(
     """
 
     async def get() -> httpx2.Response:
+        """GET `url`, raising on an HTTP error status."""
         resp = await client.get(url, headers=headers, follow_redirects=True)
         resp.raise_for_status()
 

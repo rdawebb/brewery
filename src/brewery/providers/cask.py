@@ -30,6 +30,7 @@ NATIVE_ARTIFACTS = frozenset(
         "artifact",
         "manpage",
         "pkg",
+        "installer",
         "bash_completion",
         "zsh_completion",
         "fish_completion",
@@ -47,6 +48,8 @@ NATIVE_UNINSTALL = frozenset(
         "launchctl",
         "signal",
         "login_item",
+        "early_script",
+        "script",
         "pkgutil",
         "trash",
         "rmdir",
@@ -54,10 +57,9 @@ NATIVE_UNINSTALL = frozenset(
     }
 )
 
-# Artifacts installed or removed with sudo, and the directive that removes a pkg;
-# a narrow list (a `delete` of a root-owned file needs sudo too); a sudo it
-# misses pauses the display through askpass instead
-_SUDO_ARTIFACTS = frozenset({"pkg", "installer"})
+# What's known to run with sudo; a narrow list (a `delete` of a root-owned file
+# needs sudo too); a sudo it misses pauses the display through askpass instead
+_SCRIPTS = ("script", "early_script")
 
 # `container` stanzas `stage` handles
 _NATIVE_CONTAINERS = ({"type": "naked"}, {"type": "dmg"}, {"type": "zip"})
@@ -307,20 +309,34 @@ def needs_sudo(artifacts: Any, *, directives: tuple[str, ...] = ()) -> bool:
             `--zap`); empty for an install.
 
     Returns:
-        True for a `pkg` or `installer` stanza when installing, or a `pkgutil`
-        directive in one of `directives`.
+        True for a `pkg`, or an `installer script` run with sudo, when installing;
+        for a `pkgutil`, or a `script` or `early_script` run with sudo, in one of
+        `directives`.
     """
+
+    def sudo_script(value: Any) -> bool:
+        """Whether `value` is a script stanza that runs with `sudo: true`."""
+        return isinstance(value, dict) and value.get("sudo") is True
+
     for stanza in artifacts if isinstance(artifacts, list) else []:
         if not isinstance(stanza, dict):
             continue
 
-        if not directives and stanza.keys() & _SUDO_ARTIFACTS:
+        if not directives and (
+            "pkg" in stanza
+            or any(
+                isinstance(i, dict) and sudo_script(i.get("script"))
+                for i in stanza.get("installer") or []
+            )
+        ):
             return True
 
         for key in directives:
             steps = stanza.get(key)
             if isinstance(steps, list) and any(
-                isinstance(d, dict) and "pkgutil" in d for d in steps
+                isinstance(d, dict)
+                and ("pkgutil" in d or any(sudo_script(d.get(k)) for k in _SCRIPTS))
+                for d in steps
             ):
                 return True
 

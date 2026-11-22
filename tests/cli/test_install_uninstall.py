@@ -39,11 +39,11 @@ def installs(monkeypatch):
         monkeypatch: The pytest monkeypatch fixture.
 
     Returns:
-        A callable taking the (installed, failures) result to report, and
+        A callable taking the (installed, failures, caveats) result to report, and
         returning the list that accumulates one call record per invocation.
     """
 
-    def _arrange(installed=(), failures=(), raises=None):
+    def _arrange(installed=(), failures=(), caveats=(), raises=None):
         calls: list[dict] = []
 
         async def _install(repo, names, kind, *, progress=None):
@@ -51,7 +51,7 @@ def installs(monkeypatch):
             if raises is not None:
                 raise raises
 
-            return list(installed), list(failures)
+            return list(installed), list(failures), list(caveats)
 
         monkeypatch.setattr(install_mod, "install_packages", _install)
 
@@ -114,6 +114,16 @@ class TestInstall:
         assert result.exit_code == EXIT_USER_ERROR
         assert "Failed to install 1 package(s)" in result.output
         assert "wget - 404 not found" in result.output
+
+    def test_caveats_follow_the_summary(self, run, installs) -> None:
+        """Test that a step left to the user prints after the summary, as plain text."""
+        installs(installed=[_pkg("foo")], caveats=[("foo", "open [/tmp/Foo.app]")])
+
+        result = run(["install", "foo", "--yes"])
+
+        assert result.exit_code == 0
+        summary = result.output.index("Installed 1 package(s)")
+        assert result.output.index("foo open [/tmp/Foo.app]") > summary
 
     def test_declining_the_prompt_installs_nothing(self, run, installs) -> None:
         """Test that answering no exits 0 without reaching the service."""

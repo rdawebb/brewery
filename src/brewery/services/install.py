@@ -28,7 +28,7 @@ async def install_packages(
     formula: PackageBackend = brew.formula_backend,
     cask: PackageBackend = brew.cask_backend,
     progress: ProgressPort | None = None,
-) -> tuple[list[Package], Notes]:
+) -> tuple[list[Package], Notes, Notes]:
     """Install packages and report what the re-scan found.
 
     Success is decided by the filesystem, not by the backend's exit status: a
@@ -46,7 +46,8 @@ async def install_packages(
         progress: Optional progress sink for the native pipeline.
 
     Returns:
-        Tuple of (installed packages, (name, reason) failures).
+        Tuple of (installed packages, (name, reason) failures, (name, text)
+        caveats: steps left to the user).
 
     Raises:
         BrewCommandError: Propagated from provider.
@@ -61,19 +62,19 @@ async def install_packages(
         ]
 
     formulae = [n for n in names if n not in casks]
+    caveats: Notes = []
     if casks:
         # Any formulae run alongside, in the casks' display
-        notes = dict(
-            await install_casks(
-                casks,
-                repo=repo,
-                backend=cask,
-                formula=formula,
-                env=env,
-                progress=progress,
-                formulae=formulae,
-            )
+        cask_notes, caveats = await install_casks(
+            casks,
+            repo=repo,
+            backend=cask,
+            formula=formula,
+            env=env,
+            progress=progress,
+            formulae=formulae,
         )
+        notes = dict(cask_notes)
 
     else:
         report = await run_install(
@@ -103,4 +104,4 @@ async def install_packages(
         if keys[n] not in by_key
     ]
 
-    return installed, failures
+    return installed, failures, caveats

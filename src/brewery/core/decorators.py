@@ -101,18 +101,21 @@ def log_operation(
         log_args: list[str] = []
 
     def decorator(func: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
+        """Wrap `func` with start, complete and failed log events."""
         is_async = inspect.iscoroutinefunction(func)
 
         # Resolved once per decoration; skipped entirely when nothing is logged
         sig: inspect.Signature | None = inspect.signature(func) if log_args else None
 
         def _report_start(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict:
+            """Log the start event and return the logged context."""
             context = _log_context(sig, log_args, args, kwargs)
             log.info(event=f"{event_prefix}_start", **context)
 
             return context
 
         def _report_complete(result: Any, start: float, context: dict) -> None:
+            """Log the complete event with duration and result fields."""
             log.info(
                 event=f"{event_prefix}_complete",
                 duration_ms=_elapsed_ms(start),
@@ -121,6 +124,7 @@ def log_operation(
             )
 
         def _report_failed(exc: Exception, start: float, context: dict) -> None:
+            """Log the failed event with the error and duration."""
             log.exception(
                 event=f"{event_prefix}_failed",
                 error=str(exc),
@@ -130,6 +134,7 @@ def log_operation(
 
         @functools.wraps(wrapped=func)
         async def async_wrapper(*args: Any, **kwargs: Any) -> T:
+            """Await `func`, logging around the call."""
             start: float = time.perf_counter()
             context = _report_start(args, kwargs)
 
@@ -146,6 +151,7 @@ def log_operation(
 
         @functools.wraps(wrapped=func)
         def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+            """Call `func`, logging around the call."""
             start: float = time.perf_counter()
             context = _report_start(args, kwargs)
 
