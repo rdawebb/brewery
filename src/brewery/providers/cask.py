@@ -17,6 +17,7 @@ from urllib.parse import quote
 from brewery import __version__
 from brewery.core.catalog import CaskRow
 from brewery.core.host import Platform
+from brewery.providers import cask_steps
 
 # Artifact stanzas brewery can stage itself (`target` annotates an `app`/`binary`)
 NATIVE_ARTIFACTS = frozenset(
@@ -37,6 +38,7 @@ NATIVE_ARTIFACTS = frozenset(
         "uninstall",
         "zap",
         "target",
+        *cask_steps.STAGES,
     }
 )
 
@@ -164,6 +166,9 @@ def classify(row: CaskRow, plat: Platform | None) -> str:
         return "`language` variant"  # One `localise` couldn't apply
 
     if reason := _artifact_reason(row.artifacts or [], ("uninstall",)):
+        return reason
+
+    if reason := cask_steps.unsupported(row.artifacts or []):
         return reason
 
     return _check_depends(row.depends_on or {}, plat.macos_major, plat.arch)
@@ -297,6 +302,10 @@ def classify_uninstall(
     ):
         return "no uninstall receipt"
 
+    # brew removes every cask with steps until native uninstall runs them
+    if any(isinstance(s, dict) and cask_steps.STAGES & s.keys() for s in artifacts):
+        return "`*_steps` uninstall"
+
     return _artifact_reason(artifacts, ("uninstall", "zap") if zap else ("uninstall",))
 
 
@@ -309,7 +318,8 @@ def needs_sudo(artifacts: Any, *, directives: tuple[str, ...] = ()) -> bool:
             `--zap`); empty for an install.
 
     Returns:
-        True for a `pkg`, or an `installer script` run with sudo, when installing;
+        True for a `pkg`, an `installer script` run with sudo, or a pre- or
+        postflight step that always uses sudo, when installing;
         for a `pkgutil`, or a `script` or `early_script` run with sudo, in one of
         `directives`.
     """
@@ -327,6 +337,12 @@ def needs_sudo(artifacts: Any, *, directives: tuple[str, ...] = ()) -> bool:
             or any(
                 isinstance(i, dict) and sudo_script(i.get("script"))
                 for i in stanza.get("installer") or []
+            )
+            or any(
+                map(
+                    cask_steps.needs_sudo,
+                    cask_steps.steps(stanza, cask_steps.INSTALLING),
+                )
             )
         ):
             return True

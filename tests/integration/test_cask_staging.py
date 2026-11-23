@@ -505,6 +505,62 @@ class TestInstallArtifacts:
 
         assert os.readlink(found) == str(staged / "bin" / "foo-cli")
 
+    def test_flight_steps_run_around_the_artifacts(self, brew, staged, dirs) -> None:
+        """Test that preflight sees the staged app, and postflight the moved one."""
+        mark = {"base": "temp", "path": "seen"}
+        row = cask_row(
+            "foo",
+            version="1.0",
+            artifacts=[
+                {
+                    "preflight_steps": [
+                        {
+                            "steps": [
+                                {"type": "touch", "path": mark},
+                                {
+                                    "type": "touch",
+                                    "path": {"base": "staged_path", "path": "pre"},
+                                    "guards": [
+                                        {
+                                            "condition": "if_exists",
+                                            "path": "{{staged_path}}/Foo.app",
+                                        }
+                                    ],
+                                },
+                            ]
+                        }
+                    ]
+                },
+                {"app": ["Foo.app"]},
+                {
+                    "postflight_steps": [
+                        {
+                            "steps": [
+                                {
+                                    "type": "set_permissions",
+                                    "paths": [{"base": "appdir", "path": "Foo.app"}],
+                                    "permissions": "go-w",
+                                },
+                                {
+                                    "type": "write",
+                                    "path": {"base": "appdir", "path": "post"},
+                                    "content": "{{temp}}",
+                                },
+                            ]
+                        }
+                    ]
+                },
+            ],
+        )
+
+        install_artifacts(row, staged, brew.env, dirs=dirs)
+
+        assert (staged / "pre").exists()
+        temp = Path((dirs["appdir"] / "post").read_text())
+        assert temp.name.startswith("cask-foo-")
+        assert not temp.exists()  # Removed once the install succeeds
+        assert not (dirs["appdir"] / "Foo.app").stat().st_mode & 0o022
+
 
 class TestUpgradeCask:
     """Tests for upgrade_cask."""

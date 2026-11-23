@@ -236,7 +236,9 @@ def _run(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, capture_output=True, text=True, check=False)
 
 
-def run_script(spec: Any, staged: Path, prefix: Path) -> None:
+def run_script(
+    spec: Any, staged: Path, prefix: Path, *, extra_env: Mapping[str, str] | None = None
+) -> None:
     """Run an `installer script`, or an uninstall `script`, as brew does.
 
     The script sees brew's filtered environment rather than brewery's, with the
@@ -248,6 +250,7 @@ def run_script(spec: Any, staged: Path, prefix: Path) -> None:
             `args`, `input`, `sudo` and `must_succeed`.
         staged: Where a relative executable is; one not there is looked up on PATH.
         prefix: The Homebrew prefix.
+        extra_env: Variables to set on top, as a `run` step's `env`.
 
     Raises:
         CellarError: If there's no such executable, or it fails and `must_succeed`
@@ -264,6 +267,7 @@ def run_script(spec: Any, staged: Path, prefix: Path) -> None:
         if v and (k in _SCRIPT_ENV or k.startswith("HOMEBREW_"))
     }
     env["PATH"] = f"{prefix}/bin:{prefix}/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
+    env.update(extra_env or {})
 
     exe = staged / os.path.expanduser(given)  # An absolute path replaces `staged`
     if exe.exists():

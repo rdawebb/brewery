@@ -41,8 +41,8 @@ class TestClassify:
             ),
             pytest.param(
                 [{"app": ["Foo.app"]}, {"postflight_steps": None}],
-                "`postflight_steps` artifact",
-                id="postflight_steps",
+                "unrecognised `postflight_steps`",
+                id="malformed_postflight_steps",
             ),
             pytest.param(
                 [{"app": ["Foo.app"]}, {"uninstall": [{"quit": "a"}, {"kext": "b"}]}],
@@ -443,6 +443,12 @@ class TestClassifyUninstall:
                 {"uninstall_artifacts": []}, False, "", id="nothing_to_remove"
             ),
             pytest.param(
+                {"uninstall_artifacts": [{"postflight_steps": [{"steps": []}]}]},
+                False,
+                "`*_steps` uninstall",
+                id="steps",
+            ),
+            pytest.param(
                 {"uninstall_artifacts": [{"uninstall": ["quit"]}]},
                 False,
                 "unrecognised `uninstall` directive",
@@ -484,6 +490,16 @@ class TestNeedsSudo:
                 [{"app": ["Foo.app"]}, {"uninstall": [{"quit": "org.example.foo"}]}],
                 False,
                 id="app",
+            ),
+            pytest.param(
+                [{"postflight_steps": [{"steps": [{"type": "run", "sudo": True}]}]}],
+                True,
+                id="sudo_step",
+            ),
+            pytest.param(
+                [{"uninstall_preflight_steps": [{"steps": [{"sudo": True}]}]}],
+                False,
+                id="uninstall_step",
             ),
             pytest.param(None, False, id="none"),
             pytest.param(["odd", {"uninstall": "odd"}], False, id="unrecognised"),

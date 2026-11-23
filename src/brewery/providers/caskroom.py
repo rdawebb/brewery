@@ -40,6 +40,7 @@ from brewery.core.config import BreweryENV
 from brewery.core.errors import CellarError, ExtractionError, LinkError
 from brewery.core.logging import BreweryLogger, get_logger
 from brewery.core.sudo import run_sudo
+from brewery.providers import cask_steps
 from brewery.providers.cask_directives import (
     remove,
     reopen,
@@ -318,9 +319,10 @@ def install_artifacts(
     Apps, suites, fonts, Quick Look plugins and generic artifacts are moved out,
     leaving a symlink in the version dir that brew's uninstall moves them back
     over; binaries, manpages and completions are symlinked into the prefix; a
-    `pkg` is run through `installer`, and an `installer script` run; on failure,
-    whatever was already moved or linked is put back; what a pkg or script
-    installed stays.
+    `pkg` is run through `installer`, an `installer script` run, and pre- and
+    postflight steps run where they come; on failure, whatever was already moved
+    or linked is put back; what a pkg, script or step did stays, and so does the
+    steps' `{{temp}}` dir if anything is in it.
 
     Args:
         row: The cask's catalog row.
@@ -340,7 +342,7 @@ def install_artifacts(
     Raises:
         LinkError: If a target is already taken.
         CellarError: If an artifact's source is missing or can't be moved, or a
-            pkg or script fails.
+            pkg, script or step fails.
     """
     overrides = dirs or {}
     explicit = dict(explicit or {})
@@ -348,11 +350,30 @@ def install_artifacts(
     sources = _sources(row.url_specs, staged)
     done: list[tuple[str, Path, Path]] = []
     notes: list[str] = []
+    ctx: cask_steps.Context | None = None
 
     try:
-        # The feed lists artifacts in brew's install order: apps before binaries into them
+        # The feed lists artifacts in brew's install order: preflight steps first,
+        # apps before binaries into them, postflight steps last
         for stanza in row.artifacts or []:
             for key, args in stanza.items():
+                if key in cask_steps.INSTALLING:
+                    if ctx is None:
+                        temp = Path(tempfile.mkdtemp(prefix=f"cask-{row.token}-"))
+                        ctx = cask_steps.context(
+                            row.token,
+                            str(row.version),
+                            staged,
+                            temp,
+                            env.prefix,
+                            env.cellar,
+                            dirs,
+                        )
+
+                    for block in args:
+                        cask_steps.run_steps(block["steps"], ctx)
+                    continue
+
                 if key == "installer":
                     notes += _installer(args, sources, env, dirs)
                     continue
@@ -397,7 +418,18 @@ def install_artifacts(
             except (OSError, CellarError) as exc:
                 log.warning(f"couldn't put back {target}: {exc}")
 
+        if ctx is not None:
+            temp = ctx.roots["temp"]
+            if any(temp.iterdir()):
+                log.warning(f"Kept {row.token}'s step files in {temp}")
+
+            else:
+                temp.rmdir()
+
         raise
+
+    if ctx is not None:
+        shutil.rmtree(ctx.roots["temp"], ignore_errors=True)
 
     if any(key == "qlplugin" for key, _, _ in done):
         subprocess.run(["qlmanage", "-r"], capture_output=True, check=False)
