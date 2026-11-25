@@ -23,7 +23,7 @@ import ssl
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -37,6 +37,7 @@ from brewery.providers.cask_directives import (
     _sudo_each,
     remove,
     run_script,
+    tolerate,
     undeletable,
 )
 
@@ -51,8 +52,11 @@ STAGES = frozenset(
     }
 )
 
-# The stages that run when installing
+# The stages that run when installing; they only remove their links when removing
 INSTALLING = ("preflight_steps", "postflight_steps")
+
+# The stages that run when removing
+UNINSTALLING = ("uninstall_preflight_steps", "uninstall_postflight_steps")
 
 # The keys each step type takes, besides `type` and `guards`; any other goes to brew
 _KEYS: Mapping[str, frozenset[str]] = {
@@ -209,6 +213,34 @@ def context(
     return Context(roots, values, prefix)
 
 
+@contextlib.contextmanager
+def scratch(token: str) -> Generator[Path]:
+    """A dir for `{{temp}}`, removed on success.
+
+    Kept on failure if not empty, so any files moved there aren't lost.
+
+    Args:
+        token: The cask's token.
+
+    Yields:
+        The dir.
+    """
+    temp = Path(tempfile.mkdtemp(prefix=f"cask-{token}-"))
+    try:
+        yield temp
+
+    except BaseException:
+        if any(temp.iterdir()):
+            log.warning(f"Kept {token}'s step files in {temp}")
+
+        else:
+            temp.rmdir()
+
+        raise
+
+    shutil.rmtree(temp, ignore_errors=True)
+
+
 def steps(stanza: Mapping[str, Any], stages: Iterable[str]) -> Iterator[dict[str, Any]]:
     """The steps of a stanza's stages, skipping any malformed block.
 
@@ -268,8 +300,43 @@ def unsupported(artifacts: Iterable[Any]) -> str:
     return ""
 
 
-def run_steps(block: Iterable[Mapping[str, Any]], ctx: Context) -> None:
-    """Run one block of steps when installing.
+def run_stage(
+    artifacts: Iterable[Mapping[str, Any]],
+    key: str,
+    ctx: Context | None,
+    *,
+    force: bool = False,
+) -> None:
+    """Run one stage's blocks when removing, from a receipt's `uninstall_artifacts`.
+
+    Pre/postflight steps run only their uninstall phase, which removes their
+    `uninstall: true` links.
+
+    Args:
+        artifacts: The receipt's `uninstall_artifacts`.
+        key: The stage.
+        ctx: The context; None when the cask has no steps.
+        force: Log a step that fails and carry on with the rest.
+
+    Raises:
+        CellarError: If a step fails.
+    """
+    if ctx is None:
+        return
+
+    for stanza in artifacts:
+        for block in stanza.get(key) or []:
+            run_steps(block["steps"], ctx, unlink=key in INSTALLING, force=force)
+
+
+def run_steps(
+    block: Iterable[Mapping[str, Any]],
+    ctx: Context,
+    *,
+    unlink: bool = False,
+    force: bool = False,
+) -> None:
+    """Run one block of steps.
 
     A guard is checked once per block, so steps sharing it see the same answer
     even after an earlier one changes what it checks.
@@ -277,6 +344,9 @@ def run_steps(block: Iterable[Mapping[str, Any]], ctx: Context) -> None:
     Args:
         block: The block's steps.
         ctx: The context they run in.
+        unlink: Run the uninstall phase instead: remove each `uninstall: true`
+            link, unguarded, and nothing else.
+        force: Log a step that fails and carry on with the rest.
 
     Raises:
         CellarError: If a step fails.
@@ -284,22 +354,27 @@ def run_steps(block: Iterable[Mapping[str, Any]], ctx: Context) -> None:
     seen: dict[frozenset[tuple[str, Any]], bool] = {}
     for step in block:
         kind = str(step.get("type"))
-        try:
-            if all(_guard(g, ctx, seen) for g in step.get("guards") or []):
-                _RUNNERS[kind](step, ctx)
+        with tolerate(force, f"a `{kind}` step"):
+            try:
+                if unlink:
+                    if kind == "symlink" and step.get("uninstall") is True:
+                        _unlink(step, ctx)
 
-        except CellarError:
-            raise
+                elif all(_guard(g, ctx, seen) for g in step.get("guards") or []):
+                    _RUNNERS[kind](step, ctx)
 
-        except (
-            OSError,
-            KeyError,
-            TypeError,
-            ValueError,
-            re.error,
-            shutil.Error,
-        ) as exc:
-            raise CellarError(f"`{kind}` step failed: {exc}") from exc
+            except CellarError:
+                raise
+
+            except (
+                OSError,
+                KeyError,
+                TypeError,
+                ValueError,
+                re.error,
+                shutil.Error,
+            ) as exc:
+                raise CellarError(f"`{kind}` step failed: {exc}") from exc
 
 
 def _step_reason(step: Mapping[str, Any]) -> str:
@@ -668,8 +743,7 @@ def _symlink(step: Mapping[str, Any], ctx: Context) -> None:
     target = _path(step["target"], ctx)
     spec = step["source"]
     if step.get("source_glob") is not True:
-        source = _expand(spec["path"], ctx) if spec.get("base") == "relative" else None
-        _link(source or str(_path(spec, ctx)), target, step)
+        _link(_link_source(spec, ctx), target, step)
         return
 
     sources = _matches(spec, ctx)
@@ -680,6 +754,42 @@ def _symlink(step: Mapping[str, Any], ctx: Context) -> None:
 
     elif sources:
         _link(str(sources[0]), target, step)
+
+
+def _link_source(spec: Mapping[str, Any], ctx: Context) -> str:
+    """What a `symlink` step's link points at; a `relative` source stays relative.
+
+    Args:
+        spec: The step's `source` spec.
+        ctx: The context.
+
+    Returns:
+        The link's content.
+    """
+    if spec.get("base") == "relative":
+        return _expand(spec["path"], ctx)
+
+    return str(_path(spec, ctx))
+
+
+def _unlink(step: Mapping[str, Any], ctx: Context) -> None:
+    """Remove a `symlink` step's link, if it still points at the step's source.
+
+    Args:
+        step: The step.
+        ctx: The context.
+    """
+    target = _path(step["target"], ctx)
+    if not target.is_symlink() or os.readlink(target) != _link_source(
+        step["source"], ctx
+    ):
+        return
+
+    if _sudo(step, target.parent):
+        run_sudo("/bin/rm", "-f", "--", str(target))
+
+    else:
+        target.unlink(missing_ok=True)
 
 
 def _link(source: str, target: Path, step: Mapping[str, Any]) -> None:

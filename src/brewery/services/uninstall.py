@@ -33,6 +33,7 @@ async def uninstall_packages(
     formula: UninstallBackend = brew.formula_backend,
     cask: PackageBackend = brew.cask_backend,
     zap: bool = False,
+    force: bool = False,
 ) -> tuple[list[str], Notes]:
     """Uninstall packages and refresh cache on success.
 
@@ -44,6 +45,7 @@ async def uninstall_packages(
         formula: Formula backend for the per-formula brew fallback.
         cask: Cask backend for the casks brewery can't uninstall.
         zap: Also remove the casks' `zap` files, as brew's `--zap` does.
+        force: Carry on past a cask's uninstall failures.
 
     Returns:
         List of successfully removed package names, and list of (name, reason) failures
@@ -71,14 +73,18 @@ async def uninstall_packages(
     if formula_names:
         await run_uninstall(formula_names, formula=formula, env=env)
 
-    locked: dict[str, str] = {}
+    stopped: dict[str, str] = {}
     if cask_names:
-        locked = dict(await uninstall_casks(cask_names, backend=cask, env=env, zap=zap))
+        stopped = dict(
+            await uninstall_casks(
+                cask_names, backend=cask, env=env, zap=zap, force=force
+            )
+        )
 
     repo.cache_mgr.invalidate()
 
     removed, failed = _verify_batch(formula_names, cask_names, env=env)
-    failures.extend((n, locked.get(n, "uninstall failed")) for n in failed)
+    failures.extend((n, stopped.get(n, "uninstall failed")) for n in failed)
 
     return removed, failures
 

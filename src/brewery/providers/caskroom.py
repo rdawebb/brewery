@@ -27,7 +27,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -37,7 +37,13 @@ import orjson
 
 from brewery.core.catalog import CaskRow
 from brewery.core.config import BreweryENV
-from brewery.core.errors import CellarError, ExtractionError, LinkError
+from brewery.core.errors import (
+    BrewError,
+    CellarError,
+    ExtractionError,
+    LinkError,
+    UninstallStoppedError,
+)
 from brewery.core.logging import BreweryLogger, get_logger
 from brewery.core.sudo import run_sudo
 from brewery.providers import cask_steps
@@ -352,84 +358,77 @@ def install_artifacts(
     notes: list[str] = []
     ctx: cask_steps.Context | None = None
 
-    try:
-        # The feed lists artifacts in brew's install order: preflight steps first,
-        # apps before binaries into them, postflight steps last
-        for stanza in row.artifacts or []:
-            for key, args in stanza.items():
-                if key in cask_steps.INSTALLING:
-                    if ctx is None:
-                        temp = Path(tempfile.mkdtemp(prefix=f"cask-{row.token}-"))
-                        ctx = cask_steps.context(
-                            row.token,
-                            str(row.version),
-                            staged,
-                            temp,
-                            env.prefix,
-                            env.cellar,
-                            dirs,
+    with ExitStack() as stack:  # Holds the steps' `{{temp}}` once there is one
+        try:
+            # The feed lists artifacts in brew's install order: preflight steps first,
+            # apps before binaries into them, postflight steps last
+            for stanza in row.artifacts or []:
+                for key, args in stanza.items():
+                    if key in cask_steps.INSTALLING:
+                        if ctx is None:
+                            ctx = cask_steps.context(
+                                row.token,
+                                str(row.version),
+                                staged,
+                                stack.enter_context(cask_steps.scratch(row.token)),
+                                env.prefix,
+                                env.cellar,
+                                dirs,
+                            )
+
+                        for block in args:
+                            cask_steps.run_steps(block["steps"], ctx)
+                        continue
+
+                    if key == "installer":
+                        notes += _installer(args, sources, env, dirs)
+                        continue
+
+                    if key == "pkg":
+                        _install_pkg(
+                            sources / args[0], args[1] if len(args) > 1 else {}
+                        )
+                        continue
+
+                    if key not in _MOVED and key not in _LINKED:
+                        continue  # `uninstall`, `zap` and the feed's own `target` hint
+
+                    if key in ("binary", "command_wrapper") and not binaries:
+                        continue
+
+                    source, target = _locate(key, args, sources, env, dirs)
+                    if key == "command_wrapper":
+                        _write_wrapper(
+                            source, args[1] if len(args) > 1 else {}, env, dirs
                         )
 
-                    for block in args:
-                        cask_steps.run_steps(block["steps"], ctx)
-                    continue
+                    if not source.exists():
+                        raise CellarError(
+                            f"{row.token}: {source} is not there", path=source
+                        )
 
-                if key == "installer":
-                    notes += _installer(args, sources, env, dirs)
-                    continue
+                    if key in _MOVED:
+                        _move_out(source, target, reuse=target in reuse)
 
-                if key == "pkg":
-                    _install_pkg(sources / args[0], args[1] if len(args) > 1 else {})
-                    continue
+                    elif not _link(source, target, env.cellar, binary=key == "binary"):
+                        continue
 
-                if key not in _MOVED and key not in _LINKED:
-                    continue  # `uninstall`, `zap` and the feed's own `target` hint
+                    done.append((key, source, target))
 
-                if key in ("binary", "command_wrapper") and not binaries:
-                    continue
+        except BaseException:
+            for key, source, target in reversed(done):
+                try:
+                    if key in _MOVED:
+                        source.unlink()
+                        _relocate(target, source)
 
-                source, target = _locate(key, args, sources, env, dirs)
-                if key == "command_wrapper":
-                    _write_wrapper(source, args[1] if len(args) > 1 else {}, env, dirs)
+                    else:
+                        target.unlink()
 
-                if not source.exists():
-                    raise CellarError(
-                        f"{row.token}: {source} is not there", path=source
-                    )
+                except (OSError, CellarError) as exc:
+                    log.warning(f"couldn't put back {target}: {exc}")
 
-                if key in _MOVED:
-                    _move_out(source, target, reuse=target in reuse)
-
-                elif not _link(source, target, env.cellar, binary=key == "binary"):
-                    continue
-
-                done.append((key, source, target))
-
-    except BaseException:
-        for key, source, target in reversed(done):
-            try:
-                if key in _MOVED:
-                    source.unlink()
-                    _relocate(target, source)
-
-                else:
-                    target.unlink()
-
-            except (OSError, CellarError) as exc:
-                log.warning(f"couldn't put back {target}: {exc}")
-
-        if ctx is not None:
-            temp = ctx.roots["temp"]
-            if any(temp.iterdir()):
-                log.warning(f"Kept {row.token}'s step files in {temp}")
-
-            else:
-                temp.rmdir()
-
-        raise
-
-    if ctx is not None:
-        shutil.rmtree(ctx.roots["temp"], ignore_errors=True)
+            raise
 
     if any(key == "qlplugin" for key, _, _ in done):
         subprocess.run(["qlmanage", "-r"], capture_output=True, check=False)
@@ -463,21 +462,29 @@ def read_receipt(token_dir: Path) -> dict[str, Any] | None:
     return receipt if isinstance(receipt, dict) else None
 
 
-def uninstall_cask(token: str, env: BreweryENV, *, zap: bool = False) -> None:
+def uninstall_cask(
+    token: str, env: BreweryENV, *, zap: bool = False, force: bool = False
+) -> None:
     """Remove an installed cask from its receipt.
 
     Runs the `uninstall` directives (and `zap`'s), removes the moved and linked
     artifacts, then the staged version; `--zap` removes the whole Caskroom dir;
-    a step that fails is retried by brew.
+    the `*_steps` stanzas run around them, in brew's order, and the steps'
+    `{{temp}}` dir is kept on failure if anything is in it.
 
     Args:
         token: The installed cask's token.
         env: The Homebrew layout.
         zap: Also run the `zap` directives, as `--zap` does.
+        force: Log each step or directive that fails and carry on, so an
+            uninstall a rerun can't finish still removes the cask; an artifact
+            that can't be removed still stops it, keeping the receipt.
 
     Raises:
-        CellarError: If a step can't be done without root, or the cask isn't installed.
-        OSError: If an artifact can't be removed.
+        CellarError: If the cask isn't installed or an artifact can't be located,
+            before anything is changed.
+        UninstallStoppedError: If a step, directive or removal fails once the
+            uninstall has started; the receipt is kept, so a rerun can finish it.
     """
     token_dir = env.caskroom / token
     receipt = read_receipt(token_dir) or {}
@@ -498,36 +505,69 @@ def uninstall_cask(token: str, env: BreweryENV, *, zap: bool = False) -> None:
     ]
 
     apps = [target for key, target in placed if key == "app"]
-    run_directives(
-        directives,
-        deferred=False,
-        apps=apps,
-        staged=_sources(_installed_specs(token_dir, version), token_dir / version),
-        prefix=env.prefix,
-    )
+    staged = _sources(_installed_specs(token_dir, version), token_dir / version)
+    try:
+        with ExitStack() as stack:
+            ctx = None
+            if any(cask_steps.STAGES & stanza.keys() for stanza in artifacts):
+                ctx = cask_steps.context(
+                    token,
+                    version,
+                    token_dir / version,
+                    stack.enter_context(cask_steps.scratch(token)),
+                    env.prefix,
+                    env.cellar,
+                    dirs,
+                )
 
-    reload = False
-    cellar = env.cellar.resolve()
-    for key, target in placed:
-        if key in _MOVED:
-            if undeletable(target):
-                raise CellarError(f"{target} can't be removed", path=target)
+            # In brew's order, around the directives and the artifacts' removal
+            for stage in ("preflight_steps", "uninstall_preflight_steps"):
+                cask_steps.run_stage(artifacts, stage, ctx, force=force)
 
-            remove(target)
-            reload |= key == "qlplugin"
+            run_directives(
+                directives,
+                deferred=False,
+                apps=apps,
+                staged=staged,
+                prefix=env.prefix,
+                force=force,
+            )
 
-        elif _cask_link(target, cellar):
-            target.unlink()
+            reload = False
+            cellar = env.cellar.resolve()
+            # Not tolerated even when forced: the receipt is the only record of an
+            # artifact left behind
+            for key, target in placed:
+                if key in _MOVED:
+                    if undeletable(target):
+                        raise CellarError(f"{target} can't be removed", path=target)
 
-    if reload:
-        subprocess.run(["qlmanage", "-r"], capture_output=True, check=False)
+                    remove(target, sudo=True)
+                    reload |= key == "qlplugin"
 
-    run_directives(directives, deferred=True)
-    if zap:
-        shutil.rmtree(token_dir)
+                elif _cask_link(target, cellar):
+                    target.unlink()
 
-    else:
-        unstage(token, version, env.caskroom)
+            if reload:
+                subprocess.run(["qlmanage", "-r"], capture_output=True, check=False)
+
+            for stage in ("postflight_steps", "uninstall_postflight_steps"):
+                cask_steps.run_stage(artifacts, stage, ctx, force=force)
+
+            run_directives(directives, deferred=True, force=force)
+
+        if zap:
+            shutil.rmtree(token_dir, ignore_errors=force)
+
+        else:
+            unstage(token, version, env.caskroom)
+
+    # Not to brew: it would rerun what's already done (quits, scripts, steps)
+    except (BrewError, OSError) as exc:
+        hint = "" if force else "; `--force` carries on past what fails"
+        raise UninstallStoppedError(
+            f"{token}: uninstall stopped part way: {exc}{hint}", path=token_dir
+        ) from exc
 
 
 def upgrade_cask(

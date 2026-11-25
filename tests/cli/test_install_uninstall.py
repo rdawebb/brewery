@@ -75,8 +75,8 @@ def uninstalls(monkeypatch):
     def _arrange(removed=(), failures=()):
         calls: list[dict] = []
 
-        async def _uninstall(repo, names, kind, *, zap=False):
-            calls.append({"names": names, "kind": kind, "zap": zap})
+        async def _uninstall(repo, names, kind, *, zap=False, force=False):
+            calls.append({"names": names, "kind": kind, "zap": zap, "force": force})
 
             return list(removed), list(failures)
 
@@ -282,13 +282,14 @@ class TestUninstall:
 
         assert (calls[0]["kind"], calls[0]["zap"]) == (None, False)
 
-    def test_zap_reaches_the_service(self, run, uninstalls) -> None:
-        """Test that --zap is passed on."""
+    @pytest.mark.parametrize("flag", ["zap", "force"])
+    def test_flag_reaches_the_service(self, run, uninstalls, flag) -> None:
+        """Test that --zap and --force are passed on."""
         calls = uninstalls(removed=["iina"])
 
-        run(["uninstall", "iina", "--zap", "--yes"])
+        run(["uninstall", "iina", f"--{flag}", "--yes"])
 
-        assert calls[0]["zap"] is True
+        assert calls[0][flag] is True
 
     def test_the_spinner_pauses_for_a_sudo_prompt(self, run, monkeypatch) -> None:
         """Test that a sudo prompt mid-uninstall stops the spinner, then restarts it."""
@@ -312,7 +313,7 @@ class TestUninstall:
             events.append(prompt)
             return "hunter2"
 
-        async def _uninstall(repo, names, kind, *, zap=False):
+        async def _uninstall(repo, names, kind, *, zap=False, force=False):
             # As sudo does: run the askpass helper, which asks brewery
             helper = await asyncio.create_subprocess_exec(
                 os.environ["SUDO_ASKPASS"],

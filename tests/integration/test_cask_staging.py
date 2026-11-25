@@ -561,6 +561,49 @@ class TestInstallArtifacts:
         assert not temp.exists()  # Removed once the install succeeds
         assert not (dirs["appdir"] / "Foo.app").stat().st_mode & 0o022
 
+    def test_uninstall_runs_steps_around_the_removal(
+        self, brew, dirs, tmp_path
+    ) -> None:
+        """Test brew's uninstall order, and that only `uninstall: true` links go."""
+        app = {"base": "staged_path", "path": "Foo.app"}
+
+        def link(name, uninstall):
+            target = {"base": "homebrew_prefix", "path": name}
+            return {"type": "symlink", "source": app, "target": target, **uninstall}
+
+        def touch(name, condition):
+            guard = {"condition": condition, "path": "{{appdir}}/Foo.app"}
+            path = {"base": "homebrew_prefix", "path": name}
+            return {"type": "touch", "path": path, "guards": [guard]}
+
+        row = cask_row(
+            "foo",
+            version="1.0",
+            url="https://e.org/foo",
+            artifacts=[
+                {"preflight_steps": [{"steps": [link("drop", {"uninstall": True})]}]},
+                {"preflight_steps": [{"steps": [link("keep", {})]}]},
+                {"uninstall_preflight_steps": [{"steps": [touch("pre", "if_exists")]}]},
+                {"app": ["Foo.app"]},
+                {
+                    "uninstall_postflight_steps": [
+                        {"steps": [touch("post", "unless_exists")]}
+                    ]
+                },
+            ],
+        )
+        (tmp_path / "x").write_text("")
+        staged = stage(row, {"Foo.app/x": tmp_path / "x"}, brew.caskroom)
+        install_artifacts(row, staged, brew.env, dirs=dirs)
+
+        uninstall_cask("foo", brew.env)
+
+        assert not (dirs["appdir"] / "Foo.app").exists()
+        assert (brew.prefix / "pre").exists()  # Before the app went
+        assert (brew.prefix / "post").exists()  # After
+        assert not (brew.prefix / "drop").is_symlink()
+        assert (brew.prefix / "keep").is_symlink()
+
 
 class TestUpgradeCask:
     """Tests for upgrade_cask."""

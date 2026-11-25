@@ -88,18 +88,27 @@ class BrewBackend:  # Implements base.PackageBackend
         """
         return await _run("install", names, [self._kind_flag])
 
-    async def uninstall(self, names: list[str], *, zap: bool = False) -> list[str]:
+    async def uninstall(
+        self, names: list[str], *, zap: bool = False, force: bool = False
+    ) -> list[str]:
         """Uninstall packages by name.
 
         Args:
             names: Package names to uninstall.
             zap: Pass `--zap`, which brew accepts only for casks.
+            force: Pass `--force`.
 
         Returns:
             The same list of names on success.
         """
         return await _run(
-            "uninstall", names, [self._kind_flag, *(["--zap"] if zap else [])]
+            "uninstall",
+            names,
+            [
+                self._kind_flag,
+                *(["--zap"] if zap else []),
+                *(["--force"] if force else []),
+            ],
         )
 
     async def upgrade(self, names: list[str]) -> list[str]:

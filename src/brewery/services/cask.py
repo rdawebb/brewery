@@ -17,6 +17,7 @@ from brewery.core.errors import (
     AlreadyInstalledWarning,
     BrewError,
     OperationInProgressError,
+    UninstallStoppedError,
 )
 from brewery.core.host import current_platform
 from brewery.core.locks import cask_lock
@@ -39,6 +40,7 @@ from brewery.providers.cask import (
     read_cask_opts,
     url_headers,
 )
+from brewery.providers.cask_steps import STAGES
 from brewery.providers.caskroom import (
     Download,
     install_artifacts,
@@ -560,27 +562,31 @@ async def uninstall_casks(
     backend: UninstallBackend,
     env: BreweryENV | None = None,
     zap: bool = False,
+    force: bool = False,
 ) -> Notes:
     """Uninstall every named cask, natively where possible, the rest through brew.
 
-    A cask whose native uninstall fails part way goes to brew, which retries it; a
-    cask another process has locked is left alone.
+    A cask whose native uninstall fails before changing anything goes to brew; one
+    that fails part way, or that another process has locked, is left alone, since
+    brew would rerun its quits, scripts and steps.
 
     Args:
         names: Cask tokens to uninstall.
         backend: The cask backend for the casks brewery can't uninstall.
         env: Brewery environment (paths), resolved if omitted.
         zap: Also remove each cask's `zap` files, as `--zap` does.
+        force: Carry on past what fails, natively and through brew's `--force`.
 
     Returns:
-        A (token, reason) note per cask left alone because it was locked.
+        A (token, reason) note per cask left alone, locked or stopped part way.
     """
     env = env or get_brewery_env()
     plat = current_platform()
     to_brew: list[str] = []
-    locked: Notes = []
+    stopped: Notes = []
     keys = ("uninstall", "zap") if zap else ("uninstall",)
     receipts = {t: read_receipt(env.caskroom / t) for t in names}
+
     if any(
         needs_sudo((r or {}).get("uninstall_artifacts"), directives=keys)
         for r in receipts.values()
@@ -597,12 +603,17 @@ async def uninstall_casks(
                     _locked,
                     token,
                     env,
-                    functools.partial(uninstall_cask, token, env, zap=zap),
+                    functools.partial(uninstall_cask, token, env, zap=zap, force=force),
                 )
                 continue
 
             except OperationInProgressError as exc:
-                _note_locked(token, exc, locked, _NULL_PROGRESS)
+                _note_locked(token, exc, stopped, _NULL_PROGRESS)
+                continue
+
+            except UninstallStoppedError as exc:
+                log.warning(event="cask_uninstall_stopped", cask=token, error=str(exc))
+                stopped.append((token, str(exc)))
                 continue
 
             except (BrewError, OSError) as exc:
@@ -612,9 +623,9 @@ async def uninstall_casks(
         to_brew.append(token)
 
     if to_brew:
-        await backend.uninstall(names=to_brew, zap=zap)
+        await backend.uninstall(names=to_brew, zap=zap, force=force)
 
-    return locked
+    return stopped
 
 
 async def _fetch(
@@ -730,6 +741,11 @@ async def upgrade_casks(
         receipt = read_receipt(token_dir)
         reasons[token] = classify_uninstall(receipt, plat, zap=False)
         removing = (receipt or {}).get("uninstall_artifacts")
+
+        # brew upgrades a cask with steps until `upgrade_cask` runs the old ones
+        if any(isinstance(s, dict) and STAGES & s.keys() for s in removing or []):
+            reasons[token] = reasons[token] or "`*_steps` upgrade"
+
         if needs_sudo(removing, directives=("uninstall",)):
             sudo.add(token)
 

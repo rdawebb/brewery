@@ -195,6 +195,19 @@ class CellarError(SysError):
         super().__init__(message, context=ctx)
 
 
+class UninstallStoppedError(CellarError):
+    """A native cask uninstall failed part way; not a fallback signal.
+
+    The receipt is kept so a rerun can finish the uninstall. Callers report
+    the cask as stopped rather than passing it to brew, which would rerun
+    what's already done.
+
+    Typically indicates:
+        - An uninstall step, directive or script failing
+        - A file system error while removing artifacts
+    """
+
+
 class DownloadError(SysError):
     """A bottle could not be downloaded or failed verification.
 

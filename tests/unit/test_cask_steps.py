@@ -285,6 +285,44 @@ def test_set_ownership_falls_back_to_sudo_and_names_app_management(
     )
 
 
+def test_set_ownership_sudo_success_is_enough(ctx, monkeypatch) -> None:
+    """Test that a plain `chown` failing and sudo succeeding raises nothing."""
+    (ctx.roots["staged_path"] / "Foo.app").mkdir()
+    calls = []
+    monkeypatch.setattr(
+        cask_steps.subprocess, "run", lambda cmd, **_: _done(returncode=1)
+    )
+    monkeypatch.setattr(
+        cask_steps, "run_sudo", lambda *cmd, check=True: calls.append(cmd) or _done()
+    )
+    step = {
+        "type": "set_ownership",
+        "paths": [{"base": "staged_path", "path": "Foo.app"}],
+    }
+
+    run_steps([step], ctx)
+
+    assert len(calls) == 1
+
+
+def test_terminate_process_stops_once_it_succeeds(ctx, monkeypatch) -> None:
+    """Test that a kill that succeeds on the second attempt isn't tried again."""
+    codes = iter([1, 0, 0])
+    calls, sleeps = [], []
+    monkeypatch.setattr(
+        cask_steps.subprocess,
+        "run",
+        lambda cmd, **_: calls.append(cmd) or _done(returncode=next(codes)),
+    )
+    monkeypatch.setattr(cask_steps.time, "sleep", sleeps.append)
+    step = {"type": "terminate_process", "name": "Foo", "attempts": 3}
+
+    run_steps([step], ctx)
+
+    assert calls == [["/usr/bin/killall", "Foo"]] * 2
+    assert sleeps == [1]
+
+
 def test_terminate_process_retries_then_must_succeed(ctx, monkeypatch) -> None:
     """Test `pkill -f` for a full match, retried a second apart, then an error."""
     calls, sleeps = [], []
@@ -358,6 +396,25 @@ def test_delete_keychain_certificate_filters_by_hash(
     run_steps([step], ctx)
 
     assert deleted == ([want.upper()] if matching else ["AA11", want.upper()])
+
+
+def test_delete_keychain_certificate_without_its_file_deletes_nothing(
+    ctx, monkeypatch
+) -> None:
+    """Test that a missing `matching_certificate` file isn't read as "all so named"."""
+    calls = []
+    monkeypatch.setattr(
+        cask_steps, "run_sudo", lambda *cmd, check=True: calls.append(cmd) or _done()
+    )
+    step = {
+        "type": "delete_keychain_certificate",
+        "name": "Foo CA",
+        "matching_certificate": {"base": "staged_path", "path": "ca.pem"},
+    }
+
+    run_steps([step], ctx)
+
+    assert calls == []
 
 
 @pytest.mark.parametrize(

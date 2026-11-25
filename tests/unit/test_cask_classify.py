@@ -445,8 +445,22 @@ class TestClassifyUninstall:
             pytest.param(
                 {"uninstall_artifacts": [{"postflight_steps": [{"steps": []}]}]},
                 False,
-                "`*_steps` uninstall",
+                "",
                 id="steps",
+            ),
+            pytest.param(
+                {
+                    "uninstall_artifacts": [
+                        {
+                            "uninstall_postflight_steps": [
+                                {"steps": [{"type": "configure_php"}]}
+                            ]
+                        }
+                    ]
+                },
+                False,
+                "`uninstall_postflight_steps` step `configure_php`",
+                id="steps_brew",
             ),
             pytest.param(
                 {"uninstall_artifacts": [{"uninstall": ["quit"]}]},
@@ -527,4 +541,13 @@ class TestNeedsSudo:
     ) -> None:
         """Test that an uninstall script needs sudo only when it says so."""
         artifacts = [{"uninstall": [{key: {"executable": "x", "sudo": sudo}}]}]
+        assert needs_sudo(artifacts, directives=("uninstall",)) is expected
+
+    @pytest.mark.parametrize(
+        ("key", "expected"),
+        [("uninstall_preflight_steps", True), ("postflight_steps", False)],
+    )
+    def test_uninstall_steps_need_sudo_when_removing(self, key, expected) -> None:
+        """Test that a removal counts the `uninstall_*` steps, not the install ones."""
+        artifacts = [{key: [{"steps": [{"type": "run", "sudo": True}]}]}]
         assert needs_sudo(artifacts, directives=("uninstall",)) is expected

@@ -11,6 +11,7 @@ from _repo_helpers import _add_alias, _install_formula, _provider_calls, zip_app
 from _rows import cask_dict
 
 import brewery.providers.cask_directives as directives
+from brewery.core.errors import CellarError
 from brewery.core.models import PackageKind
 from brewery.core.repo import Repository
 from brewery.providers import caskroom
@@ -66,7 +67,7 @@ class TestUninstall:
         routes them to the correct backend: formula -> native, cask -> provider"""
         import shutil
 
-        async def mock_cask_uninstall(names, *, zap=False) -> list[str]:
+        async def mock_cask_uninstall(names, *, zap=False, force=False) -> list[str]:
             """Simulate brew uninstall removing the keg during the operation.
 
             Args:
@@ -317,16 +318,92 @@ class TestUninstallCasks:
 
         assert len(sudo_validations) == calls
 
-    async def test_failure_goes_to_brew(
-        self, repo, mock_brew, install, monkeypatch
+    async def test_failure_part_way_is_reported_not_sent_to_brew(
+        self, repo, mock_brew, mock_env, install, monkeypatch
     ) -> None:
-        """Test that a cask whose native uninstall fails part way goes to brew."""
-        await install()
+        """Test that a cask whose native uninstall fails part way isn't rerun by brew.
 
-        def refuse(path) -> None:
+        The receipt is kept, so rerunning the uninstall finishes it natively.
+        """
+        await install()
+        real_remove = caskroom.remove
+
+        def refuse(path, **_) -> None:
             raise PermissionError(f"can't remove {path}")
 
         monkeypatch.setattr(caskroom, "remove", refuse)
+        removed, failures = await uninstall_packages(
+            repo, ["foo"], kind=PackageKind.CASK
+        )
+
+        assert _provider_calls(mock_brew, "uninstall") == []
+        assert removed == []
+        assert [(n, "stopped part way" in r) for n, r in failures] == [("foo", True)]
+        assert (mock_env.caskroom / "foo" / ".metadata").is_dir()
+
+        monkeypatch.setattr(caskroom, "remove", real_remove)
+        removed, failures = await uninstall_packages(
+            repo, ["foo"], kind=PackageKind.CASK
+        )
+
+        assert (removed, failures) == (["foo"], [])
+        assert _provider_calls(mock_brew, "uninstall") == []
+        assert not (mock_env.caskroom / "foo").exists()
+
+    async def test_force_carries_on_past_a_stuck_step(
+        self, repo, mock_brew, mock_env, install, tmp_path
+    ) -> None:
+        """Test that --force removes a cask whose uninstall step can't be redone."""
+        gone = {"base": "appdir", "path": "gone"}
+        await install(
+            {
+                "uninstall_preflight_steps": [
+                    {"steps": [{"type": "move", "source": gone, "target": gone}]}
+                ]
+            }
+        )
+
+        _, failures = await uninstall_packages(repo, ["foo"], kind=PackageKind.CASK)
+        assert "--force" in failures[0][1]
+
+        removed, failures = await uninstall_packages(
+            repo, ["foo"], kind=PackageKind.CASK, force=True
+        )
+
+        assert (removed, failures) == (["foo"], [])
+        assert _provider_calls(mock_brew, "uninstall") == []
+        assert not (tmp_path / "apps" / "Foo.app").exists()
+        assert not (mock_env.caskroom / "foo").exists()
+
+    async def test_force_keeps_the_receipt_when_an_artifact_stays(
+        self, repo, mock_brew, mock_env, install, monkeypatch
+    ) -> None:
+        """Test that --force doesn't drop the receipt of an app it couldn't remove."""
+        await install()
+
+        def refuse(path, **_) -> None:
+            raise PermissionError(f"can't remove {path}")
+
+        monkeypatch.setattr(caskroom, "remove", refuse)
+        removed, failures = await uninstall_packages(
+            repo, ["foo"], kind=PackageKind.CASK, force=True
+        )
+
+        assert removed == []
+        assert [(n, "stopped part way" in r) for n, r in failures] == [("foo", True)]
+        assert _provider_calls(mock_brew, "uninstall") == []
+        assert (mock_env.caskroom / "foo" / ".metadata").is_dir()
+
+    async def test_failure_before_any_change_goes_to_brew(
+        self, repo, mock_brew, install, monkeypatch
+    ) -> None:
+        """Test that a cask whose artifacts can't be located goes to brew untouched."""
+        await install()
+
+        def lost(*a, **k) -> None:
+            raise CellarError("can't locate")
+
+        monkeypatch.setattr(caskroom, "_locate", lost)
         await uninstall_packages(repo, ["foo"], kind=PackageKind.CASK)
 
         assert _provider_calls(mock_brew, "uninstall") == [

@@ -25,7 +25,7 @@ import signal
 import stat
 import subprocess
 import time
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Generator, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -124,6 +124,7 @@ def run_directives(
     apps: Sequence[Path] = (),
     staged: Path | None = None,
     prefix: Path | None = None,
+    force: bool = False,
 ) -> list[str]:
     """Run the stanzas' directives, one directive at a time across all of them.
 
@@ -137,6 +138,7 @@ def run_directives(
         staged: The installed version's sources, which a script's relative
             executable is in; needed for `script` and `early_script`.
         prefix: The Homebrew prefix, whose `bin` and `sbin` lead a script's PATH.
+        force: Log a directive that fails and carry on with the rest.
 
     Returns:
         The bundle ids `quit` closed, for an upgrade to reopen.
@@ -162,18 +164,19 @@ def run_directives(
             ):
                 continue
 
-            if name == "login_item":
-                _login_item(_flat(stanza[name]), apps)
+            with tolerate(force, f"`{name}`"):
+                if name == "login_item":
+                    _login_item(_flat(stanza[name]), apps)
 
-            elif name in ("script", "early_script"):
-                if staged is None or prefix is None:
-                    raise CellarError(f"`{name}` needs the staged dir and prefix")
+                elif name in ("script", "early_script"):
+                    if staged is None or prefix is None:
+                        raise CellarError(f"`{name}` needs the staged dir and prefix")
 
-                run_script(stanza[name], staged, prefix)
-                time.sleep(1)  # Lets whatever the uninstaller started finish
+                    run_script(stanza[name], staged, prefix)
+                    time.sleep(1)  # Lets whatever the uninstaller started finish
 
-            else:
-                closed += _RUNNERS[name](_flat(stanza[name])) or []
+                else:
+                    closed += _RUNNERS[name](_flat(stanza[name])) or []
 
     return closed
 
@@ -196,8 +199,68 @@ def reopen(bundle_ids: Sequence[str], apps: Iterable[Path]) -> None:
         _run("open", "-b", bundle_id)
 
 
-def remove(path: Path) -> None:
+@contextlib.contextmanager
+def tolerate(force: bool, what: str) -> Generator[None]:
+    """Log and carry on past a failure when forced, as `uninstall --force` does.
+
+    Args:
+        force: Carry on rather than raise.
+        what: What failed, for the warning.
+
+    Yields:
+        Nothing.
+    """
+    try:
+        yield
+
+    except (CellarError, OSError) as exc:
+        if not force:
+            raise
+
+        log.warning(f"--force: carried on past {what}: {exc}")
+
+
+def remove(path: Path, *, sudo: bool = False) -> None:
     """Remove a file, link or directory tree, if it's there.
+
+    Args:
+        path: The path to remove.
+        sudo: On a denial, clear its flags, mode and ACLs and retry, then finish
+            through sudo, as brew's `gain_permissions_remove` does for a cask's
+            artifacts.
+
+    Raises:
+        PermissionError: If the user can't remove it and `sudo` is false.
+        CellarError: If it can't be removed even with sudo.
+    """
+    try:
+        _remove(path)
+
+    except PermissionError:
+        if not sudo:
+            raise
+
+        target = str(path)
+        flags = ["-h"] if path.is_symlink() else ["-R"] if path.is_dir() else []
+        for cmd in (
+            ("/usr/bin/chflags", *flags, "--", "000", target),
+            ("/bin/chmod", *flags, "--", "u+rwx", target),
+            ("/bin/chmod", *flags, "-N", target),
+        ):
+            with contextlib.suppress(OSError):  # No chflags off macOS
+                _run(*cmd)
+
+        try:
+            _remove(path)
+
+        except PermissionError:
+            # Root's rm ignores mode and ACLs; only flags like `uchg` stop it
+            run_sudo("/usr/bin/chflags", *flags, "--", "000", target, check=False)
+            run_sudo("/bin/rm", "-r", "-f", "--", target)
+
+
+def _remove(path: Path) -> None:
+    """Remove a file, link or directory tree, if it's there, as the user.
 
     Args:
         path: The path to remove.

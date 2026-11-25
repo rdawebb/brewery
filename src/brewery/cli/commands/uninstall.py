@@ -38,6 +38,10 @@ def uninstall(
         bool,
         app.Option("--zap", help="Also remove casks' settings, caches and other files"),
     ] = False,
+    force: Annotated[
+        bool,
+        app.Option("--force", help="Carry on past failures when uninstalling casks"),
+    ] = False,
 ) -> None:
     """Uninstall a package or list of packages.
 
@@ -47,6 +51,7 @@ def uninstall(
         cask: Treat the package(s) as casks. With neither flag, auto-detects.
         yes: If true, skip confirmation prompt.
         zap: Also remove the files each cask's `zap` stanza lists.
+        force: Carry on past a cask's uninstall failures, removing it anyway.
     """
     kind: PackageKind | None = kind_from_flags(formula, cask)
 
@@ -58,7 +63,7 @@ def uninstall(
     with _repository() as repo:
         with spinner("Uninstalling...") as status, sudo_prompts(status):
             removed, failures = run_async(
-                coro=uninstall_packages(repo, names, kind, zap=zap)
+                coro=uninstall_packages(repo, names, kind, zap=zap, force=force)
             )
 
         print_result(

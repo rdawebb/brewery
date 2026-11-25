@@ -302,11 +302,9 @@ def classify_uninstall(
     ):
         return "no uninstall receipt"
 
-    # brew removes every cask with steps until native uninstall runs them
-    if any(isinstance(s, dict) and cask_steps.STAGES & s.keys() for s in artifacts):
-        return "`*_steps` uninstall"
+    directives = ("uninstall", "zap") if zap else ("uninstall",)
 
-    return _artifact_reason(artifacts, ("uninstall", "zap") if zap else ("uninstall",))
+    return _artifact_reason(artifacts, directives) or cask_steps.unsupported(artifacts)
 
 
 def needs_sudo(artifacts: Any, *, directives: tuple[str, ...] = ()) -> bool:
@@ -321,7 +319,7 @@ def needs_sudo(artifacts: Any, *, directives: tuple[str, ...] = ()) -> bool:
         True for a `pkg`, an `installer script` run with sudo, or a pre- or
         postflight step that always uses sudo, when installing;
         for a `pkgutil`, or a `script` or `early_script` run with sudo, in one of
-        `directives`.
+        `directives`, or an `uninstall_*` step that always uses sudo, when removing.
     """
 
     def sudo_script(value: Any) -> bool:
@@ -343,6 +341,14 @@ def needs_sudo(artifacts: Any, *, directives: tuple[str, ...] = ()) -> bool:
                     cask_steps.needs_sudo,
                     cask_steps.steps(stanza, cask_steps.INSTALLING),
                 )
+            )
+        ):
+            return True
+
+        if directives and any(
+            map(
+                cask_steps.needs_sudo,
+                cask_steps.steps(stanza, cask_steps.UNINSTALLING),
             )
         ):
             return True

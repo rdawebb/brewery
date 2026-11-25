@@ -32,7 +32,9 @@ class RecordingBackend:
         self.calls: list[list[str]] = []
         self.fail = fail
 
-    async def uninstall(self, names: list[str], *, zap: bool = False) -> list[str]:
+    async def uninstall(
+        self, names: list[str], *, zap: bool = False, force: bool = False
+    ) -> list[str]:
         """Record the uninstall call and optionally raise a failure.
 
         Args:

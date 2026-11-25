@@ -7,6 +7,7 @@ import os
 import plistlib
 import signal
 import subprocess
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -131,6 +132,52 @@ def sudo_calls(monkeypatch) -> list[tuple[str, ...]]:
     monkeypatch.setattr(directives, "run_sudo", run_sudo)
 
     return calls
+
+
+class TestRemove:
+    """Tests for removing a path, through sudo only when asked."""
+
+    @pytest.fixture
+    def denied(self, tmp_path, monkeypatch) -> Path:
+        """An app dir the user can't remove."""
+        app = tmp_path / "Foo.app"
+        app.mkdir()
+
+        def rmtree(path) -> None:
+            raise PermissionError(f"can't remove {path}")
+
+        monkeypatch.setattr(directives.shutil, "rmtree", rmtree)
+
+        return app
+
+    def test_sudo_finishes_what_the_user_cant(self, denied, sudo_calls) -> None:
+        """Test that `sudo=True` clears the flags and hands it to `rm` as root."""
+        directives.remove(denied, sudo=True)
+
+        assert sudo_calls == [
+            ("/usr/bin/chflags", "-R", "--", "000", str(denied)),
+            ("/bin/rm", "-r", "-f", "--", str(denied)),
+        ]
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="chflags is macOS's")
+    def test_a_locked_file_is_unlocked_without_sudo(self, tmp_path, sudo_calls):
+        """Test that the user's own `uchg` flag is cleared, so sudo isn't needed."""
+        app = tmp_path / "Foo.app"
+        (app / "Contents").mkdir(parents=True)
+        (app / "Contents" / "Info.plist").write_text("")
+        _RUN(["/usr/bin/chflags", "uchg", app / "Contents" / "Info.plist"], check=True)
+
+        directives.remove(app, sudo=True)
+
+        assert not app.exists()
+        assert sudo_calls == []
+
+    def test_without_sudo_a_denial_is_raised(self, denied, sudo_calls) -> None:
+        """Test that a denied removal raises, and sudo isn't run, by default."""
+        with pytest.raises(PermissionError):
+            directives.remove(denied)
+
+        assert sudo_calls == []
 
 
 class TestPkgutil:
