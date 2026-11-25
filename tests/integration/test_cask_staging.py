@@ -646,6 +646,117 @@ class TestUpgradeCask:
         assert not (staged / "b").exists()
         assert not (brew.caskroom / "foo" / "2.0").exists()
 
+    def test_steps_carry_files_across_an_upgrade(self, brew, tmp_path) -> None:
+        """Test envs kept as miniconda's are, through a shared `{{temp}}`.
+
+        Here in the version dir, which an upgrade removes: a failed upgrade's
+        rollback reruns the old postflight, which moves them back; a successful
+        one's new postflight moves them into the new version.
+        """
+        saved = {"path": "{{temp}}/{{token}}-envs"}
+        envs = {"base": "staged_path", "path": "envs"}
+
+        def move(source, target):
+            guard = {
+                "path": "{{staged_path}}/envs" if source is envs else saved["path"]
+            }
+            guard["condition"] = "if_exists"
+            return {
+                "type": "move",
+                "source": source,
+                "target": target,
+                "guards": [guard],
+            }
+
+        def row(version):
+            out, back = move(envs, saved), move(saved, envs)
+            return cask_row(
+                "foo",
+                version=version,
+                url="https://e.org/foo",
+                artifacts=[
+                    {"uninstall_preflight_steps": [{"steps": [out]}]},
+                    {"postflight_steps": [{"steps": [back]}]},
+                ],
+            )
+
+        (tmp_path / "x").write_text("")
+        install_artifacts(
+            row("1.0"),
+            stage(row("1.0"), {"x": tmp_path / "x"}, brew.caskroom),
+            brew.env,
+        )
+        (brew.caskroom / "foo" / "1.0" / "envs" / "py").mkdir(parents=True)
+
+        bad = tmp_path / "bad"
+        bad.write_bytes(b"7z\xbc\xaf\x27\x1c" + b"\x00" * 32)
+        with pytest.raises(ExtractionError):
+            upgrade_cask(row("2.0"), bad, brew.env)
+
+        assert (brew.caskroom / "foo" / "1.0" / "envs" / "py").is_dir()
+
+        upgrade_cask(row("2.0"), {"x": tmp_path / "x"}, brew.env)
+
+        assert not (brew.caskroom / "foo" / "1.0").exists()
+        assert (brew.caskroom / "foo" / "2.0" / "envs" / "py").is_dir()
+
+    def test_partly_uninstalled_upgrade_reruns_steps(self, brew, tmp_path) -> None:
+        """Test a rollback reruns the old steps when the old uninstall fails partway."""
+        saved = {"path": "{{temp}}/{{token}}-envs"}
+        envs = {"base": "staged_path", "path": "envs"}
+
+        def move(source, target, guard):
+            return {
+                "type": "move",
+                "source": source,
+                "target": target,
+                "guards": [{"path": guard, "condition": "if_exists"}],
+            }
+
+        missing = {"base": "staged_path", "path": "missing"}
+
+        def row(version):
+            return cask_row(
+                "foo",
+                version=version,
+                url="https://e.org/foo",
+                artifacts=[
+                    {
+                        "uninstall_preflight_steps": [
+                            {"steps": [move(envs, saved, "{{staged_path}}/envs")]}
+                        ]
+                    },
+                    {
+                        "postflight_steps": [
+                            {"steps": [move(saved, envs, saved["path"])]}
+                        ]
+                    },
+                    # Fails once the envs are moved out, before the old version's backed up
+                    {
+                        "uninstall_postflight_steps": [
+                            {
+                                "steps": [
+                                    {"type": "move", "source": missing, "target": envs}
+                                ]
+                            }
+                        ]
+                    },
+                ],
+            )
+
+        (tmp_path / "x").write_text("")
+        install_artifacts(
+            row("1.0"),
+            stage(row("1.0"), {"x": tmp_path / "x"}, brew.caskroom),
+            brew.env,
+        )
+        (brew.caskroom / "foo" / "1.0" / "envs" / "py").mkdir(parents=True)
+
+        with pytest.raises(CellarError):
+            upgrade_cask(row("2.0"), {"x": tmp_path / "x"}, brew.env)
+
+        assert (brew.caskroom / "foo" / "1.0" / "envs" / "py").is_dir()
+
     def test_failed_pkg_upgrade_reinstalls_the_old_pkg(
         self, brew, tmp_path, monkeypatch
     ) -> None:

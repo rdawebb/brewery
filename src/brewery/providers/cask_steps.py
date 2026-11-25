@@ -306,6 +306,7 @@ def run_stage(
     ctx: Context | None,
     *,
     force: bool = False,
+    install: bool = False,
 ) -> None:
     """Run one stage's blocks when removing, from a receipt's `uninstall_artifacts`.
 
@@ -317,6 +318,8 @@ def run_stage(
         key: The stage.
         ctx: The context; None when the cask has no steps.
         force: Log a step that fails and carry on with the rest.
+        install: Run pre/postflight steps in full instead, as a failed upgrade's
+            rollback does.
 
     Raises:
         CellarError: If a step fails.
@@ -326,7 +329,8 @@ def run_stage(
 
     for stanza in artifacts:
         for block in stanza.get(key) or []:
-            run_steps(block["steps"], ctx, unlink=key in INSTALLING, force=force)
+            unlink = key in INSTALLING and not install
+            run_steps(block["steps"], ctx, unlink=unlink, force=force)
 
 
 def run_steps(

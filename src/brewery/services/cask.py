@@ -40,7 +40,6 @@ from brewery.providers.cask import (
     read_cask_opts,
     url_headers,
 )
-from brewery.providers.cask_steps import STAGES
 from brewery.providers.caskroom import (
     Download,
     install_artifacts,
@@ -741,10 +740,6 @@ async def upgrade_casks(
         receipt = read_receipt(token_dir)
         reasons[token] = classify_uninstall(receipt, plat, zap=False)
         removing = (receipt or {}).get("uninstall_artifacts")
-
-        # brew upgrades a cask with steps until `upgrade_cask` runs the old ones
-        if any(isinstance(s, dict) and STAGES & s.keys() for s in removing or []):
-            reasons[token] = reasons[token] or "`*_steps` upgrade"
 
         if needs_sudo(removing, directives=("uninstall",)):
             sudo.add(token)

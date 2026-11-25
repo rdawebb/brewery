@@ -319,6 +319,7 @@ def install_artifacts(
     languages: Sequence[str] = (),
     explicit: Mapping[str, Any] | None = None,
     reuse: Collection[Path] = (),
+    temp: Path | None = None,
 ) -> str:
     """Move and link a staged cask's artifacts into place, as brew does.
 
@@ -340,6 +341,8 @@ def install_artifacts(
         languages: `--language` values, recorded so `brew upgrade` keeps the variant.
         explicit: The installed config's `explicit` part, which an upgrade keeps.
         reuse: Targets an upgrade emptied rather than removed, to move into.
+        temp: The steps' `{{temp}}`, which an upgrade shares with the old
+            version's uninstall and cleans up; a new one if None.
 
     Returns:
         How to run an `installer manual`'s installer, which is left to the user;
@@ -370,7 +373,8 @@ def install_artifacts(
                                 row.token,
                                 str(row.version),
                                 staged,
-                                stack.enter_context(cask_steps.scratch(row.token)),
+                                temp
+                                or stack.enter_context(cask_steps.scratch(row.token)),
                                 env.prefix,
                                 env.cellar,
                                 dirs,
@@ -582,13 +586,15 @@ def upgrade_cask(
     """Replace an installed cask with the version `row` describes.
 
     The old version's `uninstall` directives run (`signal` only if `on_upgrade`
-    lists it), then its artifacts are set aside in its version dir; an app dir
-    the new version also installs is emptied rather than removed, since macOS
-    treats a removed app as uninstalled; if staging or installing the new version
-    fails, the old version, its receipt and its artifacts are put back, its pkgs
-    and installer scripts rerun if its `pkgutil` or scripts removed them, and any
-    apps it quit are reopened; the user's Gatekeeper approval of the old apps carries
-    over to the new ones when they're signed by the same identity.
+    lists it), then its artifacts are set aside in its version dir, with its
+    `*_steps` stanzas around them as on uninstall; an app dir the new version
+    also installs is emptied rather than removed, since macOS treats a removed
+    app as uninstalled; if staging or installing the new version fails, the old
+    version, its receipt and its artifacts are put back, its pkgs and installer
+    scripts rerun if its `pkgutil` or scripts removed them, its pre/postflight steps
+    rerun, and any apps it quit are reopened; both versions' steps share one  `{{temp}}`,
+    kept on failure if anything is in it; the user's Gatekeeper approval  of the old
+    apps carries over to the new ones when they're signed by the same identity.
 
     Args:
         row: The new version's catalog row, already localised.
@@ -653,69 +659,88 @@ def upgrade_cask(
     done: list[tuple[str, Path, Path]] = []
     backed_up = False
 
-    try:
-        closed = run_directives(
-            directives,
-            deferred=False,
-            upgrade=True,
-            staged=old_sources,
-            prefix=env.prefix,
-        )
-        _set_aside(old, old_sources, env, old_dirs, keep, done)
-        run_directives(directives, deferred=True)
+    with ExitStack() as stack:  # Keeps `{{temp}}` if the upgrade fails
+        temp: Path | None = None
+        old_ctx: cask_steps.Context | None = None
+        if any(cask_steps.STAGES & s.keys() for s in (*old, *(row.artifacts or []))):
+            temp = stack.enter_context(cask_steps.scratch(row.token))
+            old_ctx = cask_steps.context(
+                row.token, version, old_staged, temp, env.prefix, env.cellar, old_dirs
+            )
 
-        for path, backup in backups:
-            if path.exists():
-                path.rename(backup)
-        backed_up = True
-
-        staged = stage(
-            row,
-            download,
-            env.caskroom,
-            on_request=receipt.get("installed_on_request") is not False,
-        )
-
-        note = install_artifacts(
-            row,
-            staged,
-            env,
-            dirs=dirs,
-            binaries=binaries,
-            languages=languages,
-            explicit=explicit,
-            reuse=keep,
-        )
-
-    except BaseException:
         try:
-            if backed_up:
-                shutil.rmtree(token_dir / str(row.version), ignore_errors=True)
-                shutil.rmtree(meta / str(row.version), ignore_errors=True)
+            for key in ("preflight_steps", "uninstall_preflight_steps"):
+                cask_steps.run_stage(old, key, old_ctx)
+
+            closed = run_directives(
+                directives,
+                deferred=False,
+                upgrade=True,
+                staged=old_sources,
+                prefix=env.prefix,
+            )
+            _set_aside(old, old_sources, env, old_dirs, keep, done)
+            for key in ("postflight_steps", "uninstall_postflight_steps"):
+                cask_steps.run_stage(old, key, old_ctx)
+
+            run_directives(directives, deferred=True)
 
             for path, backup in backups:
-                if backup.exists():
-                    backup.rename(path)
+                if path.exists():
+                    path.rename(backup)
+            backed_up = True
 
-            for p in meta.iterdir():
-                if p.is_file() and p not in saved:
-                    p.unlink()
+            staged = stage(
+                row,
+                download,
+                env.caskroom,
+                on_request=receipt.get("installed_on_request") is not False,
+            )
 
-            for p, data in saved.items():
-                p.write_bytes(data)
+            note = install_artifacts(
+                row,
+                staged,
+                env,
+                dirs=dirs,
+                binaries=binaries,
+                languages=languages,
+                explicit=explicit,
+                reuse=keep,
+                temp=temp,
+            )
 
-            _put_back(done)
+        except BaseException:
+            try:
+                if backed_up:
+                    shutil.rmtree(token_dir / str(row.version), ignore_errors=True)
+                    shutil.rmtree(meta / str(row.version), ignore_errors=True)
 
-            # Maybe not needed if a failure occurs before these run
-            if any(k in d for d in directives for k in _REMOVES_INSTALLED):
-                _reinstall(old, old_sources, row, env, old_dirs)
+                for path, backup in backups:
+                    if backup.exists():
+                        backup.rename(path)
 
-            reopen(closed, old_apps)
+                for p in meta.iterdir():
+                    if p.is_file() and p not in saved:
+                        p.unlink()
 
-        except (OSError, CellarError) as exc:
-            log.warning(f"couldn't put back {row.token} {version}: {exc}")
+                for p, data in saved.items():
+                    p.write_bytes(data)
 
-        raise
+                _rerun_steps(old, "preflight_steps", old_ctx)
+                _put_back(done)
+
+                # Maybe not needed if a failure occurs before these run
+                if any(k in d for d in directives for k in _REMOVES_INSTALLED):
+                    _reinstall(old, old_sources, row, env, old_dirs)
+
+                _rerun_steps(old, "postflight_steps", old_ctx)
+
+                reopen(closed, old_apps)
+
+            except (OSError, CellarError) as exc:
+                log.warning(f"couldn't put back {row.token} {version}: {exc}")
+
+            raise
 
     for _path, backup in backups:
         shutil.rmtree(backup, ignore_errors=True)
@@ -821,6 +846,25 @@ def _signed_by(app: Path, requirement: str) -> bool | None:
     return {0: True, 3: False}.get(
         subprocess.run(cmd, capture_output=True, check=False).returncode
     )
+
+
+def _rerun_steps(
+    old: Sequence[Mapping[str, Any]], key: str, ctx: cask_steps.Context | None
+) -> None:
+    """Rerun the old version's pre/postflight steps, after a failed upgrade.
+
+    A step that fails is logged, so the rest of the rollback still runs.
+
+    Args:
+        old: The old version's receipt artifacts.
+        key: `preflight_steps` or `postflight_steps`.
+        ctx: The old version's context, sharing the upgrade's `{{temp}}`.
+    """
+    try:
+        cask_steps.run_stage(old, key, ctx, install=True)
+
+    except CellarError as exc:
+        log.warning(f"couldn't rerun the old {key}: {exc}")
 
 
 def _set_aside(
