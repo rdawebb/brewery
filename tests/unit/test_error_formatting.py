@@ -60,6 +60,12 @@ class TestHandleError:
                 EXIT_SYSTEM_ERROR,
                 id="non_brewerror_is_system",
             ),
+            # A TaskGroup's failure is mapped by the error inside it
+            pytest.param(
+                ExceptionGroup("tg", [ExceptionGroup("inner", [TransientError("x")])]),
+                EXIT_TRANSIENT_ERROR,
+                id="exception_group_unwrapped",
+            ),
         ],
     )
     def test_handle_error(self, error, expected) -> None:

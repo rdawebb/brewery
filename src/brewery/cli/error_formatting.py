@@ -135,6 +135,10 @@ def handle_error(error: Exception) -> int:
     Returns:
         An integer exit code.
     """
+    # TaskGroup cancels everything on first failure, so only first error is relevant
+    while isinstance(error, ExceptionGroup):
+        error = error.exceptions[0]
+
     if isinstance(error, BrewError):
         # A broken log sink must not stop the user seeing the error itself
         with contextlib.suppress(Exception):
