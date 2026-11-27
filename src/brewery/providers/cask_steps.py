@@ -409,58 +409,35 @@ def _step_reason(step: Mapping[str, Any]) -> str:
         ):
             return "guard"
 
-    for spec in _specs(step):
-        if spec.get("base", "absolute") not in _BASES:
+    for spec in _walk(step):  # A path spec is a dict with a `path`
+        if (
+            isinstance(spec, dict)
+            and isinstance(spec.get("path"), str)
+            and spec.get("base", "absolute") not in _BASES
+        ):
             return f"base `{spec['base']}`"
 
-    for value in _strings(step):
-        for token in _TOKEN.findall(value):
+    for value in _walk(step):
+        for token in _TOKEN.findall(value) if isinstance(value, str) else ():
             if token not in _TOKENS:
                 return f"template `{{{{{token}}}}}`"
 
     return ""
 
 
-def _specs(value: Any) -> Iterator[dict[str, Any]]:
-    """Every path spec in a step: a dict with a `path`.
+def _walk(value: Any) -> Iterator[Any]:
+    """Every value in a step, nested dicts and lists included.
 
     Args:
         value: The step, or a value in it.
 
     Yields:
-        Each path spec.
+        The value, then everything in it, depth first.
     """
-    if isinstance(value, dict):
-        if isinstance(value.get("path"), str):
-            yield value
-
-        for v in value.values():
-            yield from _specs(v)
-
-    elif isinstance(value, list):
-        for v in value:
-            yield from _specs(v)
-
-
-def _strings(value: Any) -> Iterator[str]:
-    """Every string in a step.
-
-    Args:
-        value: The step, or a value in it.
-
-    Yields:
-        Each string.
-    """
-    if isinstance(value, str):
-        yield value
-
-    elif isinstance(value, dict):
-        for v in value.values():
-            yield from _strings(v)
-
-    elif isinstance(value, list):
-        for v in value:
-            yield from _strings(v)
+    yield value
+    if isinstance(value, dict | list):
+        for v in value.values() if isinstance(value, dict) else value:
+            yield from _walk(v)
 
 
 def _expand(value: str, ctx: Context) -> str:

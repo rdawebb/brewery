@@ -107,6 +107,10 @@ _WRAPPERS = ".homebrew-command-wrappers"
 # Uninstall directives that can remove what a pkg or installer script installed
 _REMOVES_INSTALLED = ("pkgutil", "script", "early_script")
 
+# The `*_steps` stages around a version's removal, in brew's order
+_BEFORE_REMOVAL = ("preflight_steps", "uninstall_preflight_steps")
+_AFTER_REMOVAL = ("postflight_steps", "uninstall_postflight_steps")
+
 _MANPAGE_SECTION = re.compile(r"\.([1-8]|n|l)(?:\.gz)?$")
 
 # brew's `Cask::Metadata::TIMESTAMP_FORMAT`, to the millisecond
@@ -520,8 +524,8 @@ def uninstall_cask(
                 )
 
             # In brew's order, around the directives and the artifacts' removal
-            for stage in ("preflight_steps", "uninstall_preflight_steps"):
-                cask_steps.run_stage(artifacts, stage, ctx, force=force)
+            for key in _BEFORE_REMOVAL:
+                cask_steps.run_stage(artifacts, key, ctx, force=force)
 
             run_directives(
                 directives,
@@ -550,8 +554,8 @@ def uninstall_cask(
             if reload:
                 subprocess.run(["qlmanage", "-r"], capture_output=True, check=False)
 
-            for stage in ("postflight_steps", "uninstall_postflight_steps"):
-                cask_steps.run_stage(artifacts, stage, ctx, force=force)
+            for key in _AFTER_REMOVAL:
+                cask_steps.run_stage(artifacts, key, ctx, force=force)
 
             run_directives(directives, deferred=True, force=force)
 
@@ -664,7 +668,7 @@ def upgrade_cask(
             )
 
         try:
-            for key in ("preflight_steps", "uninstall_preflight_steps"):
+            for key in _BEFORE_REMOVAL:
                 cask_steps.run_stage(old, key, old_ctx)
 
             closed = run_directives(
@@ -675,7 +679,7 @@ def upgrade_cask(
                 prefix=env.prefix,
             )
             _set_aside(old, old_sources, env, old_dirs, keep, done)
-            for key in ("postflight_steps", "uninstall_postflight_steps"):
+            for key in _AFTER_REMOVAL:
                 cask_steps.run_stage(old, key, old_ctx)
 
             run_directives(directives, deferred=True)
@@ -1308,7 +1312,7 @@ def _reinstall(
 
     pkgs: list[list[Any]] = stanzas(old, "pkg")
     if not pkgs:
-        staged = [p for ext in ("*.pkg", "*.mpkg") for p in sources.rglob(ext)]
+        staged = [p for p in sources.rglob("*") if p.suffix in (".pkg", ".mpkg")]
         if len(staged) > 1:
             log.warning(f"can't tell which pkg to reinstall {row.token} from")
 
