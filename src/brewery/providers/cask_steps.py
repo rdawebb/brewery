@@ -31,12 +31,12 @@ from typing import Any
 from brewery.core.errors import CellarError
 from brewery.core.logging import BreweryLogger, get_logger
 from brewery.core.sudo import run_sudo
-from brewery.core.version import _tokens
+from brewery.core.version import version_parts
 from brewery.providers.cask_directives import (
-    _braces,
-    _sudo_each,
+    braces,
     remove,
     run_script,
+    sudo_each,
     tolerate,
     undeletable,
 )
@@ -195,7 +195,7 @@ def context(
         **dirs,
     }
 
-    parts = [str(t.value) for t in _tokens(version)]
+    parts = version_parts(version)
 
     values = {
         "HOMEBREW_PREFIX": str(prefix),
@@ -521,7 +521,7 @@ def _matches(spec: Mapping[str, Any], ctx: Context) -> list[Path]:
             found.append(Path(c))
             continue
 
-        found += [Path(m) for p in _braces(c) for m in sorted(glob.glob(p))]
+        found += [Path(m) for p in braces(c) for m in sorted(glob.glob(p))]
 
     return found
 
@@ -864,7 +864,7 @@ def _remove(step: Mapping[str, Any], ctx: Context) -> None:
                 raise
             denied.append(path)
 
-    _sudo_each(denied, "/bin/rm", *(["-r"] if step.get("recursive") else []), "-f")
+    sudo_each(denied, "/bin/rm", *(["-r"] if step.get("recursive") else []), "-f")
 
 
 def _contains(path: Path, needle: bytes) -> bool:

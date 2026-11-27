@@ -50,13 +50,14 @@ from brewery.providers.caskroom import (
     upgrade_cask,
 )
 from brewery.providers.downloader import NO_CHECK, BottleRef, Downloader
-from brewery.providers.orchestrator import _NULL_PROGRESS, Outcome, ProgressPort
+from brewery.providers.orchestrator import NULL_PROGRESS, Outcome, ProgressPort
 from brewery.providers.pipeline import PIPELINE_TIMEOUT, run_install
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Collection
     from pathlib import Path
 
+    from brewery.core.host import Platform
     from brewery.core.repo import Repository
 
 log: BreweryLogger = get_logger(name=__name__)
@@ -101,8 +102,9 @@ async def install_casks(
         (token, text) caveat per cask leaving a step to the user.
     """
     env = env or get_brewery_env()
-    progress = progress or _NULL_PROGRESS
+    progress = progress or NULL_PROGRESS
     opts = read_cask_opts(os.environ.get("HOMEBREW_CASK_OPTS", ""))
+    plat = current_platform()
     notes: Notes = []
     caveats: Notes = []
     installed = {p.name for p in repo.cache_mgr.installed_packages(PackageKind.CASK)}
@@ -130,7 +132,7 @@ async def install_casks(
     for token in requested:
         visit(token)
 
-    reasons = {t: _brew_reason(rows[t], opts) for t in order}
+    reasons = {t: _brew_reason(rows[t], opts, plat) for t in order}
     if any(needs_sudo(rows[t].artifacts) for t in order):
         await validate()  # Before any display, rather than mid-way through it
 
@@ -390,12 +392,13 @@ def _depends(row: CaskRow, kind: str) -> list[str]:
     return list((row.depends_on or {}).get(kind) or [])
 
 
-def _brew_reason(row: CaskRow, opts: CaskOpts) -> str:
+def _brew_reason(row: CaskRow, opts: CaskOpts, plat: Platform | None) -> str:
     """Why a cask can't be installed natively, before trying.
 
     Args:
         row: The cask's catalog row.
         opts: The parsed `HOMEBREW_CASK_OPTS`.
+        plat: The host platform, from `current_platform()`.
 
     Returns:
         The reason, or an empty string for a native cask.
@@ -406,7 +409,7 @@ def _brew_reason(row: CaskRow, opts: CaskOpts) -> str:
     if opts.require_sha and row.sha256 in (None, NO_CHECK):
         return "--require-sha"
 
-    return classify(row, current_platform())
+    return classify(row, plat)
 
 
 def _blocked(row: CaskRow, done: set[str], failed_formulae: Collection[str]) -> str:
@@ -503,14 +506,40 @@ async def _install_one(
     if isinstance(download, str):
         return download
 
+    return await _native(
+        row.token,
+        functools.partial(_stage_and_install, row, download, env, opts, on_request),
+        env,
+        progress,
+        caveats,
+    )
+
+
+async def _native(
+    token: str,
+    change: Callable[[], str],
+    env: BreweryENV,
+    progress: ProgressPort,
+    caveats: Notes,
+) -> str:
+    """Make one cask's native install or upgrade, in a thread under its lock.
+
+    Args:
+        token: The cask token.
+        change: Makes the change, returning a note for the user.
+        env: Brewery environment.
+        progress: The progress sink.
+        caveats: The caveats the note is added to.
+
+    Returns:
+        The reason it failed, or an empty string once it's done.
+
+    Raises:
+        OperationInProgressError: Another process has locked the cask.
+    """
+    progress.update(token, "install")
     try:
-        progress.update(row.token, "install")
-        note = await asyncio.to_thread(
-            _locked,
-            row.token,
-            env,
-            functools.partial(_stage_and_install, row, download, env, opts, on_request),
-        )
+        note = await asyncio.to_thread(_locked, token, env, change)
 
     except OperationInProgressError:
         raise
@@ -519,7 +548,7 @@ async def _install_one(
         return str(exc)
 
     if note:
-        caveats.append((row.token, note))
+        caveats.append((token, note))
 
     return ""
 
@@ -607,7 +636,7 @@ async def uninstall_casks(
                 continue
 
             except OperationInProgressError as exc:
-                _note_locked(token, exc, stopped, _NULL_PROGRESS)
+                _note_locked(token, exc, stopped, NULL_PROGRESS)
                 continue
 
             except UninstallStoppedError as exc:
@@ -722,7 +751,7 @@ async def upgrade_casks(
         a step to the user.
     """
     env = env or get_brewery_env()
-    progress = progress or _NULL_PROGRESS
+    progress = progress or NULL_PROGRESS
     opts = read_cask_opts(os.environ.get("HOMEBREW_CASK_OPTS", ""))
     plat = current_platform()
     notes: Notes = []
@@ -759,7 +788,9 @@ async def upgrade_casks(
 
         missing = {f for f in _depends(row, "formula") if f not in formulae}
         reasons[token] = (
-            reasons[token] or _brew_reason(row, opts) or _blocked(row, casks, missing)
+            reasons[token]
+            or _brew_reason(row, opts, plat)
+            or _blocked(row, casks, missing)
         )
 
     if sudo:
@@ -783,35 +814,26 @@ async def upgrade_casks(
                     reasons[token] = download
                     continue
 
-                progress.update(token, "install")
+                upgrade = functools.partial(
+                    upgrade_cask,
+                    rows[token],
+                    download,
+                    env,
+                    dirs=opts.dirs,
+                    binaries=opts.binaries,
+                    languages=opts.languages,
+                )
                 try:
-                    note = await asyncio.to_thread(
-                        _locked,
-                        token,
-                        env,
-                        functools.partial(
-                            upgrade_cask,
-                            rows[token],
-                            download,
-                            env,
-                            dirs=opts.dirs,
-                            binaries=opts.binaries,
-                            languages=opts.languages,
-                        ),
+                    reasons[token] = await _native(
+                        token, upgrade, env, progress, caveats
                     )
 
                 except OperationInProgressError as exc:
                     _note_locked(token, exc, notes, progress)
                     continue
 
-                except (BrewError, OSError) as exc:
-                    reasons[token] = str(exc)
-                    continue
-
-                if note:
-                    caveats.append((token, note))
-
-                progress.finish(token, Outcome.NATIVE.value)
+                if not reasons[token]:
+                    progress.finish(token, Outcome.NATIVE.value)
 
         sem = asyncio.Semaphore(_BREW_CONCURRENCY)
 
@@ -830,6 +852,10 @@ async def upgrade_casks(
                     notes,
                 )
 
-        await asyncio.gather(*(via_brew(t, r) for t, r in reasons.items() if r))
+        # A bug in one cancels the rest, rather than leaving brew calls hanging
+        async with asyncio.TaskGroup() as tg:
+            for token, reason in reasons.items():
+                if reason:
+                    tg.create_task(via_brew(token, reason))
 
     return notes, caveats

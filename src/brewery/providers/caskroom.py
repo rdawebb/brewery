@@ -24,7 +24,6 @@ import shutil
 import stat
 import subprocess
 import tempfile
-import threading
 import time
 from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, suppress
@@ -104,10 +103,6 @@ _LINKED = {
 
 # Where brew writes a `command_wrapper`'s script, under the staged dir
 _WRAPPERS = ".homebrew-command-wrappers"
-
-# One `installer` at a time across the native casks installing concurrently;
-# macOS runs one package install at a time anyway
-_INSTALLER = threading.Lock()
 
 # Uninstall directives that can remove what a pkg or installer script installed
 _REMOVES_INSTALLED = ("pkgutil", "script", "early_script")
@@ -1170,8 +1165,6 @@ def _installer(
 ) -> list[str]:
     """Run an `installer script`, or say how to run an `installer manual`.
 
-    Scripts run one at a time, as pkgs do: many run `installer` themselves.
-
     Args:
         specs: The stanza's `{"manual": path}` or `{"script": spec}` dicts.
         sources: The staged dir the paths are relative to.
@@ -1194,9 +1187,8 @@ def _installer(
             )
 
         else:
-            with _INSTALLER:
-                script = spec.get("script") if isinstance(spec, dict) else None
-                run_script(_expand_all(script, env, dirs), sources, env.prefix)
+            script = spec.get("script") if isinstance(spec, dict) else None
+            run_script(_expand_all(script, env, dirs), sources, env.prefix)
 
     return notes
 
@@ -1260,7 +1252,7 @@ def _install_pkg(path: Path, options: Mapping[str, Any]) -> None:
     user = getpass.getuser()
     args = ["/usr/sbin/installer", "-pkg", str(path), "-target", "/"]
 
-    with _INSTALLER, tempfile.NamedTemporaryFile(suffix=".xml") as choices:
+    with tempfile.NamedTemporaryFile(suffix=".xml") as choices:
         if options.get("choices"):
             choices.write(plistlib.dumps(options["choices"]))
             choices.flush()
@@ -1312,8 +1304,7 @@ def _reinstall(
         ]
 
     for spec in runs:
-        with _INSTALLER:
-            run_script(spec, sources, env.prefix)
+        run_script(spec, sources, env.prefix)
 
     pkgs: list[list[Any]] = stanzas(old, "pkg")
     if not pkgs:

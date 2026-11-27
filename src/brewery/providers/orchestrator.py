@@ -323,7 +323,7 @@ class _NullProgress:
         """Ignore teardown."""
 
 
-_NULL_PROGRESS: ProgressPort = _NullProgress()
+NULL_PROGRESS: ProgressPort = _NullProgress()
 
 
 @dataclass(frozen=True)
@@ -505,7 +505,7 @@ class Orchestrator:
         self.tab_fetcher = tab_fetcher
         self.brew = brew
         self.cfg = config
-        self.progress = progress or _NULL_PROGRESS
+        self.progress = progress or NULL_PROGRESS
         self._install_sem = asyncio.Semaphore(install_concurrency)
         self._tab_sem = asyncio.Semaphore(tab_concurrency)
 

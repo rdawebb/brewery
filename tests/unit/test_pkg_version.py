@@ -6,7 +6,7 @@ import itertools
 
 import pytest
 
-from brewery.core.version import PkgVersion, compare_versions, is_head
+from brewery.core.version import PkgVersion, compare_versions, is_head, version_parts
 
 
 class TestCompareVersions:
@@ -226,3 +226,9 @@ class TestPkgVersionOrdering:
             "1.2.3_1",
             "1.2.10",
         ]
+
+
+def test_version_parts_match_brews_major_minor() -> None:
+    """Test numbers lose leading zeros, as brew's `Version#major_minor` gives them."""
+    assert version_parts("2024.01.5")[:2] == ("2024", "1")
+    assert version_parts("") == ()

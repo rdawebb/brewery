@@ -10,6 +10,7 @@ from _rows import cask_row
 
 from brewery import __version__
 from brewery.core.cask_locale import localise, parse_locale, pick_language
+from brewery.core.errors import SettingsError
 from brewery.core.host import Platform
 from brewery.providers import cask
 from brewery.providers.cask import (
@@ -325,6 +326,11 @@ class TestReadCaskOpts:
         opts = read_cask_opts("")
 
         assert (opts.dirs, opts.binaries, opts.require_sha) == ({}, True, False)
+
+    def test_unclosed_quote_is_a_settings_error(self) -> None:
+        """Test that a value shlex can't split names the variable, not a traceback."""
+        with pytest.raises(SettingsError, match="HOMEBREW_CASK_OPTS"):
+            read_cask_opts("--appdir='~/Apps")
 
 
 def _variant(*languages: str, default: bool = False, **overrides) -> dict:

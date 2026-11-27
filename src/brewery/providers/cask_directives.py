@@ -500,6 +500,8 @@ def _quit(bundle_ids: list[str]) -> list[str]:
                 log.warning(f"{bundle_id} did not quit")
                 break
 
+            time.sleep(0.5)  # Let it shut down before asking again
+
         else:
             closed.append(bundle_id)
             running.discard(bundle_id.lower())  # Listed twice: don't quit it again
@@ -649,7 +651,7 @@ def _launchctl(services: list[str]) -> None:
             time.sleep(1)
 
 
-def _braces(pattern: str) -> list[str]:
+def braces(pattern: str) -> list[str]:
     """Expand `{a,b}` alternatives.
 
     Args:
@@ -663,7 +665,7 @@ def _braces(pattern: str) -> list[str]:
 
     head, tail = pattern[: m.start()], pattern[m.end() :]
 
-    return [p for alt in m[1].split(",") for p in _braces(head + alt + tail)]
+    return [p for alt in m[1].split(",") for p in braces(head + alt + tail)]
 
 
 def _resolve(action: str, paths: Iterable[str]) -> Iterator[list[Path]]:
@@ -686,7 +688,7 @@ def _resolve(action: str, paths: Iterable[str]) -> Iterator[list[Path]]:
             continue
 
         matches = [
-            Path(m) for p in _braces(path) for m in sorted(glob.glob(p, recursive=True))
+            Path(m) for p in braces(path) for m in sorted(glob.glob(p, recursive=True))
         ]
 
         kept: list[Path] = []
@@ -721,7 +723,7 @@ def _delete(paths: list[str]) -> None:
             except OSError as exc:
                 raise CellarError(f"can't delete {path}: {exc}", path=path) from exc
 
-    _sudo_each(denied, "/bin/rm", "-r", "-f")
+    sudo_each(denied, "/bin/rm", "-r", "-f")
 
 
 def _pkgutil(patterns: list[str]) -> None:
@@ -787,7 +789,7 @@ def _remove_pkg(pkg_id: str) -> None:
         ):
             files.append(path)
 
-    _sudo_each(files, "/bin/rm", "-f")
+    sudo_each(files, "/bin/rm", "-f")
 
     # Deepest first, so a dir's emptied subdirs are gone before it is tried
     dirs.sort(key=lambda d: len(d.parts), reverse=True)
@@ -808,12 +810,12 @@ def _remove_pkg(pkg_id: str) -> None:
         except OSError:
             continue
 
-    _sudo_each(junk, "/bin/rm", "-f")
-    _sudo_each(dirs, "/bin/rmdir", check=False)  # A dir still holding files stays
+    sudo_each(junk, "/bin/rm", "-f")
+    sudo_each(dirs, "/bin/rmdir", check=False)  # A dir still holding files stays
     run_sudo("/usr/sbin/pkgutil", "--forget", pkg_id)
 
 
-def _sudo_each(paths: Sequence[Path], *cmd: str, check: bool = True) -> None:
+def sudo_each(paths: Sequence[Path], *cmd: str, check: bool = True) -> None:
     """Run `cmd` as root over the paths, fed to xargs so any number fits.
 
     Args:

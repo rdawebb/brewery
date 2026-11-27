@@ -16,6 +16,7 @@ from urllib.parse import quote
 
 from brewery import __version__
 from brewery.core.catalog import CaskRow
+from brewery.core.errors import SettingsError
 from brewery.core.host import Platform
 from brewery.providers import cask_steps
 
@@ -119,11 +120,23 @@ def read_cask_opts(raw: str) -> CaskOpts:
 
     Returns:
         The parsed options; unknown switches are ignored.
+
+    Raises:
+        SettingsError: If the value isn't valid shell words, such as an unclosed quote.
     """
     dirs: dict[str, Path] = {}
     binaries = True
     languages: tuple[str, ...] = ()
-    args = shlex.split(raw)
+    try:
+        args = shlex.split(raw)
+
+    except ValueError as exc:
+        raise SettingsError(
+            f"HOMEBREW_CASK_OPTS can't be parsed: {exc}",
+            key="HOMEBREW_CASK_OPTS",
+            value=raw,
+        ) from exc
+
     for arg in args:
         flag, eq, value = arg.partition("=")
         key = flag.removeprefix("--").replace("-", "_")

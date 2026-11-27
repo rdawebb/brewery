@@ -316,6 +316,18 @@ def _tokens(version: str) -> tuple[_Token, ...]:
     )
 
 
+def version_parts(version: str) -> tuple[str, ...]:
+    """A version's tokens as strings, numbers without leading zeros.
+
+    Args:
+        version: The version string.
+
+    Returns:
+        The tokens' values, in order.
+    """
+    return tuple(str(t.value) for t in _tokens(version))
+
+
 def compare_versions(left: str, right: str) -> int:
     """Compare two upstream version strings the way Homebrew compares them.
 
