@@ -75,7 +75,8 @@ async def install_casks(
     env: BreweryENV | None = None,
     progress: ProgressPort | None = None,
     formulae: list[str] | None = None,
-) -> tuple[Notes, Notes]:
+    caveats: Notes | None = None,
+) -> Notes:
     """Install every named cask, natively where possible, the rest through brew.
 
     Casks already installed are skipped. A cask's `depends_on cask` is installed
@@ -95,18 +96,19 @@ async def install_casks(
         progress: Optional progress sink.
         formulae: Formulae requested with the casks, installed in the same run as
             the casks' formula dependencies.
+        caveats: The list to add a (token, text) caveat to, per cask leaving a step
+            to the user; filled even when the run fails.
 
     Returns:
         A (token, reason) note per cask left alone because it was locked, or
-        that brew failed to install, and per formula that didn't install; and a
-        (token, text) caveat per cask leaving a step to the user.
+        that brew failed to install, and per formula that didn't install.
     """
     env = env or get_brewery_env()
     progress = progress or NULL_PROGRESS
     opts = read_cask_opts(os.environ.get("HOMEBREW_CASK_OPTS", ""))
     plat = current_platform()
     notes: Notes = []
-    caveats: Notes = []
+    caveats = [] if caveats is None else caveats
     installed = {p.name for p in repo.cache_mgr.installed_packages(PackageKind.CASK)}
     requested = [n for n in dict.fromkeys(names) if n not in installed]
 
@@ -136,7 +138,7 @@ async def install_casks(
     if any(needs_sudo(rows[t].artifacts) for t in order):
         await validate()  # Before any display, rather than mid-way through it
 
-    # Casks needing a formula, directly or through a cask dependency, go last
+    # Casks needing a formula, directly or through a cask dependency, wait for it
     needs_formulae = {
         t
         for t in rows
@@ -145,9 +147,8 @@ async def install_casks(
             for d in {t, *_cask_deps(t, rows)} & rows.keys()
         )
     }
-    native = sorted(
-        (t for t in order if not reasons[t]), key=lambda t: t in needs_formulae
-    )
+
+    native = [t for t in order if not reasons[t]]
     formula_deps = sorted({f for t in native for f in _depends(rows[t], "formula")})
     done = set(installed)
 
@@ -174,34 +175,56 @@ async def install_casks(
         ]
         fetches.extend(downloads)
 
-        # In dependency order, each as soon as its download finishes
-        for token, fetch in zip(native, downloads, strict=True):
+        installing = asyncio.Lock()  # One native install at a time, as upgrades
+
+        async def install(
+            token: str, fetch: asyncio.Task, deps: list[asyncio.Task]
+        ) -> None:
+            """Install one native cask once it's downloaded and `deps` have settled."""
             row = rows[token]
+            if deps:
+                await asyncio.wait(deps)
+
+            failed = await formulae_failed(token)
+            download = await fetch
+
             try:
-                reasons[token] = _blocked(row, done, await formulae_failed(token)) or (
-                    await _install_one(
-                        row,
-                        await fetch,
-                        env,
-                        opts,
-                        progress,
-                        caveats,
-                        on_request=token in requested,
-                    )
-                )
+                if not (reason := _blocked(row, done, failed)):
+                    async with installing:
+                        reason = await _install_one(
+                            row,
+                            download,
+                            env,
+                            opts,
+                            progress,
+                            caveats,
+                            on_request=token in requested,
+                        )
 
             except OperationInProgressError as exc:
                 _note_locked(token, exc, notes, progress)
-                continue
+                return
 
-            if not reasons[token]:
+            reasons[token] = reason
+            if not reason:
                 done.add(token)
                 progress.finish(token, Outcome.NATIVE.value)
 
             # Left to the brew call of the cask that depends on it
             elif token not in requested:
-                log.info(event="cask_to_brew", cask=token, reason=reasons[token])
+                log.info(event="cask_to_brew", cask=token, reason=reason)
                 progress.finish(token, Outcome.FAILED.value)
+
+        # Each as soon as its download lands, after the casks it depends on
+        settled: dict[str, asyncio.Task] = {}
+        async with asyncio.TaskGroup() as tg:
+            for token, fetch in zip(native, downloads, strict=True):
+                # `order` lists dependencies first, so one not listed yet is a
+                # cycle, which `_blocked` reports rather than waiting forever
+                deps = [
+                    settled[d] for d in _depends(rows[token], "cask") if d in settled
+                ]
+                settled[token] = tg.create_task(install(token, fetch, deps))
 
         held = {t for t, _ in notes}
         sem = asyncio.Semaphore(_BREW_CONCURRENCY)
@@ -241,7 +264,7 @@ async def install_casks(
 
         notes.extend((await formula_run).items())
 
-    return notes, caveats
+    return notes
 
 
 @asynccontextmanager
@@ -361,8 +384,11 @@ def _note_locked(
     progress.finish(token, Outcome.FAILED.value)
 
 
-def _locked(token: str, env: BreweryENV, change: Callable[[], Any]) -> Any:
-    """Make one cask's Caskroom and artifact changes under its lock.
+async def _locked(token: str, env: BreweryENV, change: Callable[[], Any]) -> Any:
+    """Make one cask's Caskroom and artifact changes under its lock, in a thread.
+
+    A cancellation waits for the thread, which can't be interrupted, so a run
+    doesn't end with a cask still being changed behind it.
 
     Args:
         token: The cask token.
@@ -375,8 +401,18 @@ def _locked(token: str, env: BreweryENV, change: Callable[[], Any]) -> Any:
     Raises:
         OperationInProgressError: Another brewery or `brew cleanup` holds the lock.
     """
-    with cask_lock(token, prefix=env.prefix):
-        return change()
+
+    def run() -> Any:
+        with cask_lock(token, prefix=env.prefix):
+            return change()
+
+    work = asyncio.ensure_future(asyncio.to_thread(run))
+    try:
+        return await asyncio.shield(work)
+
+    except asyncio.CancelledError:
+        await asyncio.wait([work])
+        raise
 
 
 def _depends(row: CaskRow, kind: str) -> list[str]:
@@ -538,17 +574,20 @@ async def _native(
         OperationInProgressError: Another process has locked the cask.
     """
     progress.update(token, "install")
+
+    def change_and_note() -> None:
+        # In the thread, so a cancelled run still keeps the note of a change it made
+        if note := change():
+            caveats.append((token, note))
+
     try:
-        note = await asyncio.to_thread(_locked, token, env, change)
+        await _locked(token, env, change_and_note)
 
     except OperationInProgressError:
         raise
 
     except (BrewError, OSError) as exc:
         return str(exc)
-
-    if note:
-        caveats.append((token, note))
 
     return ""
 
@@ -569,6 +608,7 @@ def _stage_and_install(
         `install_artifacts`' note for the user.
     """
     staged = stage(row, download, env.caskroom, on_request=on_request)
+
     try:
         return install_artifacts(
             row,
@@ -627,8 +667,7 @@ async def uninstall_casks(
 
         if not reason:
             try:
-                await asyncio.to_thread(
-                    _locked,
+                await _locked(
                     token,
                     env,
                     functools.partial(uninstall_cask, token, env, zap=zap, force=force),
@@ -729,7 +768,8 @@ async def upgrade_casks(
     env: BreweryENV | None = None,
     progress: ProgressPort | None = None,
     formula_run: asyncio.Future | None = None,
-) -> tuple[Notes, Notes]:
+    caveats: Notes | None = None,
+) -> Notes:
     """Upgrade every named cask, natively where possible, the rest through brew.
 
     The downloads overlap and the upgrades run one at a time, in the order the
@@ -744,18 +784,19 @@ async def upgrade_casks(
         progress: Optional progress sink.
         formula_run: A formula upgrade running alongside, which a cask brew
             upgrades waits for if it depends on a formula.
+        caveats: The list to add a (token, text) caveat to, per cask leaving a step
+            to the user; filled even when the run fails.
 
     Returns:
         A (token, reason) note per cask left alone because it was locked, or
-        that brew failed to upgrade; and a (token, text) caveat per cask leaving
-        a step to the user.
+        that brew failed to upgrade.
     """
     env = env or get_brewery_env()
     progress = progress or NULL_PROGRESS
     opts = read_cask_opts(os.environ.get("HOMEBREW_CASK_OPTS", ""))
     plat = current_platform()
     notes: Notes = []
-    caveats: Notes = []
+    caveats = [] if caveats is None else caveats
     installed = repo.cache_mgr.installed_packages()
     casks = {p.name for p in installed if p.kind == PackageKind.CASK}
     formulae = {p.name for p in installed if p.kind == PackageKind.FORMULA}
@@ -823,6 +864,7 @@ async def upgrade_casks(
                     binaries=opts.binaries,
                     languages=opts.languages,
                 )
+
                 try:
                     reasons[token] = await _native(
                         token, upgrade, env, progress, caveats
@@ -858,4 +900,4 @@ async def upgrade_casks(
                 if reason:
                     tg.create_task(via_brew(token, reason))
 
-    return notes, caveats
+    return notes

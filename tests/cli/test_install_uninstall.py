@@ -39,19 +39,20 @@ def installs(monkeypatch):
         monkeypatch: The pytest monkeypatch fixture.
 
     Returns:
-        A callable taking the (installed, failures, caveats) result to report, and
-        returning the list that accumulates one call record per invocation.
+        A callable taking the (installed, failures) result and caveats to report,
+        and returning the list that accumulates one call record per invocation.
     """
 
     def _arrange(installed=(), failures=(), caveats=(), raises=None):
         calls: list[dict] = []
 
-        async def _install(repo, names, kind, *, progress=None):
+        async def _install(repo, names, kind, *, progress=None, **kwargs):
             calls.append({"names": names, "kind": kind, "progress": progress})
+            kwargs["caveats"].extend(caveats)  # Kept even by a run that then fails
             if raises is not None:
                 raise raises
 
-            return list(installed), list(failures), list(caveats)
+            return list(installed), list(failures)
 
         monkeypatch.setattr(install_mod, "install_packages", _install)
 
@@ -124,6 +125,15 @@ class TestInstall:
         assert result.exit_code == 0
         summary = result.output.index("Installed 1 package(s)")
         assert result.output.index("foo open [/tmp/Foo.app]") > summary
+
+    def test_a_failed_run_still_prints_the_caveats_it_kept(self, run, installs) -> None:
+        """Test that a cask installed before a run fails still shows its caveat."""
+        installs(raises=RuntimeError("bug"), caveats=[("foo", "open /tmp/Foo.app")])
+
+        result = run(["install", "foo", "--yes"])
+
+        assert result.exit_code != 0
+        assert "foo open /tmp/Foo.app" in result.output
 
     def test_declining_the_prompt_installs_nothing(self, run, installs) -> None:
         """Test that answering no exits 0 without reaching the service."""

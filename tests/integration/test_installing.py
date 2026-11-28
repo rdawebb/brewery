@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import sys
+import threading
 
 import pytest
 from _mocks import _RecordingProgress
@@ -31,7 +32,7 @@ class TestInstall:
         self, repo, mock_brew
     ) -> None:
         """Test that a formula with no bottle here fails instead of reaching brew."""
-        _installed, failures, _caveats = await install_packages(
+        _installed, failures = await install_packages(
             repo, ["ripgrep"], kind=PackageKind.FORMULA
         )
         assert _provider_calls(mock_brew, "install") == []
@@ -45,7 +46,7 @@ class TestInstall:
         yazi already exists in the mock Cellar, so after the (mocked) install and
         re-scan it is found and returned.
         """
-        installed, failures, _caveats = await install_packages(
+        installed, failures = await install_packages(
             repo, ["yazi"], kind=PackageKind.FORMULA
         )
         assert [p.name for p in installed] == ["yazi"]
@@ -57,7 +58,7 @@ class TestInstall:
         The mock does not create the keg, so a never-installed name re-scans as
         missing and is reported as a failure rather than a success.
         """
-        installed, failures, _caveats = await install_packages(
+        installed, failures = await install_packages(
             repo, ["ripgrep"], kind=PackageKind.FORMULA
         )
         assert installed == []
@@ -76,7 +77,7 @@ class TestInstall:
         (keg / "INSTALL_RECEIPT.json").write_bytes(
             orjson.dumps({"source": {"tap": "homebrew/core"}})
         )
-        installed, failures, _caveats = await install_packages(
+        installed, failures = await install_packages(
             repo, ["ripgrep"], kind=PackageKind.FORMULA
         )
         assert [p.name for p in installed] == ["ripgrep"]
@@ -89,7 +90,7 @@ class TestInstall:
         canonical package as installed.
         """
         _add_alias(repo.catalog, "yazi-cli", "yazi")
-        installed, failures, _caveats = await install_packages(
+        installed, failures = await install_packages(
             repo, ["yazi-cli"], kind=PackageKind.FORMULA
         )
         assert [p.name for p in installed] == ["yazi"]
@@ -135,7 +136,7 @@ class TestInstallCasksViaBrew:
         )
         progress = _RecordingProgress()
 
-        _, failures, _caveats = await install_packages(
+        _, failures = await install_packages(
             repo, ["bad", "good"], kind=PackageKind.CASK, progress=progress
         )
 
@@ -157,7 +158,7 @@ class TestInstallCasksViaBrew:
 
         monkeypatch.setattr(brew_mod, "run_brew", run_brew)
 
-        _, failures, _caveats = await install_packages(
+        _, failures = await install_packages(
             repo, ["slow", "good"], kind=PackageKind.CASK
         )
 
@@ -249,7 +250,7 @@ class TestInstallCasks:
         """Test that a simple cask is installed natively, honouring --appdir."""
         casks({"foo": (None, [{"app": ["Foo.app"]}])})
 
-        installed, failures, _caveats = await install_packages(
+        installed, failures = await install_packages(
             repo, ["foo"], kind=PackageKind.CASK
         )
 
@@ -268,8 +269,9 @@ class TestInstallCasks:
         """Test that a native `installer manual` tells the user how to finish."""
         casks({"foo": (None, [{"installer": [{"manual": "Foo.app"}]}])})
 
-        installed, _, caveats = await install_packages(
-            repo, ["foo"], kind=PackageKind.CASK
+        caveats: list[tuple[str, str]] = []
+        installed, _ = await install_packages(
+            repo, ["foo"], kind=PackageKind.CASK, caveats=caveats
         )
 
         assert [p.name for p in installed] == ["foo"]
@@ -285,7 +287,7 @@ class TestInstallCasks:
         """Test that with no kind, a formula goes to the pipeline and a cask to casks."""
         casks({"foo": (None, [{"app": ["Foo.app"]}])})
 
-        installed, failures, _caveats = await install_packages(repo, ["yazi", "foo"])
+        installed, failures = await install_packages(repo, ["yazi", "foo"])
 
         assert (sorted(p.name for p in installed), failures) == (["foo", "yazi"], [])
         assert _provider_calls(mock_brew, "install") == []
@@ -310,7 +312,7 @@ class TestInstallCasks:
         monkeypatch.setattr(cask_service, "stage", recording_stage)
         monkeypatch.setattr(cask_service, "run_install", held_run_install)
 
-        installed, failures, _caveats = await install_packages(repo, ["yazi", "foo"])
+        installed, failures = await install_packages(repo, ["yazi", "foo"])
 
         assert (sorted(p.name for p in installed), failures) == (["foo", "yazi"], [])
 
@@ -347,6 +349,79 @@ class TestInstallCasks:
             ("stage", "foo"),
             ("stage", "bar"),
         ]
+
+    async def test_slow_download_doesnt_hold_up_the_next_install(
+        self, repo, mock_brew, casks, monkeypatch
+    ) -> None:
+        """Test that a cask installs as its download lands, not behind an earlier one."""
+        casks(
+            {
+                "foo": (None, [{"app": ["Foo.app"]}]),
+                "bar": (None, [{"binary": ["Foo.app/Contents/MacOS/foo"]}]),
+            }
+        )
+        bar_staged, loop = asyncio.Event(), asyncio.get_running_loop()
+        fetch, stage = cask_service.Downloader.fetch, cask_service.stage
+
+        async def slow_foo_fetch(self, ref, **kwargs):
+            if ref.name == "foo":
+                async with asyncio.timeout(5):  # In order: bar waits behind foo
+                    await bar_staged.wait()
+            return await fetch(self, ref, **kwargs)
+
+        def recording_stage(row, *args, **kwargs):
+            if row.token == "bar":
+                loop.call_soon_threadsafe(bar_staged.set)  # A worker thread
+            return stage(row, *args, **kwargs)
+
+        monkeypatch.setattr(cask_service.Downloader, "fetch", slow_foo_fetch)
+        monkeypatch.setattr(cask_service, "stage", recording_stage)
+
+        installed, failures = await install_packages(
+            repo, ["foo", "bar"], kind=PackageKind.CASK
+        )
+
+        assert (sorted(p.name for p in installed), failures) == (["bar", "foo"], [])
+        assert _provider_calls(mock_brew, "install") == []
+
+    async def test_a_sibling_bug_waits_for_the_install_in_its_thread(
+        self, repo, mock_env, casks, monkeypatch
+    ) -> None:
+        """Test that a bug cancelling the run lets the cask being staged land, noted."""
+        casks(
+            {
+                "foo": (None, [{"installer": [{"manual": "Foo.app"}]}]),
+                "bar": (None, [{"binary": ["Foo.app/Contents/MacOS/foo"]}]),
+            }
+        )
+        caveats: list[tuple[str, str]] = []
+        foo_staging, release = asyncio.Event(), threading.Event()
+        loop = asyncio.get_running_loop()
+        fetch, stage = cask_service.Downloader.fetch, cask_service.stage
+
+        async def buggy_bar_fetch(self, ref, **kwargs):
+            if ref.name == "bar":
+                async with asyncio.timeout(5):
+                    await foo_staging.wait()
+                loop.call_later(0.2, release.set)  # Long after the bug cancels foo
+                raise RuntimeError("bug")
+            return await fetch(self, ref, **kwargs)
+
+        def held_stage(row, *args, **kwargs):
+            loop.call_soon_threadsafe(foo_staging.set)  # A worker thread
+            release.wait(5)
+            return stage(row, *args, **kwargs)
+
+        monkeypatch.setattr(cask_service.Downloader, "fetch", buggy_bar_fetch)
+        monkeypatch.setattr(cask_service, "stage", held_stage)
+
+        with pytest.RaisesGroup(pytest.RaisesExc(RuntimeError, match="bug")):
+            await install_packages(
+                repo, ["foo", "bar"], kind=PackageKind.CASK, caveats=caveats
+            )
+
+        assert (mock_env.caskroom / "foo").exists()
+        assert [t for t, _ in caveats] == ["foo"]  # Its note outlives the cancel
 
     @pytest.mark.parametrize(
         ("url", "name"),
@@ -532,7 +607,7 @@ class TestInstallCasks:
         )
 
         async with asyncio.timeout(5):
-            _, failures, _caveats = await install_packages(
+            _, failures = await install_packages(
                 repo, ["bar", "baz", "qux"], kind=PackageKind.CASK
             )
 
@@ -570,9 +645,7 @@ class TestInstallCasks:
         fd = os.open(path, os.O_RDWR | os.O_CREAT)
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
-            _, failures, _caveats = await install_packages(
-                repo, ["foo"], kind=PackageKind.CASK
-            )
+            _, failures = await install_packages(repo, ["foo"], kind=PackageKind.CASK)
 
         finally:
             os.close(fd)
@@ -596,9 +669,7 @@ class TestInstallCasks:
             }
         )
 
-        installed, _, _caveats = await install_packages(
-            repo, ["baz"], kind=PackageKind.CASK
-        )
+        installed, _ = await install_packages(repo, ["baz"], kind=PackageKind.CASK)
 
         assert [p.name for p in installed] == ["baz"]
         assert _provider_calls(mock_brew, "install") == []

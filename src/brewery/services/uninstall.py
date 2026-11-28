@@ -74,6 +74,7 @@ async def uninstall_packages(
         await run_uninstall(formula_names, formula=formula, env=env)
 
     stopped: dict[str, str] = {}
+
     if cask_names:
         stopped = dict(
             await uninstall_casks(
@@ -160,6 +161,7 @@ def _drop_pinned(
         The names free to remove, and a (name, reason) note for each one held back.
     """
     notes: Notes = [(n, f"pinned, unpin with `{unpin}`") for n in names if n in pinned]
+
     return [n for n in names if n not in pinned], notes
 
 

@@ -26,7 +26,7 @@ from brewery.cli.output import (
 )
 from brewery.cli.progress import make_reporter
 from brewery.core.errors import PinnedPackageWarning
-from brewery.core.models import Package, PackageKind
+from brewery.core.models import Notes, Package, PackageKind
 from brewery.services.upgrade import upgrade_packages
 
 
@@ -89,12 +89,23 @@ def upgrade(
                 return
 
         reporter = make_reporter(console)
-        with sudo_prompts(reporter):
-            upgraded, current, advisories, failures, caveats = run_async(
-                coro=upgrade_packages(
-                    repo, names, kind, greedy=greedy, progress=reporter
+        caveats: Notes = []
+        try:
+            with sudo_prompts(reporter):
+                upgraded, current, advisories, failures = run_async(
+                    coro=upgrade_packages(
+                        repo,
+                        names,
+                        kind,
+                        greedy=greedy,
+                        progress=reporter,
+                        caveats=caveats,
+                    )
                 )
-            )
+
+        except BaseException:
+            print_caveats(caveats)  # A failed run's upgraded casks still need them
+            raise
 
         if not upgraded and not advisories and not failures and not current:
             console.print("✓ All packages are up to date!\n", style="bold green")

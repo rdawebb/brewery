@@ -19,7 +19,7 @@ from brewery.services.cask import upgrade_casks
 if TYPE_CHECKING:
     from brewery.providers.orchestrator import InstallReport, ProgressPort
 
-UpgradeOutcome = tuple[list[Package], list[Package], Notes, Notes, Notes]
+UpgradeOutcome = tuple[list[Package], list[Package], Notes, Notes]
 
 
 def _select_outdated(outdated: list[Package]) -> tuple[list[Package], Notes]:
@@ -244,8 +244,9 @@ async def upgrade_packages(
     formula: PackageBackend = brew.formula_backend,
     cask: PackageBackend = brew.cask_backend,
     progress: ProgressPort | None = None,
+    caveats: Notes | None = None,
 ) -> UpgradeOutcome:
-    """Upgrade packages and report upgraded, up-to-date, advisories, failures, caveats.
+    """Upgrade packages and report upgraded, up-to-date, advisories, failures.
 
     Naming a formula that is already current reports it as up-to-date rather
     than reinstalling it.
@@ -259,10 +260,12 @@ async def upgrade_packages(
         formula: Formula backend for the per-formula brew fallback.
         cask: Cask backend for the casks brewery can't upgrade.
         progress: Optional progress sink for the native pipeline.
+        caveats: The list to add (name, text) caveats to, steps left to the user;
+            filled even when the run fails.
 
     Returns:
         Tuple of (upgraded packages, already up-to-date packages, (name, reason)
-        advisories, (name, reason) failures, (name, text) caveats).
+        advisories, (name, reason) failures).
 
     Raises:
         BrewCommandError: Propagated from provider.
@@ -297,16 +300,18 @@ async def upgrade_packages(
         )
 
     cask_failures: Notes = []
-    caveats: Notes = []
+    caveats = [] if caveats is None else caveats
+
     try:
         if cask_names:
-            cask_failures, caveats = await upgrade_casks(
+            cask_failures = await upgrade_casks(
                 cask_names,
                 repo=repo,
                 backend=cask,
                 env=env,
                 progress=progress,
                 formula_run=formula_run,
+                caveats=caveats,
             )
 
         report = await formula_run if formula_run else None
@@ -333,4 +338,4 @@ async def upgrade_packages(
     ]
     upgraded, current = _classify_outcome(touched, pre_versions, post)
 
-    return upgraded, current, advisories, failures + pipeline_failures, caveats
+    return upgraded, current, advisories, failures + pipeline_failures

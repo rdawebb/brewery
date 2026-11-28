@@ -31,6 +31,7 @@ def pin_packages(
 
     pinned: list[str] = []
     advisories: Notes = []
+
     for pkg in pkgs:
         if not pkg.path:
             failures.append((pkg.name, "no active keg"))

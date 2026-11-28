@@ -108,6 +108,7 @@ async def cleanup_packages(
 
     installed = repo.cache_mgr.installed_packages(kind=PackageKind.FORMULA)
     active = {Path(p.path) for p in installed if p.path}
+
     # Reuse the already-attached size cache so it never re-measures the active cellar
     active_sizes = {
         Path(p.path): p.size_kb for p in installed if p.path and p.size_kb is not None
@@ -130,6 +131,7 @@ async def cleanup_packages(
 
     removed: list[str] = []
     failures: Notes = []
+
     # Flattened in submission order, so the summary stays deterministic
     for done, failed in results:
         removed += done

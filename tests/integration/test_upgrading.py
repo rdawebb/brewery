@@ -37,14 +37,12 @@ class TestUpgrade:
 
         act is the only outdated package, so it is the only one the pipeline reaches.
         """
-        _upgraded, _current, _advisories, failures, _caveats = await upgrade_packages(
-            repo
-        )
+        _upgraded, _current, _advisories, failures = await upgrade_packages(repo)
         assert [n for n, _ in failures] == ["act"]  # yazi is current, not targeted
 
     async def test_upgrade_named_package(self, repo) -> None:
         """Test that a named upgrade routes that package to the pipeline."""
-        _upgraded, _current, _advisories, failures, _caveats = await upgrade_packages(
+        _upgraded, _current, _advisories, failures = await upgrade_packages(
             repo, ["act"]
         )
         assert [n for n, _ in failures] == ["act"]
@@ -56,7 +54,7 @@ class TestUpgrade:
 
         yazi is up to date, so it must never reach the pipeline or the provider.
         """
-        upgraded, current, _advisories, failures, _caveats = await upgrade_packages(
+        upgraded, current, _advisories, failures = await upgrade_packages(
             repo, ["yazi"]
         )
         flat = [arg for call in _provider_calls(mock_brew, "upgrade") for arg in call]
@@ -71,7 +69,7 @@ class TestUpgrade:
         The two are reported separately: yazi never reached the pipeline and is
         current, while act did and failed there
         """
-        _upgraded, current, _advisories, failures, _caveats = await upgrade_packages(
+        _upgraded, current, _advisories, failures = await upgrade_packages(
             repo, ["act", "yazi"]
         )
         assert [p.name for p in current] == ["yazi"]
@@ -79,7 +77,7 @@ class TestUpgrade:
 
     async def test_upgrade_unknown_name_is_failure(self, repo) -> None:
         """Test that upgrading a non-installed name is reported as not found."""
-        upgraded, _current, _advisories, failures, _caveats = await upgrade_packages(
+        upgraded, _current, _advisories, failures = await upgrade_packages(
             repo, ["ripgrep"]
         )
         assert upgraded == []
@@ -94,9 +92,7 @@ class TestUpgrade:
         """
         assert pin_packages(repo, ["act"])[0] == ["act"]
 
-        upgraded, _current, advisories, failures, _caveats = await upgrade_packages(
-            repo
-        )
+        upgraded, _current, advisories, failures = await upgrade_packages(repo)
         assert ("act", "pinned - not upgraded") in advisories
         assert failures == []
         assert all(p.name != "act" for p in upgraded)
@@ -110,7 +106,7 @@ class TestUpgrade:
         """
         assert pin_packages(repo, ["act"])[0] == ["act"]
 
-        upgraded, _current, _advisories, failures, _caveats = await upgrade_packages(
+        upgraded, _current, _advisories, failures = await upgrade_packages(
             repo, ["act"]
         )
         assert ("act", "pinned - skipped") in failures
@@ -124,9 +120,7 @@ class TestUpgrade:
         pin_packages(repo, ["act"])
         assert unpin_packages(repo, ["act"])[0] == ["act"]
 
-        upgraded, _current, advisories, _failures, _caveats = await upgrade_packages(
-            repo
-        )
+        upgraded, _current, advisories, _failures = await upgrade_packages(repo)
         assert ("act", "pinned - not upgraded") not in advisories
         assert all(p.name != "act" for p in upgraded)
 
@@ -220,7 +214,7 @@ class TestUpgrade:
         monkeypatch.setattr(brew_mod, "run_brew", run_brew)
         progress = _RecordingProgress()
 
-        _, _, _, failures, _caveats = await upgrade_packages(
+        _, _, _, failures = await upgrade_packages(
             repo, ["bad", "good"], progress=progress
         )
 
@@ -352,7 +346,7 @@ class TestUpgrade:
         monkeypatch.setattr("brewery.providers.brew.run_brew", no_brew)
 
         repo = Repository(catalog=empty_catalog)
-        upgraded, current, _advisories, failures, _caveats = await upgrade_packages(
+        upgraded, current, _advisories, failures = await upgrade_packages(
             repo, ["wget"]
         )
 
@@ -449,7 +443,7 @@ class TestUpgradeCasks:
         inode = app.stat().st_ino
         foo("2.0", zip_app(tmp_path, mock_env.bottle_cache, "v2"))
 
-        upgraded, _current, _advisories, failures, _caveats = await upgrade_packages(
+        upgraded, _current, _advisories, failures = await upgrade_packages(
             repo, ["foo"]
         )
 
@@ -559,9 +553,7 @@ class TestUpgradeCasks:
         foo("2.0", zip_app(tmp_path, mock_env.bottle_cache, "v2"))
 
         with cask_lock("foo", prefix=mock_env.prefix):
-            upgraded, current, _, failures, _caveats = await upgrade_packages(
-                repo, ["foo"]
-            )
+            upgraded, current, _, failures = await upgrade_packages(repo, ["foo"])
 
         assert (upgraded, current) == ([], [])
         assert [(n, "locked" in why) for n, why in failures] == [("foo", True)]

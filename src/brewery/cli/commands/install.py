@@ -25,7 +25,7 @@ from brewery.cli.output import (
 )
 from brewery.cli.progress import make_reporter
 from brewery.core.errors import AlreadyInstalledWarning
-from brewery.core.models import PackageKind
+from brewery.core.models import Notes, PackageKind
 from brewery.services.install import install_packages
 
 
@@ -60,10 +60,18 @@ def install(
 
     with _repository() as repo:
         reporter = make_reporter(console)
-        with sudo_prompts(reporter):
-            installed, failures, caveats = run_async(
-                coro=install_packages(repo, names, target, progress=reporter)
-            )
+        caveats: Notes = []
+        try:
+            with sudo_prompts(reporter):
+                installed, failures = run_async(
+                    coro=install_packages(
+                        repo, names, target, progress=reporter, caveats=caveats
+                    )
+                )
+
+        except BaseException:
+            print_caveats(caveats)  # A failed run's installed casks still need them
+            raise
 
         print_result(
             f"✓ Installed {len(installed)} package(s)\n",

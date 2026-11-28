@@ -28,7 +28,8 @@ async def install_packages(
     formula: PackageBackend = brew.formula_backend,
     cask: PackageBackend = brew.cask_backend,
     progress: ProgressPort | None = None,
-) -> tuple[list[Package], Notes, Notes]:
+    caveats: Notes | None = None,
+) -> tuple[list[Package], Notes]:
     """Install packages and report what the re-scan found.
 
     Success is decided by the filesystem, not by the backend's exit status: a
@@ -44,10 +45,11 @@ async def install_packages(
         formula: Formula backend for the per-formula brew fallback.
         cask: Cask backend, for the casks brewery can't install natively.
         progress: Optional progress sink for the native pipeline.
+        caveats: The list to add (name, text) caveats to, steps left to the user;
+            filled even when the run fails.
 
     Returns:
-        Tuple of (installed packages, (name, reason) failures, (name, text)
-        caveats: steps left to the user).
+        Tuple of (installed packages, (name, reason) failures).
 
     Raises:
         BrewCommandError: Propagated from provider.
@@ -62,10 +64,11 @@ async def install_packages(
         ]
 
     formulae = [n for n in names if n not in casks]
-    caveats: Notes = []
+    caveats = [] if caveats is None else caveats
+
     if casks:
         # Any formulae run alongside, in the casks' display
-        cask_notes, caveats = await install_casks(
+        cask_notes = await install_casks(
             casks,
             repo=repo,
             backend=cask,
@@ -73,6 +76,7 @@ async def install_packages(
             env=env,
             progress=progress,
             formulae=formulae,
+            caveats=caveats,
         )
         notes = dict(cask_notes)
 
@@ -104,4 +108,4 @@ async def install_packages(
         if keys[n] not in by_key
     ]
 
-    return installed, failures, caveats
+    return installed, failures

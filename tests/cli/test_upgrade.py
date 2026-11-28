@@ -42,7 +42,7 @@ def upgrades(monkeypatch):
     def _arrange(upgraded=(), current=(), advisories=(), failures=(), raises=None):
         calls: list[dict] = []
 
-        async def _upgrade(repo, names, kind, *, greedy=False, progress=None):
+        async def _upgrade(repo, names, kind, *, greedy=False, progress=None, **kwargs):
             calls.append(
                 {"names": names, "kind": kind, "greedy": greedy, "progress": progress}
             )
@@ -54,7 +54,6 @@ def upgrades(monkeypatch):
                 list(current),
                 list(advisories),
                 list(failures),
-                [],
             )
 
         monkeypatch.setattr(upgrade_mod, "upgrade_packages", _upgrade)
